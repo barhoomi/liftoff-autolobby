@@ -17,7 +17,8 @@ def backup_existing_files(track_id):
     to the project backups/ folder before they are modified.
     """
     track_source_dir = os.path.join(TRACKS_DIR, track_id)
-    race_source_dir = os.path.join(RACES_DIR, track_id)
+    race_id = f"{track_id}_race"
+    race_source_dir = os.path.join(RACES_DIR, race_id)
     
     # Check if anything exists to back up
     track_exists = os.path.isdir(track_source_dir)
@@ -100,11 +101,10 @@ def generate_track_xml(track_id, track_name, environment, blueprints):
     
     return "\n".join(xml)
 
-def generate_race_xml(track_id, race_name, checkpoint_ids, spawn_point_id, laps=3):
+def generate_race_xml(track_id, race_id, race_name, checkpoint_ids, spawn_point_id, laps=3):
     """
     Generates the XML string for a .race file.
     """
-    race_id = track_id # Keep the folder/ID consistent
     managed_id = str(random.randint(100000000, 999999999))
     
     # Generate list of GUIDs for the passages
@@ -177,15 +177,16 @@ def save_track_and_race(track_id, display_name, environment, blueprints, checkpo
     """
     Compiles XMLs and writes them to Liftoff's Tracks and Races directories.
     """
+    race_id = f"{track_id}_race"
     track_xml_content = generate_track_xml(track_id, display_name, environment, blueprints)
-    race_xml_content = generate_race_xml(track_id, f"{display_name} Race", checkpoint_ids, spawn_point_id, laps)
+    race_xml_content = generate_race_xml(track_id, race_id, f"{display_name} Race", checkpoint_ids, spawn_point_id, laps)
     
     # Create backup snapshot of existing files if they exist
     backup_existing_files(track_id)
     
     # Determine target directories
     track_dest_dir = os.path.join(TRACKS_DIR, track_id)
-    race_dest_dir = os.path.join(RACES_DIR, track_id)
+    race_dest_dir = os.path.join(RACES_DIR, race_id)
     
     # Create directories if they do not exist
     os.makedirs(track_dest_dir, exist_ok=True)
@@ -195,8 +196,8 @@ def save_track_and_race(track_id, display_name, environment, blueprints, checkpo
     track_filepath_versioned = os.path.join(track_dest_dir, f"{track_id}_0001.track")
     track_filepath_unversioned = os.path.join(track_dest_dir, f"{track_id}.track")
     # For newer versions of Liftoff, races in directories often use a suffix like _0001.race
-    # Let's save it directly as {track_id}_0001.race to follow standard game serialization.
-    race_filepath = os.path.join(race_dest_dir, f"{track_id}_0001.race")
+    # Let's save it directly as {race_id}_0001.race to follow standard game serialization.
+    race_filepath = os.path.join(race_dest_dir, f"{race_id}_0001.race")
     
     # Write .track files in UTF-8 (Liftoff game files are stored as UTF-8/ASCII despite xml header)
     with open(track_filepath_versioned, "w", encoding="utf-8") as f:

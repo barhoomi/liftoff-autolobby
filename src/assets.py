@@ -3,6 +3,7 @@
 # Gates
 GATE_BOX_5X5 = "CheckpointBox5mX5m01"
 GATE_BOX_10X5 = "CheckpointBox10mX5m01"
+GATE_INFLATABLE_ARCH = "InflatableArchBrandless01"
 
 # Spawn Points
 SPAWN_SINGLE = "SpawnPointSingle01"
