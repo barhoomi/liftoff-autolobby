@@ -74,11 +74,9 @@ def generate_track_xml(track_id, track_name, environment, blueprints):
         rx, ry, rz = bp['rotation']
         item_id = bp['item_id']
         inst_id = bp['instance_id']
+        purpose = bp.get('purpose', 'Functional')
         
-        is_spawn = item_id.startswith("SpawnPoint")
-        bp_type = "TrackBlueprintSpawnpoint" if is_spawn else "TrackBlueprintFlag"
-        
-        xml.append(f'    <TrackBlueprint xsi:type="{bp_type}">')
+        xml.append('    <TrackBlueprint xsi:type="TrackBlueprintFlag">')
         xml.append(f'      <itemID>{item_id}</itemID>')
         xml.append(f'      <instanceID>{inst_id}</instanceID>')
         xml.append('      <position>')
@@ -91,9 +89,7 @@ def generate_track_xml(track_id, track_name, environment, blueprints):
         xml.append(f'        <y>{ry:.6f}</y>')
         xml.append(f'        <z>{rz:.6f}</z>')
         xml.append('      </rotation>')
-        if not is_spawn:
-            purpose = bp.get('purpose', 'Functional')
-            xml.append(f'      <purpose>{purpose}</purpose>')
+        xml.append(f'      <purpose>{purpose}</purpose>')
         xml.append('    </TrackBlueprint>')
         
     xml.append('  </blueprints>')
