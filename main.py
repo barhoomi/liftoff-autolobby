@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--laps", type=int, default=3, help="Number of laps for the race")
     parser.add_argument("--env", type=str, default="TheDrawingBoard", help="Liftoff environment name")
     parser.add_argument("--shape", type=str, default="circle", choices=["circle", "triangle", "square"], help="Shape of the track path")
+    parser.add_argument("--publish", action="store_true", help="Publish the generated track directly to Steam Workshop")
     
     args = parser.parse_args()
     
@@ -48,6 +49,11 @@ def main():
         print(f"  Track: {track_file}")
         print(f"  Race:  {race_file}")
         print("\nYou can now open Liftoff, go to Track Builder -> Custom Tracks, or directly launch the race from Single Player -> Classic Race -> Custom Races!")
+        
+        if args.publish:
+            print("\n[Publish] Starting Steam Workshop publish sequence...")
+            from src.publish import publish_track
+            publish_track(args.id)
         
     except Exception as e:
         print(f"Error during track generation: {e}", file=sys.stderr)

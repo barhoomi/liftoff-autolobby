@@ -86,3 +86,8 @@ Thumbs.db
 
 # Local Backups
 backups/
+
+# Steam Workshop publishing temp files
+workshop_config.json
+workshop_build.vdf
+workshop_staging/
