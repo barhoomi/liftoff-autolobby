@@ -17,14 +17,18 @@ def backup_existing_files(track_id):
     to the project backups/ folder before they are modified.
     """
     track_source_dir = os.path.join(TRACKS_DIR, track_id)
-    race_id = f"{track_id}_race"
-    race_source_dir = os.path.join(RACES_DIR, race_id)
     
-    # Check if anything exists to back up
+    # Check if track exists to back up
     track_exists = os.path.isdir(track_source_dir)
-    race_exists = os.path.isdir(race_source_dir)
     
-    if not (track_exists or race_exists):
+    # Scan for existing races matching the prefix
+    existing_races = []
+    if os.path.exists(RACES_DIR):
+        for item in os.listdir(RACES_DIR):
+            if item.startswith(f"{track_id}_race") and os.path.isdir(os.path.join(RACES_DIR, item)):
+                existing_races.append(item)
+                
+    if not (track_exists or existing_races):
         return None  # Nothing to back up
         
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -35,9 +39,11 @@ def backup_existing_files(track_id):
         track_backup_path = os.path.join(dest_backup_dir, "Tracks")
         shutil.copytree(track_source_dir, track_backup_path)
         
-    if race_exists:
-        race_backup_path = os.path.join(dest_backup_dir, "Races")
-        shutil.copytree(race_source_dir, race_backup_path)
+    if existing_races:
+        races_backup_path = os.path.join(dest_backup_dir, "Races")
+        os.makedirs(races_backup_path, exist_ok=True)
+        for r_id in existing_races:
+            shutil.copytree(os.path.join(RACES_DIR, r_id), os.path.join(races_backup_path, r_id))
         
     print(f"[Backup] Pre-write snapshot for '{track_id}' saved to: {dest_backup_dir}")
     return dest_backup_dir
@@ -177,13 +183,24 @@ def save_track_and_race(track_id, display_name, environment, blueprints, checkpo
     """
     Compiles XMLs and writes them to Liftoff's Tracks and Races directories.
     """
-    race_id = f"{track_id}_race"
+    timestamp = datetime.now().strftime("%d%H%M%S") # Unique short timestamp (day, hour, min, sec)
+    race_id = f"{track_id}_race_{timestamp}"
+    
     track_xml_content = generate_track_xml(track_id, display_name, environment, blueprints)
-    race_xml_content = generate_race_xml(track_id, race_id, f"{display_name} Race", checkpoint_ids, spawn_point_id, laps)
+    race_xml_content = generate_race_xml(track_id, race_id, f"{display_name} Race ({timestamp})", checkpoint_ids, spawn_point_id, laps)
     
     # Create backup snapshot of existing files if they exist
     backup_existing_files(track_id)
     
+    # Clean up old local race directories for this track to prevent directory accumulation
+    if os.path.exists(RACES_DIR):
+        for item in os.listdir(RACES_DIR):
+            if item.startswith(f"{track_id}_race") and os.path.isdir(os.path.join(RACES_DIR, item)):
+                try:
+                    shutil.rmtree(os.path.join(RACES_DIR, item))
+                except Exception:
+                    pass
+                    
     # Determine target directories
     track_dest_dir = os.path.join(TRACKS_DIR, track_id)
     race_dest_dir = os.path.join(RACES_DIR, race_id)

@@ -45,7 +45,23 @@ def stage_files(track_id):
     # Paths in Liftoff config
     liftoff_base = os.path.expanduser("~/.config/unity3d/LuGus Studios/Liftoff")
     track_dir = os.path.join(liftoff_base, "Tracks", track_id)
-    race_dir = os.path.join(liftoff_base, "Races", f"{track_id}_race")
+    
+    # Locate race dir matching track_id prefix dynamically
+    races_parent_dir = os.path.join(liftoff_base, "Races")
+    race_dir = None
+    if os.path.exists(races_parent_dir):
+        matching_dirs = [
+            os.path.join(races_parent_dir, d)
+            for d in os.listdir(races_parent_dir)
+            if d.startswith(f"{track_id}_race") and os.path.isdir(os.path.join(races_parent_dir, d))
+        ]
+        if matching_dirs:
+            # Sort by modification time to pick the newest one
+            matching_dirs.sort(key=os.path.getmtime)
+            race_dir = matching_dirs[-1]
+            
+    if not race_dir:
+        race_dir = os.path.join(races_parent_dir, f"{track_id}_race")
     
     # Locate files
     track_files = [f for f in os.listdir(track_dir) if f.endswith(".track")] if os.path.exists(track_dir) else []
@@ -62,7 +78,7 @@ def stage_files(track_id):
     for rf in race_files:
         shutil.copy2(os.path.join(race_dir, rf), os.path.join(STAGING_DIR, rf))
         
-    print(f"[Publish] Staged files for track '{track_id}' in: {STAGING_DIR}")
+    print(f"[Publish] Staged files for track '{track_id}' from {track_dir} and race from {race_dir} in: {STAGING_DIR}")
 
 def write_vdf(published_file_id):
     """
