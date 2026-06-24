@@ -1,10 +1,46 @@
 import os
 import uuid
 import random
+import shutil
+from datetime import datetime
 
 LIFTOFF_BASE_DIR = os.path.expanduser("~/.config/unity3d/LuGus Studios/Liftoff")
 TRACKS_DIR = os.path.join(LIFTOFF_BASE_DIR, "Tracks")
 RACES_DIR = os.path.join(LIFTOFF_BASE_DIR, "Races")
+
+PROJECT_WORKSPACE = "/home/dev-user/Projects/procedural-fpv"
+BACKUP_DIR = os.path.join(PROJECT_WORKSPACE, "backups")
+
+def backup_existing_files(track_id):
+    """
+    Checks if files for track_id exist in the Liftoff directories and copies them
+    to the project backups/ folder before they are modified.
+    """
+    track_source_dir = os.path.join(TRACKS_DIR, track_id)
+    race_source_dir = os.path.join(RACES_DIR, track_id)
+    
+    # Check if anything exists to back up
+    track_exists = os.path.isdir(track_source_dir)
+    race_exists = os.path.isdir(race_source_dir)
+    
+    if not (track_exists or race_exists):
+        return None  # Nothing to back up
+        
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest_backup_dir = os.path.join(BACKUP_DIR, f"{track_id}_{timestamp}")
+    os.makedirs(dest_backup_dir, exist_ok=True)
+    
+    if track_exists:
+        track_backup_path = os.path.join(dest_backup_dir, "Tracks")
+        shutil.copytree(track_source_dir, track_backup_path)
+        
+    if race_exists:
+        race_backup_path = os.path.join(dest_backup_dir, "Races")
+        shutil.copytree(race_source_dir, race_backup_path)
+        
+    print(f"[Backup] Pre-write snapshot for '{track_id}' saved to: {dest_backup_dir}")
+    return dest_backup_dir
+
 
 def generate_track_xml(track_id, track_name, environment, blueprints):
     """
@@ -140,6 +176,9 @@ def save_track_and_race(track_id, display_name, environment, blueprints, checkpo
     """
     track_xml_content = generate_track_xml(track_id, display_name, environment, blueprints)
     race_xml_content = generate_race_xml(track_id, f"{display_name} Race", checkpoint_ids, spawn_point_id, laps)
+    
+    # Create backup snapshot of existing files if they exist
+    backup_existing_files(track_id)
     
     # Determine target directories
     track_dest_dir = os.path.join(TRACKS_DIR, track_id)
