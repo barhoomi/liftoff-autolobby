@@ -50,7 +50,7 @@ def generate_track_xml(track_id, track_name, environment, blueprints):
     managed_id = str(random.randint(100000000, 999999999))
     
     xml = []
-    xml.append('<?xml version="1.0" encoding="utf-16"?>')
+    xml.append('<?xml version="1.0" encoding="utf-8"?>')
     xml.append('<Track xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">')
     xml.append('  <gameVersion>1.6.17</gameVersion>')
     xml.append('  <localID>')
