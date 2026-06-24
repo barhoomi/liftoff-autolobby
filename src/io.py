@@ -93,6 +93,8 @@ def generate_track_xml(track_id, track_name, environment, blueprints):
         xml.append('    </TrackBlueprint>')
         
     xml.append('  </blueprints>')
+    max_instance_id = max(bp['instance_id'] for bp in blueprints) if blueprints else 0
+    xml.append(f'  <lastTrackItemID>{max_instance_id}</lastTrackItemID>')
     xml.append('</Track>')
     
     return "\n".join(xml)
@@ -194,8 +196,8 @@ def save_track_and_race(track_id, display_name, environment, blueprints, checkpo
     # Let's save it directly as {track_id}_0001.race to follow standard game serialization.
     race_filepath = os.path.join(race_dest_dir, f"{track_id}_0001.race")
     
-    # Write .track file in UTF-16
-    with open(track_filepath, "w", encoding="utf-16") as f:
+    # Write .track file in UTF-8 (Liftoff game files are stored as UTF-8/ASCII despite xml header)
+    with open(track_filepath, "w", encoding="utf-8") as f:
         f.write(track_xml_content)
         
     # Write .race file in UTF-8
