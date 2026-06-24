@@ -51,7 +51,7 @@ def generate_track_xml(track_id, track_name, environment, blueprints):
     
     xml = []
     xml.append('<?xml version="1.0" encoding="utf-16"?>')
-    xml.append('<Track xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">')
+    xml.append('<Track xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">')
     xml.append('  <gameVersion>1.6.17</gameVersion>')
     xml.append('  <localID>')
     xml.append(f'    <str>{track_id}</str>')
@@ -74,9 +74,11 @@ def generate_track_xml(track_id, track_name, environment, blueprints):
         rx, ry, rz = bp['rotation']
         item_id = bp['item_id']
         inst_id = bp['instance_id']
-        purpose = bp.get('purpose', 'Functional')
         
-        xml.append('    <TrackBlueprint xsi:type="TrackBlueprintFlag">')
+        is_spawn = item_id.startswith("SpawnPoint")
+        bp_type = "TrackBlueprintSpawnpoint" if is_spawn else "TrackBlueprintFlag"
+        
+        xml.append(f'    <TrackBlueprint xsi:type="{bp_type}">')
         xml.append(f'      <itemID>{item_id}</itemID>')
         xml.append(f'      <instanceID>{inst_id}</instanceID>')
         xml.append('      <position>')
@@ -89,12 +91,15 @@ def generate_track_xml(track_id, track_name, environment, blueprints):
         xml.append(f'        <y>{ry:.6f}</y>')
         xml.append(f'        <z>{rz:.6f}</z>')
         xml.append('      </rotation>')
-        xml.append(f'      <purpose>{purpose}</purpose>')
+        if not is_spawn:
+            purpose = bp.get('purpose', 'Functional')
+            xml.append(f'      <purpose>{purpose}</purpose>')
         xml.append('    </TrackBlueprint>')
         
     xml.append('  </blueprints>')
     max_instance_id = max(bp['instance_id'] for bp in blueprints) if blueprints else 0
     xml.append(f'  <lastTrackItemID>{max_instance_id}</lastTrackItemID>')
+    xml.append('  <hideDefaultSpawnpoint>false</hideDefaultSpawnpoint>')
     xml.append('</Track>')
     
     return "\n".join(xml)
