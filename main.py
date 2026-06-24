@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--elevation", type=float, default=4.0, help="Elevation variance of the track spline")
     parser.add_argument("--laps", type=int, default=3, help="Number of laps for the race")
     parser.add_argument("--env", type=str, default="TheDrawingBoard", help="Liftoff environment name")
+    parser.add_argument("--shape", type=str, default="circle", choices=["circle", "triangle", "square"], help="Shape of the track path")
     
     args = parser.parse_args()
     
@@ -27,7 +28,8 @@ def main():
             num_control_points=args.points,
             radius=args.radius,
             gate_spacing=args.spacing,
-            elevation_amplitude=args.elevation
+            elevation_amplitude=args.elevation,
+            shape=args.shape
         )
         
         print(f"Placed {len(checkpoint_ids)} checkpoint gates and 1 spawn point.")

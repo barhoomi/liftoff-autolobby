@@ -9,7 +9,8 @@ def generate_procedural_track(
     radius=45.0,
     gate_spacing=18.0,
     elevation_mean=8.0,
-    elevation_amplitude=4.0
+    elevation_amplitude=4.0,
+    shape='circle'
 ):
     """
     Generates a procedural track loop.
@@ -22,23 +23,49 @@ def generate_procedural_track(
         np.random.seed(seed)
         random.seed(seed)
         
-    # 1. Generate control points in a perturbed circle (loop)
-    angles = np.linspace(0, 2 * np.pi, num_control_points, endpoint=False)
     control_points = []
     
-    for a in angles:
-        # Add random radial perturbation
-        r = radius + np.random.uniform(-10.0, 10.0)
-        x = r * np.cos(a)
-        z = r * np.sin(a)
-        
-        # Smooth organic elevation changes
+    # Helper to generate altitude
+    def get_elevation():
         y = elevation_mean + np.random.uniform(-elevation_amplitude, elevation_amplitude)
-        # Ensure Y is safely above ground
-        y = max(y, 3.0) 
+        return max(y, 3.0)
         
-        control_points.append([x, y, z])
+    if shape == 'triangle':
+        # Equilateral triangle vertices + midpoints to shape the edges
+        c1 = [0.0, get_elevation(), radius]
+        c2 = [-0.866 * radius, get_elevation(), -0.5 * radius]
+        c3 = [0.866 * radius, get_elevation(), -0.5 * radius]
         
+        m12 = [-0.433 * radius, get_elevation(), 0.25 * radius]
+        m23 = [0.0, get_elevation(), -0.5 * radius]
+        m31 = [0.433 * radius, get_elevation(), 0.25 * radius]
+        
+        control_points = [c1, m12, c2, m23, c3, m31]
+        
+    elif shape == 'square':
+        # Square corners + midpoints
+        c1 = [radius, get_elevation(), radius]
+        c2 = [-radius, get_elevation(), radius]
+        c3 = [-radius, get_elevation(), -radius]
+        c4 = [radius, get_elevation(), -radius]
+        
+        m12 = [0.0, get_elevation(), radius]
+        m23 = [-radius, get_elevation(), 0.0]
+        m34 = [0.0, get_elevation(), -radius]
+        m41 = [radius, get_elevation(), 0.0]
+        
+        control_points = [c1, m12, c2, m23, c3, m34, c4, m41]
+        
+    else: # 'circle'
+        # Generate control points in a perturbed circle (loop)
+        angles = np.linspace(0, 2 * np.pi, num_control_points, endpoint=False)
+        for a in angles:
+            # Add random radial perturbation
+            r = radius + np.random.uniform(-10.0, 10.0)
+            x = r * np.cos(a)
+            z = r * np.sin(a)
+            control_points.append([x, get_elevation(), z])
+            
     control_points = np.array(control_points)
     
     # 2. Interpolate using Catmull-Rom spline (dense representation)
