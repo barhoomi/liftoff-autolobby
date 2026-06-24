@@ -1,6 +1,6 @@
 import numpy as np
 import random
-from src.assets import GATE_INFLATABLE_ARCH, SPAWN_SINGLE
+from src.assets import GATE_OCTAGON, SPAWN_SINGLE
 from src.math_utils import catmull_rom_spline, get_euler_rotations
 
 def generate_procedural_track(
@@ -110,7 +110,7 @@ def generate_procedural_track(
         instance_counter += 1
         
         blueprints.append({
-            'item_id': GATE_INFLATABLE_ARCH,
+            'item_id': GATE_OCTAGON,
             'instance_id': gate_id,
             'position': tuple(gd['pos']),
             'rotation': gd['rot'],
