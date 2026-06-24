@@ -191,17 +191,20 @@ def save_track_and_race(track_id, display_name, environment, blueprints, checkpo
     os.makedirs(race_dest_dir, exist_ok=True)
     
     # File paths
-    track_filepath = os.path.join(track_dest_dir, f"{track_id}.track")
+    track_filepath_versioned = os.path.join(track_dest_dir, f"{track_id}_0001.track")
+    track_filepath_unversioned = os.path.join(track_dest_dir, f"{track_id}.track")
     # For newer versions of Liftoff, races in directories often use a suffix like _0001.race
     # Let's save it directly as {track_id}_0001.race to follow standard game serialization.
     race_filepath = os.path.join(race_dest_dir, f"{track_id}_0001.race")
     
-    # Write .track file in UTF-8 (Liftoff game files are stored as UTF-8/ASCII despite xml header)
-    with open(track_filepath, "w", encoding="utf-8") as f:
+    # Write .track files in UTF-8 (Liftoff game files are stored as UTF-8/ASCII despite xml header)
+    with open(track_filepath_versioned, "w", encoding="utf-8") as f:
+        f.write(track_xml_content)
+    with open(track_filepath_unversioned, "w", encoding="utf-8") as f:
         f.write(track_xml_content)
         
     # Write .race file in UTF-8
     with open(race_filepath, "w", encoding="utf-8") as f:
         f.write(race_xml_content)
         
-    return track_filepath, race_filepath
+    return track_filepath_versioned, race_filepath
