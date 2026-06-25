@@ -16,11 +16,22 @@ def get_mouse_position():
         
         # Get window geometry
         geom = subprocess.check_output(["xdotool", "getwindowgeometry", out]).decode().strip()
-        match = re.search(r"Position: (\d+),(\d+)", geom)
-        if match:
-            rel_x = int(x) - int(match.group(1))
-            rel_y = int(y) - int(match.group(2))
-            return name, rel_x, rel_y
+        match_pos = re.search(r"Position: (\d+),(\d+)", geom)
+        match_geo = re.search(r"Geometry: (\d+)x(\d+)", geom)
+        
+        if match_pos and match_geo:
+            rel_x = int(x) - int(match_pos.group(1))
+            rel_y = int(y) - int(match_pos.group(2))
+            width = int(match_geo.group(1))
+            height = int(match_geo.group(2))
+            
+            # Avoid division by zero
+            width = max(width, 1)
+            height = max(height, 1)
+            
+            pct_x = rel_x / width
+            pct_y = rel_y / height
+            return name, rel_x, rel_y, pct_x, pct_y
     except Exception as e:
         pass
     return None
@@ -37,9 +48,9 @@ def main():
     print("MOUSE COORDINATE HELPER")
     print("="*80)
     print("Instructions:")
-    print("1. Open Liftoff in windowed mode (e.g. 1280x720).")
+    print("1. Open Liftoff in windowed mode.")
     print("2. Hover your mouse over the menus (Multiplayer, Create Room, etc.).")
-    print("3. Look at this terminal to get the exact X and Y coordinates relative to the Liftoff window.")
+    print("3. Copy the PERCENTAGE coordinates to lobby_config.json for resolution-independence.")
     print("Press Ctrl+C to stop.\n")
     
     try:
@@ -47,11 +58,11 @@ def main():
         while True:
             pos = get_mouse_position()
             if pos:
-                name, x, y = pos
+                name, x, y, px, py = pos
                 if "liftoff" in name.lower():
                     current = (x, y)
                     if current != last_coords:
-                        print(f"Target: Liftoff | X: {x:<5} Y: {y:<5} (Hovering over button)")
+                        print(f"Target: Liftoff | Pixel: X={x:<4} Y={y:<4} | Percentage: X={px:.4f} Y={py:.4f}")
                         last_coords = current
             time.sleep(0.5)
     except KeyboardInterrupt:

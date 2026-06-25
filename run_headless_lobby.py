@@ -63,12 +63,34 @@ def get_window_id(display):
         pass
     return None
 
+def get_window_size(display, win_id):
+    env = os.environ.copy()
+    env["DISPLAY"] = display
+    try:
+        geom = run_command(["xdotool", "getwindowgeometry", win_id], env=env)
+        match = re.search(r"Geometry: (\d+)x(\d+)", geom)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    except Exception:
+        pass
+    return 1280, 720  # Fallback
+
 def click_at(display, win_id, x, y, delay=0.5):
     """
-    Clicks at a coordinate relative to the window.
+    Clicks at a coordinate. Automatically supports float percentages (0.0 to 1.0)
+    or raw integer pixels.
     """
     env = os.environ.copy()
     env["DISPLAY"] = display
+    
+    # Check if inputs are float percentages
+    if (isinstance(x, float) and 0.0 <= x <= 1.0) or (isinstance(y, float) and 0.0 <= y <= 1.0):
+        width, height = get_window_size(display, win_id)
+        x_pixel = int(x * width)
+        y_pixel = int(y * height)
+        print(f"[Bot] Scaling percentage ({x:.4f}, {y:.4f}) to pixels: X: {x_pixel}, Y: {y_pixel} (based on size {width}x{height})")
+        x, y = x_pixel, y_pixel
+        
     print(f"[Bot] Clicking at X: {x}, Y: {y} relative to window {win_id}...")
     run_command(["xdotool", "mousemove", "--window", win_id, str(x), str(y)], env=env)
     time.sleep(delay)
