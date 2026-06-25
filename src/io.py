@@ -8,7 +8,7 @@ LIFTOFF_BASE_DIR = os.path.expanduser("~/.config/unity3d/LuGus Studios/Liftoff")
 TRACKS_DIR = os.path.join(LIFTOFF_BASE_DIR, "Tracks")
 RACES_DIR = os.path.join(LIFTOFF_BASE_DIR, "Races")
 
-PROJECT_WORKSPACE = "/home/dev-user/Projects/procedural-fpv"
+PROJECT_WORKSPACE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BACKUP_DIR = os.path.join(PROJECT_WORKSPACE, "backups")
 
 def backup_existing_files(track_id):

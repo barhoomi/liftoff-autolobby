@@ -5,7 +5,7 @@ import subprocess
 import re
 import sys
 
-PROJECT_WORKSPACE = "/home/dev-user/Projects/procedural-fpv"
+PROJECT_WORKSPACE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 STAGING_DIR = os.path.join(PROJECT_WORKSPACE, "workshop_staging")
 VDF_PATH = os.path.join(PROJECT_WORKSPACE, "workshop_build.vdf")
 CONFIG_PATH = os.path.join(PROJECT_WORKSPACE, "workshop_config.json")
@@ -105,8 +105,26 @@ def run_steamcmd():
     """
     Runs steamcmd to upload the workshop item.
     """
+    import os
+    
+    # 1. Create a dedicated home directory for SteamCMD to isolate it from the regular Steam client.
+    # This prevents logins from conflicting with the user's primary gaming account (e.g., logging them out).
+    steamcmd_home = os.path.abspath(os.path.join(PROJECT_WORKSPACE, ".steamcmd_home"))
+    os.makedirs(steamcmd_home, exist_ok=True)
+    
+    # Clone current environment and override HOME and XDG variables
+    env = os.environ.copy()
+    env["HOME"] = steamcmd_home
+    env["STEAM_HOME"] = steamcmd_home
+    env["XDG_DATA_HOME"] = os.path.join(steamcmd_home, ".local/share")
+    env["XDG_CONFIG_HOME"] = os.path.join(steamcmd_home, ".config")
+    env["XDG_CACHE_HOME"] = os.path.join(steamcmd_home, ".cache")
+
+    # Use @NoPromptForPassword to fail quickly and prevent the Python process from hanging
+    # when waiting on stdin for a password prompt (due to readline buffering).
     cmd = [
         STEAMCMD_PATH,
+        "+@NoPromptForPassword", "1",
         "+login", "fpv_bot",
         "+workshop_build_item", VDF_PATH,
         "+quit"
@@ -116,25 +134,45 @@ def run_steamcmd():
     print(f"[Publish] Command: {' '.join(cmd)}")
     
     # Run SteamCMD and capture output
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    
-    stdout_lines = []
-    while True:
-        line = process.stdout.readline()
-        if not line:
-            break
-        # Print output in real-time
-        sys.stdout.write(f"  [SteamCMD] {line}")
-        sys.stdout.flush()
-        stdout_lines.append(line)
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env
+        )
         
-    process.wait()
-    stdout = "".join(stdout_lines)
-    
-    if process.returncode != 0:
-        raise RuntimeError(f"SteamCMD failed with exit code: {process.returncode}")
+        stdout_lines = []
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
+            # Print output in real-time
+            sys.stdout.write(f"  [SteamCMD] {line}")
+            sys.stdout.flush()
+            stdout_lines.append(line)
+            
+        process.wait()
+        stdout = "".join(stdout_lines)
         
-    return stdout
+        if process.returncode != 0:
+            raise RuntimeError(f"SteamCMD failed with exit code: {process.returncode}")
+            
+        return stdout
+
+    except Exception as e:
+        print("\n" + "="*80)
+        print("[Publish] ERROR: SteamCMD execution failed or returned an error.")
+        print(f"Details: {e}")
+        print("-"*80)
+        print("This is likely because SteamCMD needs you to log in manually to the isolated environment.")
+        print("To log in and cache credentials for 'fpv_bot', run this command in your terminal:")
+        print(f"\n    HOME={steamcmd_home} {STEAMCMD_PATH} +login fpv_bot\n")
+        print("Enter your password and Steam Guard code when prompted, then type 'quit' to exit.")
+        print("This only needs to be done once! Subsequent publishes will use the cached session.")
+        print("="*80 + "\n")
+        raise
 
 def publish_track(track_id):
     """
