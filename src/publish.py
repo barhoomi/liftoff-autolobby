@@ -80,10 +80,14 @@ def stage_files(track_id):
         
     print(f"[Publish] Staged files for track '{track_id}' from {track_dir} and race from {race_dir} in: {STAGING_DIR}")
 
-def write_vdf(published_file_id):
+def write_vdf(published_file_id, track_id):
     """
     Writes the Steam VDF file for workshop publishing.
     """
+    # Clean up track_id to make it a presentable title (e.g. "proc_loop_1" -> "Proc Loop 1")
+    title_suffix = track_id.replace("_", " ").title()
+    title = f"Procedural FPV - {title_suffix}"
+    
     vdf_content = f"""\
 "workshopitem"
 {{
@@ -91,10 +95,10 @@ def write_vdf(published_file_id):
   "publishedfileid" "{published_file_id}"
   "contentfolder" "{STAGING_DIR}"
   "previewfile" "{PREVIEW_PATH}"
-  "title" "Procedural FPV Loop"
+  "title" "{title}"
   "description" "Procedurally generated FPV track & race loop by fpv_bot"
   "changenote" "Automatic updates from generator"
-  "visibility" "0"
+  "visibility" "2"
 }}
 """
     with open(VDF_PATH, "w") as f:
@@ -181,35 +185,28 @@ def publish_track(track_id):
     # 1. Stage the files
     stage_files(track_id)
     
-    # 2. Load configurations
-    config = load_workshop_config()
-    published_file_id = config.get("published_file_id", "0")
+    # 2. Always create a new Workshop item (set to "0")
+    published_file_id = "0"
     
     # 3. Generate VDF
-    write_vdf(published_file_id)
+    write_vdf(published_file_id, track_id)
     
     # 4. Upload
     stdout = run_steamcmd()
     
-    # 5. Extract publishedfileid if we created a new item
-    if published_file_id == "0" or published_file_id == 0:
-        # Search for "Created new item with ID <id>" or "ID <id>"
-        match = re.search(r"Created new item with ID (\d+)", stdout)
-        if not match:
-            # Fallback regex
-            match = re.search(r"ID\s+(\d+)", stdout)
-            
-        if match:
-            new_id = match.group(1)
-            config["published_file_id"] = new_id
-            save_workshop_config(config)
-            print(f"\n[Publish] SUCCESS! Created new Steam Workshop item with ID: {new_id}")
-            print(f"[Publish] Workshop URL: https://steamcommunity.com/sharedfiles/filedetails/?id={new_id}")
-        else:
-            print("\n[Publish] WARNING: Upload completed but could not parse the new Workshop Item ID from SteamCMD output.", file=sys.stderr)
+    # 5. Extract publishedfileid and display success
+    # Search for "Created new item with ID <id>" or "ID <id>"
+    match = re.search(r"Created new item with ID (\d+)", stdout)
+    if not match:
+        # Fallback regex
+        match = re.search(r"ID\s+(\d+)", stdout)
+        
+    if match:
+        new_id = match.group(1)
+        print(f"\n[Publish] SUCCESS! Created new Steam Workshop item with ID: {new_id}")
+        print(f"[Publish] Workshop URL: https://steamcommunity.com/sharedfiles/filedetails/?id={new_id}")
     else:
-        print(f"\n[Publish] SUCCESS! Updated existing Steam Workshop item with ID: {published_file_id}")
-        print(f"[Publish] Workshop URL: https://steamcommunity.com/sharedfiles/filedetails/?id={published_file_id}")
+        print("\n[Publish] WARNING: Upload completed but could not parse the new Workshop Item ID from SteamCMD output.", file=sys.stderr)
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
