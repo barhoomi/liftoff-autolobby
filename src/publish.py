@@ -98,7 +98,7 @@ def write_vdf(published_file_id, track_id):
   "title" "{title}"
   "description" "Procedurally generated FPV track & race loop by fpv_bot"
   "changenote" "Automatic updates from generator"
-  "visibility" "2"
+  "visibility" "3"
 }}
 """
     with open(VDF_PATH, "w") as f:
