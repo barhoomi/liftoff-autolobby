@@ -87,7 +87,17 @@ Thumbs.db
 # Local Backups
 backups/
 
+# C# build artifacts
+plugin/bin/
+plugin/obj/
+LiftoffAutoLobby/
+
+# Runtime / generated data files
+tracks_to_rotate.txt
+master_tracks_list.json
+bot_*.txt
+
 # Steam Workshop publishing temp files
-workshop_config.json
-workshop_build.vdf
-workshop_staging/
+generator/workshop_config.json
+generator/workshop_build.vdf
+generator/staging/

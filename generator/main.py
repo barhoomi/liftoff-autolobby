@@ -1,6 +1,7 @@
 import argparse
 import sys
 import random
+import os
 from src.generator import generate_procedural_track
 from src.io import save_track_and_race
 
@@ -54,6 +55,51 @@ def main():
             print("\n[Publish] Starting Steam Workshop publish sequence...")
             from src.publish import publish_track
             publish_track(args.id)
+
+        # Update rotation configuration file
+        try:
+            import json
+            config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lobby_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                liftoff_path = config.get("liftoff_path")
+                if liftoff_path:
+                    if not os.path.exists(liftoff_path):
+                        import getpass
+                        current_user = getpass.getuser()
+                        parts = liftoff_path.split("/")
+                        if len(parts) > 2 and parts[1] == "home":
+                            parts[2] = current_user
+                            alternative_path = "/".join(parts)
+                            if os.path.exists(alternative_path):
+                                liftoff_path = alternative_path
+                                print(f"[Rotation] Auto-corrected liftoff path to current user's home: {liftoff_path}")
+                    game_dir = os.path.dirname(liftoff_path)
+                    plugins_dir = os.path.join(game_dir, "BepInEx", "plugins")
+                    os.makedirs(plugins_dir, exist_ok=True)
+                    
+                    tracks_file = os.path.join(plugins_dir, "tracks_to_rotate.txt")
+                    
+                    # Read existing tracks to prevent duplicates
+                    existing_tracks = []
+                    if os.path.exists(tracks_file):
+                        with open(tracks_file, "r") as f:
+                            for line in f:
+                                if line.strip() and not line.strip().startswith("#"):
+                                    existing_tracks.append(line.split(",")[0].strip())
+                                    
+                    # If this track is not in rotation, append it!
+                    if args.name not in existing_tracks:
+                        env_ui = args.env
+                        if env_ui == "TheDrawingBoard":
+                            env_ui = "The Drawing Board"
+                        
+                        with open(tracks_file, "a") as f:
+                            f.write(f"{args.name},{env_ui},Infinite Race\n")
+                        print(f"[Rotation] Added track '{args.name}' to rotation file: {tracks_file}")
+        except Exception as e:
+            print(f"[Rotation] WARNING: Failed to update tracks_to_rotate.txt: {e}")
         
     except Exception as e:
         print(f"Error during track generation: {e}", file=sys.stderr)

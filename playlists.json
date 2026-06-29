@@ -1,0 +1,503 @@
+{
+  "env_fix_test": [
+    {"environment": "The Drawing Board", "track": "*", "mode": "Infinite Race"},
+    {"environment": "The Green",         "track": "*", "mode": "Infinite Race"},
+    {"environment": "Hall 26",           "track": "*", "mode": "Infinite Race"},
+    {"environment": "The Woodpecker",    "track": "*", "mode": "Infinite Race"}
+  ],
+  "all": [
+    "*"
+  ],
+  "default_races": [
+    "01 - Par For The Course",
+    "03 - Club House",
+    "04 - Flop Shot",
+    "01 - The Biggest Yet",
+    "02 - Bring Me A Shrubbery",
+    "03 - Cone Off",
+    "04 - Around The Block",
+    "05 - Got Intel",
+    "droneshub",
+    "droneshub2",
+    "01 - Walk In The Park",
+    "01 - Spare Tires",
+    "01 - Shipments",
+    "01 - Over The Horizon",
+    "01 - Field Day",
+    "01 - Pole Position",
+    "01 - Forest For The Trees",
+    "02 - The Great Outdoors"
+  ],
+  "procedural": [
+    "*procedural*",
+    "procedural-test*"
+  ],
+  "bando_city": [
+    "01 - Spare Tires",
+    "The Trench Run",
+    "[Sho] Dnipro Towers",
+    "[Davinci]-Challenge the limits",
+    "[Sho] SpiderDrone",
+    "banjo burrito",
+    "[koko] Fall back up"
+  ],
+  "drawing_board": [
+    "Procedural Test",
+    "First Procedural Track",
+    "procedural-test-1",
+    "Race_The_Ruins_v4_by_DerHonk83",
+    "[Honk] *"
+  ],
+  "all_official_races": [
+    {
+      "environment": "Straw Bale",
+      "track": "01 - Field Day",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Straw Bale",
+      "track": "02 - After Hours",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Straw Bale",
+      "track": "03 - Loop The Silo",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Straw Bale",
+      "track": "04 - Against The Grain",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Straw Bale",
+      "track": "05 - Barn Burner",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Straw Bale",
+      "track": "06 - Further Afield",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Pine Valley",
+      "track": "01 - Forest For The Trees",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Pine Valley",
+      "track": "02 - The Great Outdoors",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Pine Valley",
+      "track": "03 - Rock And Roll",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Pine Valley",
+      "track": "04 - Wildcamping",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Pine Valley",
+      "track": "05 - Timber",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Minus Two",
+      "track": "01 - Turn Signals",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Minus Two",
+      "track": "02 - Saro's Revenge",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Minus Two",
+      "track": "03 - The Underground Scene",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Minus Two",
+      "track": "04 - Concrete Jungle",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Minus Two",
+      "track": "05 - Drift Style",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Autumn Fields",
+      "track": "01 - Walk In The Park",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Autumn Fields",
+      "track": "02 - Sweater Weather",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Autumn Fields",
+      "track": "03 - Stick Time",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Autumn Fields",
+      "track": "04 - Mudlarking",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Autumn Fields",
+      "track": "05 - A League Of Its Own",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Autumn Fields",
+      "track": "06 - Autumn Airspace",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hangar C03",
+      "track": "01 - Shipments",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hangar C03",
+      "track": "02 - Parcel Tracking",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Liftoff Arena",
+      "track": "01 - Mexican Wave",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Liftoff Arena",
+      "track": "02 - Swing For The Bleachers",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Liftoff Arena",
+      "track": "03 - Grandstand",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Liftoff Arena",
+      "track": "04 - Infinity Loop",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Liftoff Arena",
+      "track": "05 - In The Spotlight",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Liftoff Arena",
+      "track": "06 - Touchdown",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Liftoff Arena",
+      "track": "07 - Round and Around ",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Dubai Legends",
+      "track": "01 - Legendary Night",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hannover",
+      "track": "01 - The Biggest Yet",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hannover",
+      "track": "02 - Bring Me A Shrubbery",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hannover",
+      "track": "03 - Cone Off",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hannover",
+      "track": "04 - Around The Block",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hannover",
+      "track": "05 - Got Intel",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Paris Drone Festival",
+      "track": "01 - City Trip",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Paris Drone Festival",
+      "track": "02 - Triumph",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Paris Drone Festival",
+      "track": "03 - City Of Lights",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Paris Drone Festival",
+      "track": "04 - Promenading",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Paris Drone Festival",
+      "track": "05 - Stage Fright",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Pit",
+      "track": "01 - Way Down In The Hole",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Pit",
+      "track": "02 - Into The Abyss",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Pit",
+      "track": "03 - Jackpot",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Pit",
+      "track": "04 - The Red Baron",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Pit",
+      "track": "05 - Reservoir",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Pit",
+      "track": "06 - Conveyor Belt Dive",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Green",
+      "track": "01 - Par For The Course",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Green",
+      "track": "02 - Rolling Hills",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Green",
+      "track": "03 - Club House",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Green",
+      "track": "04 - Flop Shot",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Green",
+      "track": "05 - Tee Off",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Green",
+      "track": "06 - The Nineteenth Hole",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hall 26",
+      "track": "01 - Race Around The Rafters",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hall 26",
+      "track": "02 - Hula Hoop",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hall 26",
+      "track": "03 - Hall Of Fame",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hall 26",
+      "track": "04 - A Roof Over Your Head",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Hall 26",
+      "track": "05 - Support Structure",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bardwell's Yard",
+      "track": "01 - Front Porch Frenzy",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bardwell's Yard",
+      "track": "02 - Learn Something Today",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bardwell's Yard",
+      "track": "03 - Stuff That Works",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bardwell's Yard",
+      "track": "04 - Know It All",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bardwell's Yard",
+      "track": "05 - Humble Beginnings",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bardwell's Yard",
+      "track": "06 - Birdhouse",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bando City",
+      "track": "01 - Spare Tires",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bando City",
+      "track": "02 - Who Needs Stairs",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bando City",
+      "track": "03 - Pipe Dream",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bando City",
+      "track": "04 - Choice Matters",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Bando City",
+      "track": "05 - Under Construction",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Woodpecker",
+      "track": "01 - Over The Horizon",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "The Woodpecker",
+      "track": "02 - Steel Yard",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Short Circuit",
+      "track": "01 - Pole Position",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Short Circuit",
+      "track": "02 - Diskart",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Short Circuit",
+      "track": "03 - Overpass",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Surtur",
+      "track": "01 - Hiking Trail",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Surtur",
+      "track": "02 - Mountaineering",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Surtur",
+      "track": "03 - Surtalogi Tour",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Surtur",
+      "track": "04 - The Floor is Lava",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Permafrost",
+      "track": "01 - Under Pressure",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Permafrost",
+      "track": "02 - Mayday",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Permafrost",
+      "track": "03 - Slalom",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Rustline",
+      "track": "01 - Railline",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Rustline",
+      "track": "02 - Factoryline",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Rustline",
+      "track": "03 - Pipeline",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Marina Bay",
+      "track": "01 - Welcome to the city",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Marina Bay",
+      "track": "02 - Romantic boat ride",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Marina Bay",
+      "track": "03 - City view",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Marina Bay",
+      "track": "04 - No ticket needed",
+      "mode": "Infinite Race"
+    },
+    {
+      "environment": "Marina Bay",
+      "track": "05 - Shopping trip",
+      "mode": "Infinite Race"
+    }
+  ]
+}

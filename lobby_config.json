@@ -1,18 +1,5 @@
 {
     "liftoff_path": "/home/fpv_bot/.steam/debian-installation/steamapps/common/Liftoff/Liftoff.x86_64",
     "display": ":99",
-    "resolution": "1280x720",
-    "lobby_name": "Procedural Loop Room",
-    "coordinates": {
-        "multiplayer_btn": [180, 420],
-        "create_room_btn": [920, 630],
-        "room_name_input": [380, 240],
-        "select_track_btn": [380, 310],
-        "first_track_in_list": [280, 200],
-        "track_select_apply_btn": [920, 630],
-        "lobby_start_btn": [920, 630],
-        "pause_menu_btn": [1240, 30],
-        "end_game_btn": [640, 460],
-        "change_track_btn": [640, 520]
-    }
+    "lobby_name": "Procedural Loop Room"
 }
