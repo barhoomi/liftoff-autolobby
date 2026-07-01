@@ -6,7 +6,66 @@ import subprocess
 import argparse
 import fnmatch
 
-def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file):
+def load_track_mode_availability(plugins_dir):
+    """Ground-truth (environment, game mode) -> [track names] data, produced by the plugin's
+    nested dropdown dump (BepInEx/plugins/track_mode_availability.json). Returns None if the
+    file is missing/unreadable so callers can fail open rather than block on stale/missing data.
+    """
+    path = os.path.join(plugins_dir, "track_mode_availability.json")
+    if not os.path.exists(path):
+        print("[Playlist] WARNING: track_mode_availability.json not found — skipping mode/availability cross-validation.")
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[Playlist] WARNING: Failed to load track_mode_availability.json: {e}")
+        return None
+
+
+def cross_validate_tracks(resolved_tracks, availability_data, env_normalization):
+    """Drops (track, env, mode) entries that the live game doesn't actually offer. Fails open
+    (keeps the entry) whenever there's no ground-truth data to check against, so a missing or
+    partial dump can never itself cause a hang.
+    """
+    if availability_data is None:
+        return resolved_tracks, 0, 0
+
+    kept = []
+    dropped_missing = 0
+    dropped_mode = 0
+    for track_name, env_key, game_mode in resolved_tracks:
+        env_norm = env_normalization.get(env_key.lower().strip(), env_key)
+        env_modes = availability_data.get(env_norm)
+        if env_modes is None:
+            kept.append((track_name, env_key, game_mode))
+            continue
+
+        mode_tracks = env_modes.get(game_mode)
+        if mode_tracks is None:
+            kept.append((track_name, env_key, game_mode))
+            continue
+
+        track_norm = track_name.lower().strip()
+        if any(t.lower().strip() == track_norm for t in mode_tracks):
+            kept.append((track_name, env_key, game_mode))
+            continue
+
+        in_any_mode = any(
+            track_norm in (t.lower().strip() for t in tlist)
+            for tlist in env_modes.values()
+        )
+        if in_any_mode:
+            dropped_mode += 1
+            print(f"[Playlist] DROP '{track_name}' ({env_key}, {game_mode}): mode_unsupported")
+        else:
+            dropped_missing += 1
+            print(f"[Playlist] DROP '{track_name}' ({env_key}, {game_mode}): not_installed_or_not_shared")
+
+    return kept, dropped_missing, dropped_mode
+
+
+def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_fallback=False):
     import random
 
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,8 +81,7 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file):
         playlists_data = json.load(f)
         
     if playlist_name not in playlists_data:
-        print(f"ERROR: Playlist '{playlist_name}' not found in playlists.json. Available: {list(playlists_data.keys())}")
-        sys.exit(1)
+        raise ValueError(f"Playlist '{playlist_name}' not found in playlists.json. Available: {list(playlists_data.keys())}")
         
     playlist_items = playlists_data[playlist_name]
     
@@ -108,8 +166,11 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file):
             if env_pattern != "*" and target_env_key.lower().strip() != env_key.lower().strip():
                 continue
                 
-            # Environment matches, match tracks in shareable categories only (not local)
-            for category in ["official", "workshop", "custom"]:
+            # Environment matches, match tracks in shareable categories only.
+            # "local" tracks are intentionally excluded here: they can't be shared to other
+            # players (see docs/features/done/race-not-shared-handling.md), and
+            # gather_tracks_and_races() never writes anything outside official/workshop/local.
+            for category in ["official", "workshop"]:
                 if category not in master_data[env_key]:
                     continue
                 for track_name in master_data[env_key][category]:
@@ -118,11 +179,26 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file):
                         if track_entry not in resolved_tracks:
                             resolved_tracks.append(track_entry)
                         
+    print(f"[Playlist] Resolved {len(resolved_tracks)} tracks for playlist '{playlist_name}' from master list.")
+
+    # Cross-validate against the plugin's live-game ground truth (which tracks are actually
+    # installed/shared, and which game modes each one really supports) before committing to
+    # this rotation. Fails open if the dump isn't available yet.
+    plugins_dir = os.path.dirname(os.path.abspath(output_file))
+    availability_data = load_track_mode_availability(plugins_dir)
+    resolved_tracks, n_missing, n_mode = cross_validate_tracks(resolved_tracks, availability_data, ENV_NORMALIZATION)
+    print(f"[Playlist] Cross-validation: kept {len(resolved_tracks)} "
+          f"(dropped {n_missing} not_installed_or_not_shared, {n_mode} mode_unsupported)")
+
     if not resolved_tracks:
-        print(f"WARNING: Playlist '{playlist_name}' resolved to 0 tracks from master list.")
-    else:
-        print(f"[Playlist] Resolved {len(resolved_tracks)} tracks for playlist '{playlist_name}'.")
-        
+        if not is_fallback and playlist_name != "all_official_races" and "all_official_races" in playlists_data:
+            print(f"[Playlist] CRITICAL: '{playlist_name}' resolved to 0 valid tracks after cross-validation. "
+                  f"Falling back to 'all_official_races'.")
+            return resolve_and_write_playlist("all_official_races", shuffle_enabled, output_file, is_fallback=True)
+        else:
+            print(f"[Playlist] CRITICAL: '{playlist_name}' resolved to 0 tracks (fallback exhausted or unavailable). "
+                  f"Writing empty rotation file — bot may get stuck.")
+
     # Always write in playlist definition order so that C# plugin can control shuffle mode dynamically.
     print("[Playlist] Using track rotation in playlist definition order...")
         
@@ -194,6 +270,7 @@ def get_steam_dbus_address():
     return None
 
 def main():
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # Sanitize environment variables if they belong to another user to prevent Steam IPC hijacking
     try:
         import getpass
@@ -291,10 +368,28 @@ def main():
     with open(os.path.join(plugins_dir, "playlist_name.txt"), "w") as f:
         f.write(playlist_val)
 
+    # Write available playlists to available_playlists.txt
+    playlists_path = os.path.join(project_dir, "playlists.json")
+    if os.path.exists(playlists_path):
+        try:
+            with open(playlists_path, "r") as f:
+                playlists_data = json.load(f)
+            available_playlists_file = os.path.join(plugins_dir, "available_playlists.txt")
+            with open(available_playlists_file, "w") as pf:
+                for name in playlists_data.keys():
+                    pf.write(f"{name}\n")
+            print(f"[Host] Wrote available playlists list to {available_playlists_file}")
+        except Exception as e:
+            print(f"[Host] WARNING: Failed to write available_playlists.txt: {e}")
+
     # Set up tracks_to_rotate.txt
     tracks_file = os.path.join(plugins_dir, "tracks_to_rotate.txt")
     if args.playlist:
-        resolve_and_write_playlist(args.playlist, args.shuffle, tracks_file)
+        try:
+            resolve_and_write_playlist(args.playlist, args.shuffle, tracks_file)
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
     else:
         # Copy tracks_to_rotate.txt from current directory if it exists, otherwise create/keep existing
         local_tracks_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracks_to_rotate.txt")
@@ -361,30 +456,67 @@ def main():
 
     try:
         proc = None
+        last_process_check = 0.0
+        active_playlist = playlist_val
+        
         while True:
-            # Check if Liftoff is currently running (excluding defunct ones)
-            pids = get_active_liftoff_pids()
+            current_time = time.time()
             
-            # Reap our child process if it exited to prevent zombies
-            if proc is not None:
-                proc.poll()
+            # 1. Check for playlist change (every 1 second)
+            playlist_name_path = os.path.join(plugins_dir, "playlist_name.txt")
+            if os.path.exists(playlist_name_path):
+                try:
+                    with open(playlist_name_path, "r") as f:
+                        current_playlist_name = f.read().strip()
+                    if current_playlist_name and current_playlist_name != active_playlist:
+                        print(f"[Host] Playlist change detected: '{active_playlist}' -> '{current_playlist_name}'")
+                        # Read shuffle mode
+                        shuffle_enabled = False
+                        shuffle_mode_path = os.path.join(plugins_dir, "shuffle_mode.txt")
+                        if os.path.exists(shuffle_mode_path):
+                            with open(shuffle_mode_path, "r") as sf:
+                                shuffle_enabled = (sf.read().strip().lower() == "true")
+                        
+                        try:
+                            resolve_and_write_playlist(current_playlist_name, shuffle_enabled, tracks_file)
+                            active_playlist = current_playlist_name
+                        except Exception as ex:
+                            print(f"[Host] Failed to resolve and write playlist '{current_playlist_name}': {ex}")
+                except Exception as e:
+                    print(f"[Host] Error checking playlist change: {e}")
 
-            if pids:
-                print(f"[Host] Liftoff is running (PIDs: {', '.join(pids)}). Monitoring...")
-            else:
-                print("[Host] Liftoff is not running. Starting game server...")
-                # Start game using run_bepinex.sh
-                proc = subprocess.Popen([
-                    launch_sh_path,
-                    os.path.join(game_dir, "Liftoff.x86_64"),
-                    "-screen-width", str(args.width),
-                    "-screen-height", str(args.height),
-                    "-screen-fullscreen", "0"
-                ], env=env, cwd=game_dir)
-                print(f"[Host] Started Liftoff server process (PID: {proc.pid}).")
+            # 2. Check process state and handle relaunch (every 15 seconds)
+            if current_time - last_process_check >= 15.0:
+                last_process_check = current_time
+                pids = get_active_liftoff_pids()
+                
+                if proc is not None:
+                    proc.poll()
+                
+                if pids:
+                    print(f"[Host] Liftoff is running (PIDs: {', '.join(pids)}). Monitoring...")
+                else:
+                    # Check if maintenance mode is active
+                    maintenance_active_path = os.path.join(plugins_dir, "maintenance_active.txt")
+                    if os.path.exists(maintenance_active_path):
+                        print("[Host] Liftoff exited and maintenance mode is active. Exiting orchestrator cleanly.")
+                        try:
+                            os.remove(maintenance_active_path)
+                        except Exception:
+                            pass
+                        sys.exit(0)
+                    
+                    print("[Host] Liftoff is not running. Starting game server...")
+                    proc = subprocess.Popen([
+                        launch_sh_path,
+                        os.path.join(game_dir, "Liftoff.x86_64"),
+                        "-screen-width", str(args.width),
+                        "-screen-height", str(args.height),
+                        "-screen-fullscreen", "0"
+                    ], env=env, cwd=game_dir)
+                    print(f"[Host] Started Liftoff server process (PID: {proc.pid}).")
             
-            # Sleep 15 seconds before checking again
-            time.sleep(15)
+            time.sleep(1)
 
     except KeyboardInterrupt:
         print("\n[Host] Stopped by user request. Exiting...")

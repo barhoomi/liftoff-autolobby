@@ -47,9 +47,21 @@ namespace LiftoffAutoLobby
         private static string lastSceneName = "";
         private static DateTime sceneLoadTime = DateTime.MinValue;
         private static DateTime lastInRoomTime = DateTime.MinValue;
-        private static bool isDumpingUI = false;
-        private static int dumpEnvIndex = 0;
-        private static Dictionary<string, List<string>> dumpedTracksMap = new Dictionary<string, List<string>>();
+        // Nested Environment x GameMode track-availability dump. Regenerated once per process
+        // launch (not gated on file-existence like the old dump) so it can't go stale relative
+        // to Workshop subscription changes between runs. Scoped to a fixed candidate mode list
+        // (mirrors the /mode admin command's supported values) to bound the combinatorial cost.
+        private static readonly string[] TrackModeDumpCandidateModes = { "Infinite Race", "Classic Race", "Dropout Race", "Survival" };
+        private static bool trackModeDumpDoneThisSession = false;
+        private static bool isDumpingTrackModes = false;
+        private static int dumpEnvIndex2 = 0;
+        private static int dumpModeIndex2 = 0;
+        private static Dictionary<string, Dictionary<string, List<string>>> dumpedTrackModeMap = new Dictionary<string, Dictionary<string, List<string>>>();
+        // Runtime failure handling: tracks that passed pre-launch validation but never actually
+        // loaded a race after Start Game was clicked. In-memory only — cleared on process restart.
+        private static HashSet<string> sessionBlacklistedTracks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static DateTime firstStartGameClickTime = DateTime.MinValue;
+        private const double RaceLoadTimeoutSeconds = 60.0;
         private static List<Tuple<string, string, DateTime>> processedMessages = new List<Tuple<string, string, DateTime>>();
 
         // Admin
@@ -57,6 +69,11 @@ namespace LiftoffAutoLobby
         private static bool skipRequested = false;
         private static bool shuffleMode = false;
         private static System.Random rng = new System.Random();
+        private static bool maintenanceActive = false;
+        private static DateTime maintenanceTime = DateTime.MaxValue;
+        private static int lastMaintenanceWarningMinutes = -1;
+        private static bool maintenanceWarning30sSent = false;
+        private static bool maintenanceWarning10sSent = false;
 
         private void Awake()
         {
@@ -147,6 +164,69 @@ namespace LiftoffAutoLobby
 
         private static void RunTick()
         {
+            // 1. Check for external/internal maintenance mode
+            try
+            {
+                string mPath = Path.Combine(pluginPath, "maintenance_active.txt");
+                if (File.Exists(mPath))
+                {
+                    if (!maintenanceActive)
+                    {
+                        maintenanceActive = true;
+                        maintenanceTime = DateTime.Now.AddMinutes(3.0);
+                        lastMaintenanceWarningMinutes = -1;
+                        maintenanceWarning30sSent = false;
+                        maintenanceWarning10sSent = false;
+                        SendChatMessage("<color=#0000FF>[ADMIN]</color> Shutdown for maintenance scheduled in <color=#00FF88><i>3.0m</i></color> (triggered externally).");
+                        UnityEngine.Debug.Log("[AutoLobbyPlugin] Maintenance mode triggered externally.");
+                    }
+                }
+                else
+                {
+                    if (maintenanceActive)
+                    {
+                        CancelMaintenance();
+                        SendChatMessage("<color=#0000FF>[ADMIN]</color> Scheduled maintenance cancelled externally.");
+                        UnityEngine.Debug.Log("[AutoLobbyPlugin] Maintenance mode cancelled externally.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error checking external maintenance file: {ex.Message}");
+            }
+
+            if (maintenanceActive)
+            {
+                double remainingSecs = (maintenanceTime - DateTime.Now).TotalSeconds;
+                if (remainingSecs <= 0)
+                {
+                    SendChatMessage("<color=#0000FF>[ADMIN]</color> Going down for maintenance.");
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Maintenance time reached. Exiting game.");
+                    Application.Quit();
+                    return; // Prevent running other tick logic
+                }
+                else
+                {
+                    int remainingMinutes = (int)Math.Ceiling(remainingSecs / 60.0);
+                    if (remainingMinutes > 0 && remainingMinutes != lastMaintenanceWarningMinutes && remainingSecs > 30.0)
+                    {
+                        lastMaintenanceWarningMinutes = remainingMinutes;
+                        SendChatMessage($"<color=#0000FF>[ADMIN]</color> Shutdown for maintenance in <color=#00FF88><i>{remainingMinutes}m</i></color>.");
+                    }
+                    else if (remainingSecs <= 30.0 && !maintenanceWarning30sSent)
+                    {
+                        maintenanceWarning30sSent = true;
+                        SendChatMessage("<color=#0000FF>[ADMIN]</color> Shutdown for maintenance in <color=#00FF88><i>30s</i></color>.");
+                    }
+                    else if (remainingSecs <= 10.0 && !maintenanceWarning10sSent)
+                    {
+                        maintenanceWarning10sSent = true;
+                        SendChatMessage("<color=#0000FF>[ADMIN]</color> Shutdown for maintenance in <color=#00FF88><i>10s</i></color>.");
+                    }
+                }
+            }
+
             if (!steamStatusLogged)
             {
                 steamStatusLogged = true;
@@ -197,6 +277,7 @@ namespace LiftoffAutoLobby
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Level loaded. Resetting room timer.");
                     roomCreatedTime = DateTime.Now;
                     isLeaving = false;
+                    firstStartGameClickTime = DateTime.MinValue; // race loaded successfully, disarm runtime watchdog
                 }
             }
 
@@ -880,6 +961,7 @@ namespace LiftoffAutoLobby
                 UnityEngine.Debug.Log("[AutoLobbyPlugin] Entered GameRoom. Starting room timer.");
                 roomCreatedTime = DateTime.Now;
                 chatWarnedAboutNextRace = false;
+                firstStartGameClickTime = DateTime.MinValue;
             }
 
             double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
@@ -894,7 +976,31 @@ namespace LiftoffAutoLobby
                 {
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Auto-start: clicking START button.");
                     lastStartGameClickedTime = DateTime.Now;
+                    if (firstStartGameClickTime == DateTime.MinValue)
+                    {
+                        firstStartGameClickTime = DateTime.Now;
+                    }
                     startBtn.onClick.Invoke();
+                    return;
+                }
+            }
+
+            // Runtime watchdog: if Start Game has been clicked repeatedly but the scene never
+            // transitioned into a flight level (race never actually loaded — the real-world
+            // "Drawing Board" failure mode), treat this track as a runtime failure: blacklist it
+            // for the rest of this session and recover to a known-good state. This is
+            // defense-in-depth alongside the pre-launch validation, since a track can pass every
+            // static check and still fail only when the race actually starts.
+            if (firstStartGameClickTime != DateTime.MinValue)
+            {
+                double sinceFirstClick = (DateTime.Now - firstStartGameClickTime).TotalSeconds;
+                if (sinceFirstClick > RaceLoadTimeoutSeconds)
+                {
+                    string failKey = $"{targetEnvironment}|{targetTrackName}|{targetGameMode}";
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] RUNTIME FAILURE: race did not load {sinceFirstClick:F0}s after Start Game click for '{targetTrackName}' (Env: {targetEnvironment}, Mode: {targetGameMode}). Blacklisting for this session.");
+                    sessionBlacklistedTracks.Add(failKey);
+                    firstStartGameClickTime = DateTime.MinValue;
+                    NavigateToMainMenu();
                     return;
                 }
             }
@@ -1002,6 +1108,92 @@ namespace LiftoffAutoLobby
             }
         }
 
+        private static void RecordTrackModeDump(string envName, string modeName, List<string> tracks)
+        {
+            if (!dumpedTrackModeMap.TryGetValue(envName, out var modeMap))
+            {
+                modeMap = new Dictionary<string, List<string>>();
+                dumpedTrackModeMap[envName] = modeMap;
+            }
+            modeMap[modeName] = tracks;
+        }
+
+        private static string JsonEscape(string s) => s.Replace("\"", "\\\"");
+
+        // Union of tracks per environment across all dumped modes — keeps the existing flat
+        // schema so gather_tracks.py's ui_tracks_dump.json consumer contract is unchanged.
+        private static void WriteLegacyUiTracksDump(Dictionary<string, Dictionary<string, List<string>>> data)
+        {
+            string dumpFilePath = Path.Combine(pluginPath, "ui_tracks_dump.json");
+            try
+            {
+                List<string> lines = new List<string>();
+                lines.Add("{");
+                int envCount = 0;
+                foreach (var envEntry in data)
+                {
+                    envCount++;
+                    var unionTracks = new List<string>();
+                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var modeEntry in envEntry.Value)
+                    {
+                        foreach (var track in modeEntry.Value)
+                        {
+                            if (seen.Add(track)) unionTracks.Add(track);
+                        }
+                    }
+                    List<string> trackListStr = new List<string>();
+                    foreach (var track in unionTracks) trackListStr.Add($"\"{JsonEscape(track)}\"");
+                    string comma = (envCount < data.Count) ? "," : "";
+                    lines.Add($"  \"{JsonEscape(envEntry.Key)}\": [{string.Join(", ", trackListStr.ToArray())}]{comma}");
+                }
+                lines.Add("}");
+                File.WriteAllLines(dumpFilePath, lines.ToArray());
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Legacy UI tracks dump saved to: {dumpFilePath}");
+            }
+            catch (Exception dumpEx)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write legacy UI tracks dump: {dumpEx}");
+            }
+        }
+
+        // New ground-truth file: {Environment: {GameMode: [trackNames]}}. This is what the
+        // Python orchestrator cross-validates resolved playlist entries against before writing
+        // tracks_to_rotate.txt (see resolve_and_write_playlist() in run_headless_lobby.py).
+        private static void WriteTrackModeAvailabilityDump(Dictionary<string, Dictionary<string, List<string>>> data)
+        {
+            string dumpFilePath = Path.Combine(pluginPath, "track_mode_availability.json");
+            try
+            {
+                List<string> lines = new List<string>();
+                lines.Add("{");
+                int envCount = 0;
+                foreach (var envEntry in data)
+                {
+                    envCount++;
+                    lines.Add($"  \"{JsonEscape(envEntry.Key)}\": {{");
+                    int modeCount = 0;
+                    foreach (var modeEntry in envEntry.Value)
+                    {
+                        modeCount++;
+                        List<string> trackListStr = new List<string>();
+                        foreach (var track in modeEntry.Value) trackListStr.Add($"\"{JsonEscape(track)}\"");
+                        string modeComma = (modeCount < envEntry.Value.Count) ? "," : "";
+                        lines.Add($"    \"{JsonEscape(modeEntry.Key)}\": [{string.Join(", ", trackListStr.ToArray())}]{modeComma}");
+                    }
+                    string envComma = (envCount < data.Count) ? "," : "";
+                    lines.Add($"  }}{envComma}");
+                }
+                lines.Add("}");
+                File.WriteAllLines(dumpFilePath, lines.ToArray());
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Track/mode availability dump saved to: {dumpFilePath}");
+            }
+            catch (Exception dumpEx)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write track/mode availability dump: {dumpEx}");
+            }
+        }
+
         private static bool TrySelectCustomContentTab(PopupQuickPlayMultiplayerSetup popup)
         {
             if (popup == null) return false;
@@ -1033,70 +1225,87 @@ namespace LiftoffAutoLobby
             ContentSettingsPanel contentSettings = GetPopupContentSettings(popup);
             if (contentSettings != null)
             {
-                string dumpFilePath = Path.Combine(pluginPath, "ui_tracks_dump.json");
-                if (!isDumpingUI && !File.Exists(dumpFilePath))
+                if (!isDumpingTrackModes && !trackModeDumpDoneThisSession)
                 {
-                    isDumpingUI = true;
-                    dumpEnvIndex = 0;
-                    dumpedTracksMap.Clear();
-                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Starting UI track dump...");
+                    isDumpingTrackModes = true;
+                    dumpEnvIndex2 = 0;
+                    dumpModeIndex2 = 0;
+                    dumpedTrackModeMap.Clear();
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Starting Environment x GameMode track availability dump ({TrackModeDumpCandidateModes.Length} candidate modes)...");
                 }
 
-                if (isDumpingUI)
+                if (isDumpingTrackModes)
                 {
                     LiftoffDropdown dropdownEnvironment = GetContentDropdownEnvironment(contentSettings);
+                    LiftoffDropdown dropdownGameMode = GetContentDropdownGameMode(contentSettings);
                     LiftoffDropdown dropdownContent = GetContentDropdownContent(contentSettings);
-                    if (dropdownEnvironment != null && dropdownContent != null)
+                    if (dropdownEnvironment != null && dropdownGameMode != null && dropdownContent != null)
                     {
-                        if (dumpEnvIndex < dropdownEnvironment.options.Count)
+                        if (dumpEnvIndex2 < dropdownEnvironment.options.Count)
                         {
-                            if (dropdownEnvironment.value != dumpEnvIndex)
+                            if (dropdownEnvironment.value != dumpEnvIndex2)
                             {
-                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] UI Dump: Selecting environment index {dumpEnvIndex} ({dropdownEnvironment.options[dumpEnvIndex].text})");
-                                dropdownEnvironment.value = dumpEnvIndex;
-                                dropdownEnvironment.onValueChanged.Invoke(dumpEnvIndex);
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Dump: Selecting environment index {dumpEnvIndex2} ({dropdownEnvironment.options[dumpEnvIndex2].text})");
+                                dropdownEnvironment.value = dumpEnvIndex2;
+                                dropdownEnvironment.onValueChanged.Invoke(dumpEnvIndex2);
                                 return; // Let the UI update next frame
                             }
 
-                            string envName = dropdownEnvironment.options[dumpEnvIndex].text;
-                            var tracks = new List<string>();
-                            for (int i = 0; i < dropdownContent.options.Count; i++)
-                            {
-                                tracks.Add(dropdownContent.options[i].text);
-                            }
-                            dumpedTracksMap[envName] = tracks;
-                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] UI Dump: Collected {tracks.Count} tracks for environment '{envName}'");
+                            string envName = dropdownEnvironment.options[dumpEnvIndex2].text;
 
-                            dumpEnvIndex++;
-                            return; // Wait for next tick
+                            if (dumpModeIndex2 < TrackModeDumpCandidateModes.Length)
+                            {
+                                string modeName = TrackModeDumpCandidateModes[dumpModeIndex2];
+                                int modeIdx = -1;
+                                for (int i = 0; i < dropdownGameMode.options.Count; i++)
+                                {
+                                    if (dropdownGameMode.options[i].text.Equals(modeName, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        modeIdx = i;
+                                        break;
+                                    }
+                                }
+
+                                if (modeIdx == -1)
+                                {
+                                    // This environment doesn't offer this mode at all
+                                    RecordTrackModeDump(envName, modeName, new List<string>());
+                                    dumpModeIndex2++;
+                                    return;
+                                }
+
+                                if (dropdownGameMode.value != modeIdx)
+                                {
+                                    dropdownGameMode.value = modeIdx;
+                                    dropdownGameMode.onValueChanged.Invoke(modeIdx);
+                                    return; // Let the UI update next frame
+                                }
+
+                                var tracks = new List<string>();
+                                for (int i = 0; i < dropdownContent.options.Count; i++)
+                                {
+                                    tracks.Add(dropdownContent.options[i].text);
+                                }
+                                RecordTrackModeDump(envName, modeName, tracks);
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Dump: env='{envName}' mode='{modeName}' -> {tracks.Count} tracks");
+
+                                dumpModeIndex2++;
+                                return; // Wait for next tick
+                            }
+                            else
+                            {
+                                dumpModeIndex2 = 0;
+                                dumpEnvIndex2++;
+                                return;
+                            }
                         }
                         else
                         {
-                            try
-                            {
-                                List<string> lines = new List<string>();
-                                lines.Add("{");
-                                int count = 0;
-                                foreach (var kvp in dumpedTracksMap)
-                                {
-                                    count++;
-                                    List<string> trackListStr = new List<string>();
-                                    foreach (var track in kvp.Value)
-                                    {
-                                        trackListStr.Add($"\"{track.Replace("\"", "\\\"")}\"");
-                                    }
-                                    string comma = (count < dumpedTracksMap.Count) ? "," : "";
-                                    lines.Add($"  \"{kvp.Key.Replace("\"", "\\\"")}\": [{string.Join(", ", trackListStr.ToArray())}]{comma}");
-                                }
-                                lines.Add("}");
-                                File.WriteAllLines(dumpFilePath, lines.ToArray());
-                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] UI Dump successful! Saved to: {dumpFilePath}");
-                            }
-                            catch (Exception dumpEx)
-                            {
-                                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write UI dump: {dumpEx}");
-                            }
-                            isDumpingUI = false;
+                            WriteLegacyUiTracksDump(dumpedTrackModeMap);
+                            WriteTrackModeAvailabilityDump(dumpedTrackModeMap);
+                            isDumpingTrackModes = false;
+                            trackModeDumpDoneThisSession = true;
+                            UnityEngine.Debug.Log("[AutoLobbyPlugin] Track/mode availability dump complete.");
                         }
                     }
                     return; // Pause room configuration during dumping
@@ -1158,66 +1367,14 @@ namespace LiftoffAutoLobby
                 }
             }
 
-            // 2. Configure Content settings (GameMode, Environment, Track)
+            // 2. Configure Content settings (Environment, GameMode, Track)
+            // Environment is set FIRST: selecting it can cause the game to re-filter/rebuild
+            // the GameMode and Content dropdown options (cascading filters), so GameMode must
+            // be (re)verified AFTER Environment, not before, or a valid choice can be silently
+            // invalidated and never reapplied.
             contentSettings = GetPopupContentSettings(popup);
             if (contentSettings != null)
             {
-                // Set GameMode
-                LiftoffDropdown dropdownGameMode = GetContentDropdownGameMode(contentSettings);
-                if (dropdownGameMode != null)
-                {
-                    int modeIndex = -1;
-                    for (int i = 0; i < dropdownGameMode.options.Count; i++)
-                    {
-                        if (dropdownGameMode.options[i].text.Equals(targetGameMode, StringComparison.OrdinalIgnoreCase))
-                        {
-                            modeIndex = i;
-                            break;
-                        }
-                    }
-                    if (modeIndex != -1)
-                    {
-                        if (dropdownGameMode.value != modeIndex)
-                        {
-                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Changing GameMode dropdown to: {targetGameMode}");
-                            dropdownGameMode.value = modeIndex;
-                            dropdownGameMode.onValueChanged.Invoke(modeIndex);
-                            return; // Let the UI update next frame
-                        }
-                    }
-                    else
-                    {
-                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] GameMode '{targetGameMode}' not found in dropdown. Available GameModes:");
-                        for (int i = 0; i < dropdownGameMode.options.Count; i++)
-                        {
-                            UnityEngine.Debug.Log($"  - GameMode {i}: '{dropdownGameMode.options[i].text}'");
-                        }
-                    }
-                }
-                
-                // Log all dropdown options for debugging
-                if (DateTime.Now.Second % 15 == 0)
-                {
-                    LiftoffDropdown dropdownEnvironmentDebug = GetContentDropdownEnvironment(contentSettings);
-                    if (dropdownEnvironmentDebug != null)
-                    {
-                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Environment dropdown options (Count: {dropdownEnvironmentDebug.options.Count}, Current Value: {dropdownEnvironmentDebug.value}):");
-                        for (int i = 0; i < dropdownEnvironmentDebug.options.Count; i++)
-                        {
-                            UnityEngine.Debug.Log($"  - Env Option {i}: '{dropdownEnvironmentDebug.options[i].text}'");
-                        }
-                    }
-                    LiftoffDropdown dropdownContentDebug = GetContentDropdownContent(contentSettings);
-                    if (dropdownContentDebug != null)
-                    {
-                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Content dropdown options (Count: {dropdownContentDebug.options.Count}, Current Value: {dropdownContentDebug.value}):");
-                        for (int i = 0; i < dropdownContentDebug.options.Count; i++)
-                        {
-                            UnityEngine.Debug.Log($"  - Content Option {i}: '{dropdownContentDebug.options[i].text}'");
-                        }
-                    }
-                }
-
                 // Set Environment
                 LiftoffDropdown dropdownEnvironment = GetContentDropdownEnvironment(contentSettings);
                 if (dropdownEnvironment != null)
@@ -1250,6 +1407,62 @@ namespace LiftoffAutoLobby
                             {
                                 UnityEngine.Debug.Log($"  - Env {i}: '{dropdownEnvironment.options[i].text}'");
                             }
+                        }
+                    }
+                }
+
+                // Log all dropdown options for debugging
+                if (DateTime.Now.Second % 15 == 0)
+                {
+                    LiftoffDropdown dropdownEnvironmentDebug = GetContentDropdownEnvironment(contentSettings);
+                    if (dropdownEnvironmentDebug != null)
+                    {
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Environment dropdown options (Count: {dropdownEnvironmentDebug.options.Count}, Current Value: {dropdownEnvironmentDebug.value}):");
+                        for (int i = 0; i < dropdownEnvironmentDebug.options.Count; i++)
+                        {
+                            UnityEngine.Debug.Log($"  - Env Option {i}: '{dropdownEnvironmentDebug.options[i].text}'");
+                        }
+                    }
+                    LiftoffDropdown dropdownContentDebug = GetContentDropdownContent(contentSettings);
+                    if (dropdownContentDebug != null)
+                    {
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Content dropdown options (Count: {dropdownContentDebug.options.Count}, Current Value: {dropdownContentDebug.value}):");
+                        for (int i = 0; i < dropdownContentDebug.options.Count; i++)
+                        {
+                            UnityEngine.Debug.Log($"  - Content Option {i}: '{dropdownContentDebug.options[i].text}'");
+                        }
+                    }
+                }
+
+                // Set GameMode (after Environment, since Environment selection can re-filter these options)
+                LiftoffDropdown dropdownGameMode = GetContentDropdownGameMode(contentSettings);
+                if (dropdownGameMode != null)
+                {
+                    int modeIndex = -1;
+                    for (int i = 0; i < dropdownGameMode.options.Count; i++)
+                    {
+                        if (dropdownGameMode.options[i].text.Equals(targetGameMode, StringComparison.OrdinalIgnoreCase))
+                        {
+                            modeIndex = i;
+                            break;
+                        }
+                    }
+                    if (modeIndex != -1)
+                    {
+                        if (dropdownGameMode.value != modeIndex)
+                        {
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Changing GameMode dropdown to: {targetGameMode}");
+                            dropdownGameMode.value = modeIndex;
+                            dropdownGameMode.onValueChanged.Invoke(modeIndex);
+                            return; // Let the UI update next frame
+                        }
+                    }
+                    else
+                    {
+                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] GameMode '{targetGameMode}' not found in dropdown. Available GameModes:");
+                        for (int i = 0; i < dropdownGameMode.options.Count; i++)
+                        {
+                            UnityEngine.Debug.Log($"  - GameMode {i}: '{dropdownGameMode.options[i].text}'");
                         }
                     }
                 }
@@ -1720,17 +1933,18 @@ namespace LiftoffAutoLobby
                 shuffleMode = GetShuffleMode();
 
                 int index = 0;
+                List<int> shuffledIndices = null;
+                int shuffleIndex = 0;
                 if (shuffleMode)
                 {
                     string shuffleStatePath = Path.Combine(pluginPath, "shuffle_state.txt");
-                    int shuffleIndex;
-                    List<int> shuffledIndices;
-                    if (ParseShuffleState(shuffleStatePath, validTracks.Count, out shuffleIndex, out shuffledIndices))
+                    if (!ParseShuffleState(shuffleStatePath, validTracks.Count, out shuffleIndex, out shuffledIndices))
                     {
-                        if (shuffleIndex >= 0 && shuffleIndex < shuffledIndices.Count)
-                        {
-                            index = shuffledIndices[shuffleIndex];
-                        }
+                        shuffledIndices = null;
+                    }
+                    else if (shuffleIndex < 0 || shuffleIndex >= shuffledIndices.Count)
+                    {
+                        shuffleIndex = 0;
                     }
                 }
                 else
@@ -1739,22 +1953,42 @@ namespace LiftoffAutoLobby
                     {
                         int.TryParse(File.ReadAllText(statePath).Trim(), out index);
                     }
+                    if (index < 0 || index >= validTracks.Count)
+                    {
+                        index = 0;
+                    }
                 }
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Current state index: {index}, validTracks count: {validTracks.Count}");
 
-                if (index < 0 || index >= validTracks.Count)
-                {
-                    index = 0;
-                }
+                string overrideMode = GetOverrideGameMode();
+                string trackName = "";
 
-                trackIndex = index;
-                string selectedLine = validTracks[index];
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Selected line: '{selectedLine}'");
-                
-                string[] parts = selectedLine.Split(',');
-                string trackName = parts[0].Trim();
-                if (parts.Length > 1) environment = parts[1].Trim();
-                if (parts.Length > 2) gameMode = parts[2].Trim();
+                // Walk forward from the current position (read-only, no state is persisted by
+                // Peek) skipping any session-blacklisted (env, track, mode) combos, so the "up
+                // next" chat announcement never names a track that will be skipped instantly.
+                for (int attempt = 0; attempt < validTracks.Count; attempt++)
+                {
+                    int candidateIndex = (shuffleMode && shuffledIndices != null)
+                        ? shuffledIndices[(shuffleIndex + attempt) % shuffledIndices.Count]
+                        : (index + attempt) % validTracks.Count;
+
+                    string selectedLine = validTracks[candidateIndex];
+                    string[] parts = selectedLine.Split(',');
+                    string candidateTrackName = parts[0].Trim();
+                    string candidateEnv = parts.Length > 1 ? parts[1].Trim() : environment;
+                    string candidateMode = parts.Length > 2 ? parts[2].Trim() : gameMode;
+                    if (!string.IsNullOrEmpty(overrideMode)) candidateMode = overrideMode;
+
+                    string key = $"{candidateEnv}|{candidateTrackName}|{candidateMode}";
+                    if (sessionBlacklistedTracks.Contains(key)) continue;
+
+                    trackIndex = candidateIndex;
+                    environment = candidateEnv;
+                    gameMode = candidateMode;
+                    trackName = candidateTrackName;
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Selected line: '{selectedLine}'");
+                    break;
+                }
 
                 return trackName;
             }
@@ -1765,7 +1999,51 @@ namespace LiftoffAutoLobby
             }
         }
 
+        private static int CountValidRotationLines()
+        {
+            try
+            {
+                string tracksPath = Path.Combine(pluginPath, "tracks_to_rotate.txt");
+                if (!File.Exists(tracksPath)) return 0;
+                int count = 0;
+                foreach (var line in File.ReadAllLines(tracksPath))
+                {
+                    if (!string.IsNullOrWhiteSpace(line) && !line.Trim().StartsWith("#")) count++;
+                }
+                return count;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        // Wraps GetNextTrackFromRotationOnce() with a bounded skip-loop so tracks that failed at
+        // runtime this session (see sessionBlacklistedTracks) are never selected again until the
+        // process restarts. Bounded by the rotation's own line count so a fully-blacklisted
+        // rotation can't loop forever.
         private static string GetNextTrackFromRotation(out string environment, out string gameMode)
+        {
+            string trackName = "";
+            environment = "The Drawing Board";
+            gameMode = "Classic Race";
+
+            int maxAttempts = Math.Max(1, CountValidRotationLines());
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
+            {
+                trackName = GetNextTrackFromRotationOnce(out environment, out gameMode);
+                if (string.IsNullOrEmpty(trackName)) break;
+
+                string key = $"{environment}|{trackName}|{gameMode}";
+                if (!sessionBlacklistedTracks.Contains(key)) break;
+
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Skipping session-blacklisted track '{trackName}' ({environment}, {gameMode}) in rotation.");
+            }
+
+            return trackName;
+        }
+
+        private static string GetNextTrackFromRotationOnce(out string environment, out string gameMode)
         {
             environment = "The Drawing Board";
             gameMode = "Classic Race";
@@ -1851,6 +2129,12 @@ namespace LiftoffAutoLobby
                 string trackName = parts[0].Trim();
                 if (parts.Length > 1) environment = parts[1].Trim();
                 if (parts.Length > 2) gameMode = parts[2].Trim();
+
+                string overrideMode = GetOverrideGameMode();
+                if (!string.IsNullOrEmpty(overrideMode))
+                {
+                    gameMode = overrideMode;
+                }
 
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Selection: '{trackName}' (Env: '{environment}', Mode: '{gameMode}') [Index {index}]");
                 return trackName;
@@ -1977,6 +2261,155 @@ namespace LiftoffAutoLobby
             }
             catch {}
             return false; // Default: false
+        }
+
+        private static string GetOverrideGameMode()
+        {
+            try
+            {
+                string path = Path.Combine(pluginPath, "override_game_mode.txt");
+                if (File.Exists(path))
+                {
+                    string mode = File.ReadAllText(path).Trim();
+                    if (!string.IsNullOrEmpty(mode))
+                    {
+                        return mode;
+                    }
+                }
+            }
+            catch {}
+            return null;
+        }
+
+        private static bool PlaylistExists(string name)
+        {
+            try
+            {
+                string path = Path.Combine(pluginPath, "available_playlists.txt");
+                if (File.Exists(path))
+                {
+                    foreach (var line in File.ReadAllLines(path))
+                    {
+                        if (line.Trim().Equals(name.Trim(), StringComparison.OrdinalIgnoreCase))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch {}
+            return false;
+        }
+
+        private static string GetAvailablePlaylistsString()
+        {
+            try
+            {
+                string path = Path.Combine(pluginPath, "available_playlists.txt");
+                if (File.Exists(path))
+                {
+                    var list = new List<string>();
+                    foreach (var line in File.ReadAllLines(path))
+                    {
+                        if (!string.IsNullOrWhiteSpace(line))
+                        {
+                            list.Add(line.Trim());
+                        }
+                    }
+                    return string.Join(", ", list.ToArray());
+                }
+            }
+            catch {}
+            return "";
+        }
+
+        private static bool KickPlayer(string targetName, out string matchedName, out string matchesList)
+        {
+            matchedName = "";
+            matchesList = "";
+            try
+            {
+                Type networkType = Type.GetType("Photon.Pun.PhotonNetwork, PhotonUnityNetworking") ?? 
+                                   Type.GetType("PhotonNetwork, Assembly-CSharp");
+                if (networkType == null) return false;
+
+                PropertyInfo playerListProp = networkType.GetProperty("PlayerList", BindingFlags.Public | BindingFlags.Static);
+                if (playerListProp == null) return false;
+
+                Array playerArray = (Array)playerListProp.GetValue(null);
+                if (playerArray == null || playerArray.Length == 0) return false;
+
+                var matches = new List<object>();
+                var matchNames = new List<string>();
+
+                for (int i = 0; i < playerArray.Length; i++)
+                {
+                    object playerObj = playerArray.GetValue(i);
+                    if (playerObj == null) continue;
+
+                    PropertyInfo nickProp = playerObj.GetType().GetProperty("NickName") ?? playerObj.GetType().GetProperty("Nickname");
+                    if (nickProp == null) continue;
+
+                    string nick = (string)nickProp.GetValue(playerObj, null) ?? "";
+                    
+                    if (nick.IndexOf(targetName, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        PropertyInfo localProp = playerObj.GetType().GetProperty("IsLocal");
+                        bool isLocal = false;
+                        if (localProp != null) isLocal = (bool)localProp.GetValue(playerObj, null);
+                        if (isLocal) continue;
+
+                        matches.Add(playerObj);
+                        matchNames.Add(nick);
+                    }
+                }
+
+                if (matches.Count == 0)
+                {
+                    return false;
+                }
+                if (matches.Count == 1)
+                {
+                    matchedName = matchNames[0];
+                    MethodInfo closeMethod = networkType.GetMethod("CloseConnection", BindingFlags.Public | BindingFlags.Static, null, new[] { matches[0].GetType() }, null);
+                    if (closeMethod != null)
+                    {
+                        closeMethod.Invoke(null, new[] { matches[0] });
+                        return true;
+                    }
+                }
+                else
+                {
+                    matchedName = "multiple";
+                    matchesList = string.Join(", ", matchNames.ToArray());
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Exception in KickPlayer: {ex}");
+            }
+            return false;
+        }
+
+        private static void CancelMaintenance()
+        {
+            maintenanceActive = false;
+            maintenanceTime = DateTime.MaxValue;
+            lastMaintenanceWarningMinutes = -1;
+            maintenanceWarning30sSent = false;
+            maintenanceWarning10sSent = false;
+            try
+            {
+                string path = Path.Combine(pluginPath, "maintenance_active.txt");
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to delete maintenance_active.txt: {ex.Message}");
+            }
         }
 
         private static bool ParseShuffleState(string shuffleStatePath, int validTracksCount, out int shuffleIndex, out List<int> shuffledIndices)
@@ -2935,6 +3368,143 @@ namespace LiftoffAutoLobby
                         else
                         {
                             SendChatMessage("[ADMIN] Usage: /shuffle on|off");
+                        }
+                        break;
+
+                    case "/playlist":
+                        if (string.IsNullOrEmpty(arg))
+                        {
+                            string current = "";
+                            string playlistPath = Path.Combine(pluginPath, "playlist_name.txt");
+                            if (File.Exists(playlistPath)) current = File.ReadAllText(playlistPath).Trim();
+                            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Current playlist: <color=#00FF88><i>{current}</i></color>. Available: <color=#00FF88><i>{GetAvailablePlaylistsString()}</i></color>");
+                        }
+                        else if (PlaylistExists(arg))
+                        {
+                            try
+                            {
+                                File.WriteAllText(Path.Combine(pluginPath, "playlist_name.txt"), arg.Trim());
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Playlist set to <color=#00FF88><i>{arg.Trim()}</i></color>. Next track will be from the new playlist.");
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set playlist to {arg}");
+                            }
+                            catch (Exception ex)
+                            {
+                                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write playlist_name.txt: {ex.Message}");
+                                SendChatMessage("<color=#0000FF>[ADMIN]</color> Failed to change playlist due to internal error.");
+                            }
+                        }
+                        else
+                        {
+                            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Unknown playlist. Available: <color=#00FF88><i>{GetAvailablePlaylistsString()}</i></color>");
+                        }
+                        break;
+
+                    case "/mode":
+                        if (string.IsNullOrEmpty(arg))
+                        {
+                            string currentMode = GetOverrideGameMode();
+                            if (string.IsNullOrEmpty(currentMode)) currentMode = "auto (playlist default)";
+                            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Current mode: <color=#00FF88><i>{currentMode}</i></color>. Usage: /mode infinite|circuit|dropout|survival|auto");
+                        }
+                        else
+                        {
+                            string targetMode = "";
+                            string lowerArg = arg.Trim().ToLower();
+                            if (lowerArg == "infinite") targetMode = "Infinite Race";
+                            else if (lowerArg == "circuit" || lowerArg == "classic") targetMode = "Classic Race";
+                            else if (lowerArg == "dropout") targetMode = "Dropout Race";
+                            else if (lowerArg == "survival") targetMode = "Survival";
+                            else if (lowerArg == "auto" || lowerArg == "off" || lowerArg == "reset") targetMode = "auto";
+
+                            if (targetMode == "")
+                            {
+                                SendChatMessage("<color=#0000FF>[ADMIN]</color> Invalid mode. Supported: infinite, circuit, dropout, survival, auto");
+                            }
+                            else if (targetMode == "auto")
+                            {
+                                try
+                                {
+                                    string path = Path.Combine(pluginPath, "override_game_mode.txt");
+                                    if (File.Exists(path)) File.Delete(path);
+                                    SendChatMessage("<color=#0000FF>[ADMIN]</color> Game mode reset to <color=#00FF88><i>playlist default</i></color>.");
+                                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} reset override game mode to auto.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to delete override_game_mode.txt: {ex.Message}");
+                                }
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    File.WriteAllText(Path.Combine(pluginPath, "override_game_mode.txt"), targetMode);
+                                    SendChatMessage($"<color=#0000FF>[ADMIN]</color> Game mode set to <color=#00FF88><i>{targetMode}</i></color>.");
+                                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set override game mode to {targetMode}.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write override_game_mode.txt: {ex.Message}");
+                                }
+                            }
+                        }
+                        break;
+
+                    case "/kick":
+                        if (string.IsNullOrEmpty(arg))
+                        {
+                            SendChatMessage("<color=#0000FF>[ADMIN]</color> Usage: /kick <player_name>");
+                        }
+                        else
+                        {
+                            string matchedName;
+                            string matchesList;
+                            if (KickPlayer(arg, out matchedName, out matchesList))
+                            {
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Kicked player <color=#00FF88><i>{matchedName}</i></color>.");
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} kicked player {matchedName}");
+                            }
+                            else if (matchedName == "multiple")
+                            {
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Multiple matches found: <color=#00FF88><i>{matchesList}</i></color>. Please be more specific.");
+                            }
+                            else
+                            {
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> No player found matching <color=#00FF88><i>'{arg}'</i></color>.");
+                            }
+                        }
+                        break;
+
+                    case "/maintenance":
+                        if (!string.IsNullOrEmpty(arg) && arg.Equals("cancel", StringComparison.OrdinalIgnoreCase))
+                        {
+                            CancelMaintenance();
+                            SendChatMessage("<color=#0000FF>[ADMIN]</color> Scheduled maintenance cancelled.");
+                        }
+                        else
+                        {
+                            double mins = 5.0;
+                            if (!string.IsNullOrEmpty(arg))
+                            {
+                                double.TryParse(arg, out mins);
+                            }
+                            if (mins <= 0) mins = 5.0;
+
+                            maintenanceActive = true;
+                            maintenanceTime = DateTime.Now.AddMinutes(mins);
+                            lastMaintenanceWarningMinutes = -1;
+                            maintenanceWarning30sSent = false;
+                            maintenanceWarning10sSent = false;
+                            try
+                            {
+                                File.WriteAllText(Path.Combine(pluginPath, "maintenance_active.txt"), "true");
+                            }
+                            catch (Exception ex)
+                            {
+                                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write maintenance_active.txt: {ex.Message}");
+                            }
+                            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Shutdown for maintenance scheduled in <color=#00FF88><i>{mins:F1}m</i></color>.");
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} scheduled maintenance in {mins} minutes.");
                         }
                         break;
 
