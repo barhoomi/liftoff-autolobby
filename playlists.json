@@ -1,4 +1,10 @@
 {
+  "honk_test": [
+    {"environment": "The Drawing Board", "track": "*Honk*Backtrack*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*Honk*Canyon*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*Honk*Flowting*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*Honk*Fort Honk - Easy*", "mode": "Infinite Race"}
+  ],
   "env_fix_test": [
     {"environment": "The Drawing Board", "track": "*", "mode": "Infinite Race"},
     {"environment": "The Green",         "track": "*", "mode": "Infinite Race"},
@@ -46,7 +52,7 @@
     "First Procedural Track",
     "procedural-test-1",
     "Race_The_Ruins_v4_by_DerHonk83",
-    "[Honk] *"
+    "*Honk*"
   ],
   "all_official_races": [
     {
