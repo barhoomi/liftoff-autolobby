@@ -10,6 +10,7 @@
 #   --shuffle            Randomize playlist order
 #   --public             Make the lobby public
 #   --headless           Use Xvfb virtual display instead of GUI
+#   --gui                Force GUI mode (override config files)
 #   --no-build           Skip build/sync step (faster restart)
 
 set -e
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --shuffle)   SHUFFLE=1; shift ;;
         --public)    PUBLIC=1; shift ;;
         --headless)  HEADLESS=1; shift ;;
+        --gui)       HEADLESS=0; shift ;;
         --no-build)  BUILD=0; shift ;;
         --width)     WIDTH="$2"; shift 2 ;;
         --height)    HEIGHT="$2"; shift 2 ;;
