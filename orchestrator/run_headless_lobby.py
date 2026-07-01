@@ -123,11 +123,8 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file):
     else:
         print(f"[Playlist] Resolved {len(resolved_tracks)} tracks for playlist '{playlist_name}'.")
         
-    if shuffle_enabled:
-        print("[Playlist] Shuffling track rotation order...")
-        random.shuffle(resolved_tracks)
-    else:
-        print("[Playlist] Using track rotation in playlist definition order...")
+    # Always write in playlist definition order so that C# plugin can control shuffle mode dynamically.
+    print("[Playlist] Using track rotation in playlist definition order...")
         
     # Write to tracks_to_rotate.txt
     with open(output_file, "w") as f:
@@ -176,6 +173,26 @@ def get_active_liftoff_pids():
         pass
     return pids
 
+def get_steam_dbus_address():
+    try:
+        import getpass
+        current_user = getpass.getuser()
+        import subprocess
+        out = subprocess.run(["pgrep", "-u", current_user, "-x", "steam"], stdout=subprocess.PIPE, text=True)
+        pids = [p.strip() for p in out.stdout.splitlines() if p.strip().isdigit()]
+        for pid in pids:
+            environ_path = f"/proc/{pid}/environ"
+            if os.path.exists(environ_path):
+                with open(environ_path, "rb") as f:
+                    env_data = f.read()
+                parts = env_data.split(b"\x00")
+                for part in parts:
+                    if part.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
+                        return part.decode("utf-8", errors="ignore").split("=", 1)[1]
+    except Exception as e:
+        print(f"[Host] Warning: failed to extract Steam DBUS address: {e}")
+    return None
+
 def main():
     # Sanitize environment variables if they belong to another user to prevent Steam IPC hijacking
     try:
@@ -214,6 +231,8 @@ def main():
     parser.add_argument("--lobby-name", type=str, default=None, help="Override the lobby name (room name) for the server.")
     parser.add_argument("--public", action="store_true", help="Make the lobby public instead of private.")
     parser.add_argument("--auto-start", action="store_true", help="Automatically start the race after players join, instead of staying in the lobby.")
+    parser.add_argument("--width", type=int, default=640, help="Game window width (default: 640).")
+    parser.add_argument("--height", type=int, default=480, help="Game window height (default: 480).")
     args = parser.parse_args()
 
     config = load_config()
@@ -265,6 +284,8 @@ def main():
         f.write("false" if args.public else "true")
     with open(os.path.join(plugins_dir, "auto_start.txt"), "w") as f:
         f.write("true" if args.auto_start else "false")
+    with open(os.path.join(plugins_dir, "shuffle_mode.txt"), "w") as f:
+        f.write("true" if args.shuffle else "false")
     
     playlist_val = args.playlist if args.playlist else "custom"
     with open(os.path.join(plugins_dir, "playlist_name.txt"), "w") as f:
@@ -318,6 +339,16 @@ def main():
         env["DISPLAY"] = os.environ.get("DISPLAY", ":0")
     env["STEAM_ENABLE_BOT"] = "1"  # Triggers BepInEx wrapper loader in launch.sh
 
+    dbus_addr = get_steam_dbus_address()
+    if dbus_addr:
+        env["DBUS_SESSION_BUS_ADDRESS"] = dbus_addr
+        print(f"[Host] Injected Steam DBUS address: {dbus_addr}")
+
+    # Set Steam App ID environment variables to ensure Steamworks API initializes
+    env["SteamAppId"] = "410340"
+    env["STEAM_APP_ID"] = "410340"
+    env["SteamGameId"] = "410340"
+
     # Remove parent user session variables to prevent Steam IPC hijacking (XDG_RUNTIME_DIR/DBUS are already sanitized at startup)
     for var in ["XDG_SESSION_CLASS", "XDG_SESSION_TYPE", "XDG_SESSION_ID"]:
         env.pop(var, None)
@@ -346,8 +377,8 @@ def main():
                 proc = subprocess.Popen([
                     launch_sh_path,
                     os.path.join(game_dir, "Liftoff.x86_64"),
-                    "-screen-width", "640",
-                    "-screen-height", "480",
+                    "-screen-width", str(args.width),
+                    "-screen-height", str(args.height),
                     "-screen-fullscreen", "0"
                 ], env=env, cwd=game_dir)
                 print(f"[Host] Started Liftoff server process (PID: {proc.pid}).")

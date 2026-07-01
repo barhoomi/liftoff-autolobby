@@ -47,6 +47,10 @@
       <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/Photon3Unity3D.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/com.rlabrecque.steamworks.net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="BepInEx">
       <HintPath>$(LiftoffPath)/BepInEx/core/BepInEx.dll</HintPath>
       <Private>false</Private>

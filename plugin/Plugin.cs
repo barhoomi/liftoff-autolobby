@@ -37,14 +37,26 @@ namespace LiftoffAutoLobby
 
         private static bool chatWarnedAboutNextRace = false;
         private static bool databaseDumped = false;
+        private static int databaseDumpRetries = 0;
+        private static DateTime lastDatabaseDumpTime = DateTime.MinValue;
+        private static bool liftoffProLoginAttempted = false;
+        private static DateTime liftoffProLoginClickTime = DateTime.MinValue;
         private static DateTime lastSignInClickTime = DateTime.MinValue;
         private static bool triedCustomContentTab = false;
+        private static bool steamStatusLogged = false;
         private static string lastSceneName = "";
         private static DateTime sceneLoadTime = DateTime.MinValue;
+        private static DateTime lastInRoomTime = DateTime.MinValue;
         private static bool isDumpingUI = false;
         private static int dumpEnvIndex = 0;
         private static Dictionary<string, List<string>> dumpedTracksMap = new Dictionary<string, List<string>>();
         private static List<Tuple<string, string, DateTime>> processedMessages = new List<Tuple<string, string, DateTime>>();
+
+        // Admin
+        private static HashSet<string> adminIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static bool skipRequested = false;
+        private static bool shuffleMode = false;
+        private static System.Random rng = new System.Random();
 
         private void Awake()
         {
@@ -52,7 +64,13 @@ namespace LiftoffAutoLobby
             try
             {
                 pluginPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BepInEx", "plugins");
-                
+
+                LoadAdminIds();
+
+                // Load initial shuffle mode
+                shuffleMode = GetShuffleMode();
+                Logger.LogInfo($"[AutoLobbyPlugin] Loaded initial shuffleMode: {shuffleMode}");
+
                 // Apply Harmony patches to fix database loading exceptions
                 ApplyHarmonyPatches();
 
@@ -69,6 +87,28 @@ namespace LiftoffAutoLobby
                 Logger.LogError($"[AutoLobbyPlugin] Static hook registration failed: {ex.Message}");
             }
         }
+
+        private static void LoadAdminIds()
+        {
+            adminIds.Clear();
+            string adminPath = Path.Combine(pluginPath, "admin_ids.txt");
+            if (File.Exists(adminPath))
+            {
+                foreach (var line in File.ReadAllLines(adminPath))
+                {
+                    string id = line.Trim();
+                    if (!string.IsNullOrEmpty(id) && !id.StartsWith("#"))
+                        adminIds.Add(id);
+                }
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Loaded {adminIds.Count} admin ID(s).");
+            }
+            else
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] admin_ids.txt not found — no admins configured.");
+            }
+        }
+
+        private static bool IsAdmin(string userId) => adminIds.Contains(userId);
 
         private static void OnWillRenderCanvases()
         {
@@ -107,11 +147,47 @@ namespace LiftoffAutoLobby
 
         private static void RunTick()
         {
+            if (!steamStatusLogged)
+            {
+                steamStatusLogged = true;
+                try
+                {
+                    bool isRunning = Steamworks.SteamAPI.IsSteamRunning();
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] SteamAPI.IsSteamRunning(): {isRunning}");
+                    try
+                    {
+                        if (Steamworks.SteamAPI.Init())
+                        {
+                            UnityEngine.Debug.Log("[AutoLobbyPlugin] SteamAPI.Init() returned True.");
+                            string personaName = Steamworks.SteamFriends.GetPersonaName();
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Steam Persona Name: {personaName}");
+                            ulong steamId = (ulong)Steamworks.SteamUser.GetSteamID();
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Steam ID: {steamId}");
+                        }
+                        else
+                        {
+                            UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] SteamAPI.Init() returned False.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Exception when calling SteamAPI.Init(): {ex.Message}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to check Steam status: {ex.Message}");
+                }
+            }
+
             string sceneName = SceneManager.GetActiveScene().name;
             if (sceneName != lastSceneName)
             {
                 lastSceneName = sceneName;
                 sceneLoadTime = DateTime.Now;
+                lastInRoomTime = DateTime.MinValue;
+                sceneObjectsDumped = false;
+                lastMenuStateDumpTime = DateTime.MinValue;
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Scene changed to: {sceneName}");
 
                 // Reset room timer when loading into a flight level scene
@@ -131,11 +207,18 @@ namespace LiftoffAutoLobby
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Tick running. Scene: {sceneName}, Room timer elapsed: {elapsed:F1}s / {GetRotationInterval()}s");
             }
 
-            if (!databaseDumped)
+            if (!databaseDumped && databaseDumpRetries < 3 && (DateTime.Now - lastDatabaseDumpTime).TotalSeconds >= 120.0)
             {
                 if (sceneName == "MainMenu" || sceneName == "MultiplayerMenu")
                 {
+                    lastDatabaseDumpTime = DateTime.Now;
+                    databaseDumpRetries++;
                     DumpGameDatabase();
+                    if (databaseDumpRetries >= 3)
+                    {
+                        UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Reached maximum database dump attempts. Stopping dump retries to prevent performance degradation.");
+                        databaseDumped = true;
+                    }
                 }
             }
 
@@ -392,35 +475,147 @@ namespace LiftoffAutoLobby
             }
         }
 
+        private static Button FindLiftoffProSignInButton()
+        {
+            Button[] buttons = Resources.FindObjectsOfTypeAll<Button>();
+            foreach (Button btn in buttons)
+            {
+                if (btn == null || !btn.gameObject.activeInHierarchy || !btn.interactable) continue;
+                string txt = GetButtonText(btn);
+                string name = btn.name ?? "";
+                if (txt.IndexOf("liftoff pro", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("liftoffpro", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("LiftoffPro", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("SignInPro", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("BtnPro", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return btn;
+                }
+            }
+            return null;
+        }
+
         private static void HandleMainMenu()
         {
-            // Reset state
+            // Reset rotation state
             roomCreatedTime = DateTime.MinValue;
             isLeaving = false;
 
-            // 1. First, check if the Lobby button is active and click it
+            double timeSinceLoad = (DateTime.Now - sceneLoadTime).TotalSeconds;
+
+            // Log all visible buttons every 5s so we can see what's on screen
+            LogMultiplayerMenuState();
+
+            // Wait 3s for the menu to fully render before doing anything
+            if (timeSinceLoad < 3.0)
+                return;
+
+            // Step 1: Sign in with Liftoff Pro if we haven't yet this session
+            if (!liftoffProLoginAttempted)
+            {
+                Button proBtn = FindLiftoffProSignInButton();
+                if (proBtn != null)
+                {
+                    liftoffProLoginAttempted = true;
+                    liftoffProLoginClickTime = DateTime.Now;
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking Liftoff Pro sign-in button on MainMenu: name='{proBtn.name}' text='{GetButtonText(proBtn)}'");
+                    proBtn.onClick.Invoke();
+                    return;
+                }
+                else
+                {
+                    // No Liftoff Pro button found — already signed in, or button not present
+                    if (DateTime.Now.Second % 10 == 0)
+                        UnityEngine.Debug.Log("[AutoLobbyPlugin] No Liftoff Pro sign-in button found on MainMenu — proceeding as already signed in.");
+                    liftoffProLoginAttempted = true; // don't keep searching every tick
+                }
+            }
+
+            // Step 2: If we just clicked the Pro sign-in button, wait up to 30s for it to complete
+            if (liftoffProLoginAttempted && liftoffProLoginClickTime != DateTime.MinValue)
+            {
+                double elapsed = (DateTime.Now - liftoffProLoginClickTime).TotalSeconds;
+                // Check if the button disappeared (sign-in completed / we moved past that state)
+                Button proBtn = FindLiftoffProSignInButton();
+                if (proBtn != null && elapsed < 30.0)
+                {
+                    if (DateTime.Now.Second % 5 == 0)
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Waiting for Liftoff Pro sign-in to complete ({elapsed:F0}s / 30s)...");
+                    return;
+                }
+                // Button gone or timeout reached — proceed
+                liftoffProLoginClickTime = DateTime.MinValue;
+                if (elapsed >= 30.0)
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Liftoff Pro sign-in timed out after 30s — proceeding anyway.");
+                else
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Liftoff Pro sign-in button is gone — sign-in likely completed.");
+            }
+
+            // Step 3: Navigate to Multiplayer — wait 5s total before navigating
+            if (timeSinceLoad < 5.0)
+                return;
+
+            // 3a. Click the Lobby sub-button if already expanded
             string[] lobbyNames = { "MultiplayerLobby", "btnMultiplayerLobby" };
             Button lobbyBtn = FindButtonByTextOrName("LOBBY", lobbyNames);
-
             if (lobbyBtn != null && lobbyBtn.gameObject.activeInHierarchy && lobbyBtn.interactable)
             {
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Lobby button is active. Clicking it: {lobbyBtn.name}");
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking LOBBY button: {lobbyBtn.name}");
                 lobbyBtn.onClick.Invoke();
                 return;
             }
 
-            // 2. If Lobby button is not active, click the MULTIPLAYER category button
+            // 3b. Expand the Multiplayer category first
             string[] categoryNames = { "BtnHeading", "Multiplayer" };
             Button categoryBtn = FindButtonByTextOrName("MULTIPLAYER", categoryNames);
-
             if (categoryBtn != null)
             {
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking Multiplayer category button to open sub-menu: {categoryBtn.name}");
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking MULTIPLAYER category button: {categoryBtn.name}");
                 categoryBtn.onClick.Invoke();
             }
         }
 
         private static bool sceneObjectsDumped = false;
+        private static DateTime lastMenuStateDumpTime = DateTime.MinValue;
+
+        private static void LogMultiplayerMenuState()
+        {
+            if ((DateTime.Now - lastMenuStateDumpTime).TotalSeconds < 5.0) return;
+            lastMenuStateDumpTime = DateTime.Now;
+
+            UnityEngine.Debug.Log("[AutoLobbyPlugin] === MultiplayerMenu Active UI State ===");
+            try
+            {
+                Button[] allButtons = Resources.FindObjectsOfTypeAll<Button>();
+                int count = 0;
+                foreach (Button btn in allButtons)
+                {
+                    if (btn == null || !btn.gameObject.activeInHierarchy) continue;
+                    string txt = GetButtonText(btn);
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin]  BUTTON name='{btn.name}' text='{txt}' interactable={btn.interactable}");
+                    count++;
+                }
+
+                InputField[] allInputs = Resources.FindObjectsOfTypeAll<InputField>();
+                foreach (InputField inp in allInputs)
+                {
+                    if (inp == null || !inp.gameObject.activeInHierarchy) continue;
+                    string placeholder = "";
+                    if (inp.placeholder != null)
+                    {
+                        Text pt = inp.placeholder as Text;
+                        if (pt != null) placeholder = pt.text;
+                    }
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin]  INPUT name='{inp.name}' placeholder='{placeholder}' hasContent={!string.IsNullOrEmpty(inp.text)}");
+                }
+
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] === End State ({count} active buttons) ===");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] LogMultiplayerMenuState error: {ex.Message}");
+            }
+        }
 
         private static void DumpActiveSceneObjects()
         {
@@ -455,79 +650,135 @@ namespace LiftoffAutoLobby
             UnityEngine.Debug.Log("[AutoLobbyPlugin] =====================================================");
         }
 
+        private static void NavigateToMainMenu()
+        {
+            // Prefer clicking the real QUIT/BACK button so the game's own nav stack stays clean
+            string[] quitNames = { "buttonQuit", "btnQuit", "ButtonQuit", "BtnQuit", "buttonBack", "btnBack", "BackButton", "QuitButton" };
+            Button quitBtn = FindButtonByTextOrName("QUIT", quitNames);
+            if (quitBtn == null) quitBtn = FindButtonByTextOrName("BACK", quitNames);
+            if (quitBtn == null) quitBtn = FindButtonByTextOrName("EXIT", null);
+
+            if (quitBtn != null && quitBtn.gameObject.activeInHierarchy && quitBtn.interactable)
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking QUIT/BACK button to return to MainMenu: {quitBtn.name}");
+                quitBtn.onClick.Invoke();
+            }
+            else
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] QUIT/BACK button not found — falling back to SceneManager.LoadScene(MainMenu).");
+                SceneManager.LoadScene("MainMenu");
+            }
+        }
+
         private static void HandleMultiplayerMenu()
         {
             DumpActiveSceneObjects();
+            LogMultiplayerMenuState();
 
-            // 1. Connect if on the SignIn panel
-            string[] signInNames = { "buttonSignInAnonymous", "btnSignInAnonymous", "SignInAnonymous" };
-            Button signInBtn = FindButtonByTextOrName("SIGN IN ANONYMOUSLY", signInNames);
-            if (signInBtn == null)
+            // If a sign-in screen is still showing here (Liftoff Pro didn't complete from MainMenu),
+            // log it prominently and navigate back to MainMenu to retry sign-in there.
+            bool signInVisible = false;
+            foreach (Button btn in Resources.FindObjectsOfTypeAll<Button>())
             {
-                // Try text containing "anonymous"
-                Button[] buttons = Resources.FindObjectsOfTypeAll<Button>();
-                foreach (var b in buttons)
+                if (btn == null || !btn.gameObject.activeInHierarchy) continue;
+                string txt = GetButtonText(btn);
+                if (string.IsNullOrEmpty(txt)) continue;
+                bool isSignIn = txt.IndexOf("sign in", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                txt.IndexOf("log in", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                txt.IndexOf("login", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool isSkip = txt.IndexOf("skip", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              txt.IndexOf("guest", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              txt.IndexOf("anonymous", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              txt.IndexOf("without", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (isSignIn && !isSkip)
                 {
-                    if (b == null) continue;
-                    string txt = GetButtonText(b);
-                    if (txt.IndexOf("anonymous", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        signInBtn = b;
-                        break;
-                    }
+                    signInVisible = true;
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Sign-in button still visible in MultiplayerMenu: name='{btn.name}' text='{txt}'");
                 }
             }
 
-            if (signInBtn != null && signInBtn.gameObject.activeInHierarchy && signInBtn.interactable)
+            if (signInVisible)
             {
-                // Wait 10 seconds after entering MultiplayerMenu before clicking Sign In
-                // to allow any automatic login to proceed
                 double timeSinceLoad = (DateTime.Now - sceneLoadTime).TotalSeconds;
-                if (timeSinceLoad < 10.0)
+
+                // Wait 5s for the UI to fully settle before clicking anything
+                if (timeSinceLoad < 5.0)
                 {
                     if (DateTime.Now.Second % 5 == 0)
-                    {
-                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Waiting for auto-login (elapsed: {timeSinceLoad:F1}s / 10s)...");
-                    }
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Sign-in screen detected, waiting for UI to settle ({timeSinceLoad:F1}s)...");
                     return;
                 }
 
-                if ((DateTime.Now - lastSignInClickTime).TotalSeconds > 10.0)
+                // Collect all sign-in button candidates with their screen positions
+                var candidates = new List<Button>();
+                foreach (Button btn in Resources.FindObjectsOfTypeAll<Button>())
                 {
-                    lastSignInClickTime = DateTime.Now;
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking Anonymous Sign In button: {signInBtn.name}");
-                    signInBtn.onClick.Invoke();
+                    if (btn == null || !btn.gameObject.activeInHierarchy || !btn.interactable) continue;
+                    string name = btn.name ?? "";
+                    string txt = GetButtonText(btn);
+                    // Match by known button name first (most reliable)
+                    bool isSignInByName =
+                        name.Equals("buttonSignInCredentials", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("btnSignInCredentials", StringComparison.OrdinalIgnoreCase) ||
+                        name.IndexOf("SignInCredentials", StringComparison.OrdinalIgnoreCase) >= 0;
+                    // Fallback: match by button text
+                    bool isSignInByText = !string.IsNullOrEmpty(txt) && (
+                        txt.IndexOf("sign in", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        txt.IndexOf("log in", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        txt.IndexOf("login", StringComparison.OrdinalIgnoreCase) >= 0);
+                    bool isSkip = txt.IndexOf("skip", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                  txt.IndexOf("guest", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                  txt.IndexOf("anonymous", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                  txt.IndexOf("without", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if ((isSignInByName || isSignInByText) && !isSkip)
+                        candidates.Add(btn);
                 }
-                else
+
+                // Log all candidates with positions so we can verify we pick the right one
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Found {candidates.Count} sign-in button candidate(s). Screen size: {Screen.width}x{Screen.height}");
+                foreach (Button c in candidates)
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin]   Candidate: name='{c.name}' text='{GetButtonText(c)}' screenPos={c.transform.position}");
+
+                if (candidates.Count == 0)
                 {
-                    if (DateTime.Now.Second % 5 == 0)
+                    // sign-in was detected via text scan but now no candidates — UI might be transitioning
+                    return;
+                }
+
+                // Pick the button closest to vertical CENTER of screen (not the top nav bar button)
+                float centerY = Screen.height / 2.0f;
+                Button bestBtn = candidates[0];
+                float bestDist = Mathf.Abs(candidates[0].transform.position.y - centerY);
+                foreach (Button c in candidates)
+                {
+                    float dist = Mathf.Abs(c.transform.position.y - centerY);
+                    if (dist < bestDist)
                     {
-                        UnityEngine.Debug.Log("[AutoLobbyPlugin] Sign In click cooldown active, waiting for connection...");
+                        bestDist = dist;
+                        bestBtn = c;
                     }
                 }
-                return;
-            }
 
-            // 2. Detect Liftoff Pro session-expired login page
-            // These buttons appear when the Pro account token lapses and the game shows a re-login screen.
-            string[] skipLoginNames = { "btnSkip", "buttonSkip", "btnContinue", "buttonContinue", "btnPlayWithout", "btnGuest" };
-            Button skipLoginBtn = FindButtonByTextOrName("CONTINUE", skipLoginNames);
-            if (skipLoginBtn == null) skipLoginBtn = FindButtonByTextOrName("SKIP", skipLoginNames);
-            if (skipLoginBtn == null) skipLoginBtn = FindButtonByTextOrName("PLAY WITHOUT LIFTOFF PRO", skipLoginNames);
-            if (skipLoginBtn == null) skipLoginBtn = FindButtonByTextOrName("PLAY AS GUEST", skipLoginNames);
-            if (skipLoginBtn != null && skipLoginBtn.gameObject.activeInHierarchy && skipLoginBtn.interactable)
-            {
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Liftoff Pro login page detected. Clicking: '{GetButtonText(skipLoginBtn)}' ({skipLoginBtn.name})");
-                skipLoginBtn.onClick.Invoke();
-                return;
-            }
+                // Click with a 30s cooldown — auth takes time to process server-side
+                if ((DateTime.Now - lastSignInClickTime).TotalSeconds > 30.0)
+                {
+                    lastSignInClickTime = DateTime.Now;
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking center sign-in button: name='{bestBtn.name}' text='{GetButtonText(bestBtn)}' pos={bestBtn.transform.position}");
+                    bestBtn.onClick.Invoke();
+                }
+                else if (DateTime.Now.Second % 5 == 0)
+                {
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Waiting for sign-in response ({(DateTime.Now - lastSignInClickTime).TotalSeconds:F0}s / 30s)...");
+                }
 
-            // 2b. Stuck-in-menu fallback: if we've been here >90s with no actionable button, force back to MainMenu
-            double timeInMenu = (DateTime.Now - sceneLoadTime).TotalSeconds;
-            if (timeInMenu > 90.0)
-            {
-                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Stuck in MultiplayerMenu for {timeInMenu:F0}s — navigating back to MainMenu.");
-                SceneManager.LoadScene("MainMenu");
+                // After 60s with no progress, go back to MainMenu to reset state
+                if (timeSinceLoad > 60.0)
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Still on sign-in screen after 60s — returning to MainMenu.");
+                    liftoffProLoginAttempted = false;
+                    liftoffProLoginClickTime = DateTime.MinValue;
+                    NavigateToMainMenu();
+                }
                 return;
             }
 
@@ -537,14 +788,41 @@ namespace LiftoffAutoLobby
 
             if (inRoom)
             {
+                lastInRoomTime = DateTime.Now;
                 HandleGameRoom();
                 return;
             }
-            else
+
+            // Not in room — check grace period before doing anything.
+            // GameRoom can temporarily disappear during settings updates and Photon state syncs.
+            // If we were in a room within the last 120s, hold position — do NOT create a new lobby.
+            double timeInMenu = (DateTime.Now - sceneLoadTime).TotalSeconds;
+            double timeSinceRoom = lastInRoomTime != DateTime.MinValue
+                ? (DateTime.Now - lastInRoomTime).TotalSeconds
+                : timeInMenu;
+
+            if (lastInRoomTime != DateTime.MinValue && timeSinceRoom < 120.0)
             {
-                // Not in room, reset room timer
-                roomCreatedTime = DateTime.MinValue;
-                isLeaving = false;
+                if (DateTime.Now.Second % 10 == 0)
+                {
+                    bool photonConnected = GetPhotonBoolProperty("IsConnected");
+                    bool photonInRoom = GetPhotonBoolProperty("InRoom");
+                    bool photonReady = GetPhotonBoolProperty("IsConnectedAndReady");
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] GameRoom not found but was in room {timeSinceRoom:F0}s ago (grace period 120s). Photon Status: IsConnected={photonConnected}, InRoom={photonInRoom}, IsConnectedAndReady={photonReady}");
+                }
+                return;
+            }
+
+            // Grace period expired (or never been in a room this scene load) — reset state
+            roomCreatedTime = DateTime.MinValue;
+            isLeaving = false;
+
+            // Stuck-in-menu fallback: only fires after grace period
+            if (timeInMenu > 90.0 && timeSinceRoom > 120.0)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Stuck in MultiplayerMenu for {timeInMenu:F0}s (out of room for {timeSinceRoom:F0}s) — navigating back to MainMenu.");
+                NavigateToMainMenu();
+                return;
             }
 
             // 4. Lobby (List of games): If we are on the Lobby screen, click Create Game
@@ -648,14 +926,19 @@ namespace LiftoffAutoLobby
                 }
             }
 
-            if (elapsed >= GetRotationInterval())
+            if (skipRequested || elapsed >= GetRotationInterval())
             {
-                // Timer expired inside waiting room, open change settings popup!
+                if (skipRequested)
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Skip requested by admin — forcing rotation.");
+                skipRequested = false;
+                chatWarnedAboutNextRace = false;
+
+                // Timer expired (or skip forced) inside waiting room, open change settings popup!
                 string[] changeSettingsNames = { "buttonChangeRoomSettings", "btnChangeRoomSettings", "ChangeRoomSettings" };
                 Button changeSettingsBtn = FindButtonByTextOrName("CHANGE SETTINGS", changeSettingsNames);
                 if (changeSettingsBtn != null && changeSettingsBtn.gameObject.activeInHierarchy && changeSettingsBtn.interactable)
                 {
-                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Timer expired in waiting room. Clicking CHANGE SETTINGS button.");
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Clicking CHANGE SETTINGS button.");
                     changeSettingsBtn.onClick.Invoke();
                     roomCreatedTime = DateTime.MaxValue; // Freeze timer until settings updated
                 }
@@ -845,25 +1128,33 @@ namespace LiftoffAutoLobby
             RoomSettingsPanel roomSettings = GetPopupRoomSettings(popup);
             if (roomSettings != null)
             {
-                InputField inputRoomName = GetRoomSettingsInputField(roomSettings);
-                if (inputRoomName != null)
+                bool makePrivate = true;
+                string privacyPath = Path.Combine(pluginPath, "room_private.txt");
+                if (File.Exists(privacyPath))
                 {
-                    inputRoomName.text = targetLobbyName;
-                }
-                Toggle togglePrivate = GetRoomSettingsTogglePrivate(roomSettings);
-                if (togglePrivate != null)
-                {
-                    bool makePrivate = true;
-                    string privacyPath = Path.Combine(pluginPath, "room_private.txt");
-                    if (File.Exists(privacyPath))
+                    string content = File.ReadAllText(privacyPath).Trim();
+                    if (content.Equals("false", StringComparison.OrdinalIgnoreCase))
                     {
-                        string content = File.ReadAllText(privacyPath).Trim();
-                        if (content.Equals("false", StringComparison.OrdinalIgnoreCase))
-                        {
-                            makePrivate = false;
-                        }
+                        makePrivate = false;
                     }
+                }
+
+                // Set toggle first so the name panel activates before we write to the InputField.
+                // The room name InputField lives inside panelPrivateRoom which starts inactive;
+                // Unity InputField.onValueChanged does not fire reliably on inactive objects.
+                Toggle togglePrivate = GetRoomSettingsTogglePrivate(roomSettings);
+                if (togglePrivate != null && togglePrivate.isOn != makePrivate)
+                {
                     togglePrivate.isOn = makePrivate;
+                }
+
+                if (makePrivate)
+                {
+                    InputField inputRoomName = GetRoomSettingsInputField(roomSettings);
+                    if (inputRoomName != null && inputRoomName.text != targetLobbyName)
+                    {
+                        inputRoomName.text = targetLobbyName;
+                    }
                 }
             }
 
@@ -1103,7 +1394,241 @@ namespace LiftoffAutoLobby
             return null;
         }
 
+        private const int CHAT_MAX_CHARS = 220;
+
+        private static string ParseTag(string s, int index, out int nextIndex)
+        {
+            nextIndex = index;
+            if (index >= s.Length || s[index] != '<') return null;
+
+            int end = s.IndexOf('>', index);
+            if (end == -1) return null;
+
+            nextIndex = end + 1;
+            return s.Substring(index, end - index + 1);
+        }
+
+        private static void CloseLastTag(List<string> openTags, string closingTag)
+        {
+            string target = "";
+            if (closingTag == "</b>") target = "<b>";
+            else if (closingTag == "</i>") target = "<i>";
+            else if (closingTag == "</color>") target = "<color";
+
+            if (string.IsNullOrEmpty(target)) return;
+
+            for (int i = openTags.Count - 1; i >= 0; i--)
+            {
+                if (target == "<color" ? openTags[i].StartsWith("<color", StringComparison.OrdinalIgnoreCase) : openTags[i].Equals(target, StringComparison.OrdinalIgnoreCase))
+                {
+                    openTags.RemoveAt(i);
+                    break;
+                }
+            }
+        }
+
+        private static int GetClosingTagsLength(List<string> openTags)
+        {
+            if (openTags == null) return 0;
+            int len = 0;
+            foreach (var tag in openTags)
+            {
+                if (tag.StartsWith("<color", StringComparison.OrdinalIgnoreCase)) len += 8; // </color>
+                else if (tag.Equals("<b>", StringComparison.OrdinalIgnoreCase)) len += 4; // </b>
+                else if (tag.Equals("<i>", StringComparison.OrdinalIgnoreCase)) len += 4; // </i>
+            }
+            return len;
+        }
+
+        private static string GetClosingTagsString(List<string> openTags)
+        {
+            if (openTags == null) return "";
+            StringBuilder sb = new StringBuilder();
+            for (int i = openTags.Count - 1; i >= 0; i--)
+            {
+                string tag = openTags[i];
+                if (tag.StartsWith("<color", StringComparison.OrdinalIgnoreCase)) sb.Append("</color>");
+                else if (tag.Equals("<b>", StringComparison.OrdinalIgnoreCase)) sb.Append("</b>");
+                else if (tag.Equals("<i>", StringComparison.OrdinalIgnoreCase)) sb.Append("</i>");
+            }
+            return sb.ToString();
+        }
+
+        private static string GetOpeningTagsString(List<string> openTags)
+        {
+            if (openTags == null) return "";
+            StringBuilder sb = new StringBuilder();
+            foreach (var tag in openTags)
+            {
+                sb.Append(tag);
+            }
+            return sb.ToString();
+        }
+
+        private static List<string> SplitMessage(string message, int maxChars)
+        {
+            List<string> result = new List<string>();
+            string currentString = message;
+
+            while (currentString.Length > maxChars)
+            {
+                int n = currentString.Length;
+                List<string>[] tagsAt = new List<string>[n];
+                bool[] inTag = new bool[n];
+
+                List<string> activeTags = new List<string>();
+                int idx = 0;
+                while (idx < n)
+                {
+                    if (currentString[idx] == '<')
+                    {
+                        int nextIdx;
+                        string tag = ParseTag(currentString, idx, out nextIdx);
+                        if (tag != null)
+                        {
+                            bool isClosing = tag.StartsWith("</");
+                            for (int j = idx; j < nextIdx; j++)
+                            {
+                                inTag[j] = true;
+                                tagsAt[j] = new List<string>(activeTags);
+                            }
+                            if (isClosing)
+                            {
+                                CloseLastTag(activeTags, tag.ToLower());
+                            }
+                            else
+                            {
+                                activeTags.Add(tag);
+                            }
+                            idx = nextIdx;
+                            continue;
+                        }
+                    }
+                    tagsAt[idx] = new List<string>(activeTags);
+                    inTag[idx] = false;
+                    idx++;
+                }
+
+                int bestSplitIdx = -1;
+                int searchEnd = maxChars;
+
+                // 1. Search for " | " separator
+                int pipesIndex = -1;
+                for (int i = searchEnd - 3; i >= 0; i--)
+                {
+                    if (i + 3 <= n && currentString.Substring(i, 3) == " | " && !inTag[i])
+                    {
+                        int candidateSplit = i + 3;
+                        List<string> openTags = (candidateSplit >= 0 && candidateSplit < tagsAt.Length) ? tagsAt[candidateSplit] : new List<string>();
+                        int closingLen = GetClosingTagsLength(openTags);
+                        if (candidateSplit + closingLen <= maxChars)
+                        {
+                            pipesIndex = candidateSplit;
+                            break;
+                        }
+                    }
+                }
+
+                if (pipesIndex != -1)
+                {
+                    bestSplitIdx = pipesIndex;
+                }
+                else
+                {
+                    // 2. Search for space character
+                    int spaceIndex = -1;
+                    for (int i = searchEnd - 1; i >= 0; i--)
+                    {
+                        if (currentString[i] == ' ' && !inTag[i])
+                        {
+                            int candidateSplit = i + 1;
+                            List<string> openTags = (candidateSplit >= 0 && candidateSplit < tagsAt.Length) ? tagsAt[candidateSplit] : new List<string>();
+                            int closingLen = GetClosingTagsLength(openTags);
+                            if (candidateSplit + closingLen <= maxChars)
+                            {
+                                spaceIndex = candidateSplit;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (spaceIndex != -1)
+                    {
+                        bestSplitIdx = spaceIndex;
+                    }
+                    else
+                    {
+                        // 3. Absolute fallback: split at character boundary
+                        for (int i = searchEnd; i >= 1; i--)
+                        {
+                            if (!inTag[i - 1])
+                            {
+                                List<string> openTags = (i >= 0 && i < tagsAt.Length) ? tagsAt[i] : new List<string>();
+                                int closingLen = GetClosingTagsLength(openTags);
+                                if (i + closingLen <= maxChars)
+                                {
+                                    bestSplitIdx = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (bestSplitIdx <= 0)
+                {
+                    bestSplitIdx = maxChars;
+                }
+
+                if (bestSplitIdx >= n)
+                {
+                    break;
+                }
+
+                string chunk = currentString.Substring(0, bestSplitIdx);
+                List<string> openTagsAtSplit = (bestSplitIdx >= 0 && bestSplitIdx < tagsAt.Length) ? tagsAt[bestSplitIdx] : new List<string>();
+                string closingTags = GetClosingTagsString(openTagsAtSplit);
+                chunk += closingTags;
+                result.Add(chunk);
+
+                string openingTags = GetOpeningTagsString(openTagsAtSplit);
+                currentString = openingTags + currentString.Substring(bestSplitIdx);
+            }
+
+            if (!string.IsNullOrEmpty(currentString))
+            {
+                result.Add(currentString);
+            }
+            return result;
+        }
+
         private static void SendChatMessage(string message)
+        {
+            if (string.IsNullOrEmpty(message)) return;
+
+            if (message.Length <= CHAT_MAX_CHARS)
+            {
+                SendChatMessageRaw(message);
+                return;
+            }
+
+            try
+            {
+                List<string> chunks = SplitMessage(message, CHAT_MAX_CHARS);
+                foreach (string chunk in chunks)
+                {
+                    SendChatMessageRaw(chunk);
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error in SendChatMessage splitting: {ex}");
+                // Fallback to sending raw if splitting fails for some reason
+                SendChatMessageRaw(message);
+            }
+        }
+
+        private static void SendChatMessageRaw(string message)
         {
             UnityEngine.Debug.Log($"[AutoLobbyPlugin] SendChatMessage called: '{message}'");
             try
@@ -1191,10 +1716,29 @@ namespace LiftoffAutoLobby
                     return "";
                 }
 
+                // Sync shuffleMode from disk
+                shuffleMode = GetShuffleMode();
+
                 int index = 0;
-                if (File.Exists(statePath))
+                if (shuffleMode)
                 {
-                    int.TryParse(File.ReadAllText(statePath).Trim(), out index);
+                    string shuffleStatePath = Path.Combine(pluginPath, "shuffle_state.txt");
+                    int shuffleIndex;
+                    List<int> shuffledIndices;
+                    if (ParseShuffleState(shuffleStatePath, validTracks.Count, out shuffleIndex, out shuffledIndices))
+                    {
+                        if (shuffleIndex >= 0 && shuffleIndex < shuffledIndices.Count)
+                        {
+                            index = shuffledIndices[shuffleIndex];
+                        }
+                    }
+                }
+                else
+                {
+                    if (File.Exists(statePath))
+                    {
+                        int.TryParse(File.ReadAllText(statePath).Trim(), out index);
+                    }
                 }
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Current state index: {index}, validTracks count: {validTracks.Count}");
 
@@ -1253,22 +1797,54 @@ namespace LiftoffAutoLobby
                     return "";
                 }
 
-                int index = 0;
-                if (File.Exists(statePath))
-                {
-                    int.TryParse(File.ReadAllText(statePath).Trim(), out index);
-                }
+                // Sync shuffleMode from disk
+                shuffleMode = GetShuffleMode();
 
-                if (index < 0 || index >= validTracks.Count)
+                int index = 0;
+                if (shuffleMode)
                 {
-                    index = 0;
+                    string shuffleStatePath = Path.Combine(pluginPath, "shuffle_state.txt");
+                    int shuffleIndex;
+                    List<int> shuffledIndices;
+                    
+                    if (!ParseShuffleState(shuffleStatePath, validTracks.Count, out shuffleIndex, out shuffledIndices))
+                    {
+                        shuffledIndices = GenerateShuffledIndices(validTracks.Count);
+                        shuffleIndex = 0;
+                    }
+                    
+                    if (shuffleIndex < 0 || shuffleIndex >= shuffledIndices.Count)
+                    {
+                        shuffleIndex = 0;
+                    }
+                    
+                    index = shuffledIndices[shuffleIndex];
+                    
+                    int nextShuffleIndex = shuffleIndex + 1;
+                    if (nextShuffleIndex >= shuffledIndices.Count)
+                    {
+                        // Generate a new shuffle for the next cycle
+                        var nextShuffled = GenerateShuffledIndices(validTracks.Count);
+                        SaveShuffleState(shuffleStatePath, 0, nextShuffled);
+                    }
+                    else
+                    {
+                        SaveShuffleState(shuffleStatePath, nextShuffleIndex, shuffledIndices);
+                    }
+                }
+                else
+                {
+                    if (File.Exists(statePath))
+                        int.TryParse(File.ReadAllText(statePath).Trim(), out index);
+
+                    if (index < 0 || index >= validTracks.Count)
+                        index = 0;
+
+                    int nextIndex = (index + 1) % validTracks.Count;
+                    File.WriteAllText(statePath, nextIndex.ToString());
                 }
 
                 string selectedLine = validTracks[index];
-                
-                // Write next index for next rotation
-                int nextIndex = (index + 1) % validTracks.Count;
-                File.WriteAllText(statePath, nextIndex.ToString());
 
                 // Parse line: TrackName,EnvironmentName,GameModeName
                 string[] parts = selectedLine.Split(',');
@@ -1387,6 +1963,104 @@ namespace LiftoffAutoLobby
             catch {}
             return false; // Default: stay in lobby
         }
+
+        private static bool GetShuffleMode()
+        {
+            try
+            {
+                string shuffleModePath = Path.Combine(pluginPath, "shuffle_mode.txt");
+                if (File.Exists(shuffleModePath))
+                {
+                    string content = File.ReadAllText(shuffleModePath).Trim();
+                    return content.Equals("true", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch {}
+            return false; // Default: false
+        }
+
+        private static bool ParseShuffleState(string shuffleStatePath, int validTracksCount, out int shuffleIndex, out List<int> shuffledIndices)
+        {
+            shuffleIndex = 0;
+            shuffledIndices = new List<int>();
+            try
+            {
+                if (File.Exists(shuffleStatePath))
+                {
+                    string content = File.ReadAllText(shuffleStatePath).Trim();
+                    string[] parts = content.Split('|');
+                    if (parts.Length == 2)
+                    {
+                        if (int.TryParse(parts[0], out shuffleIndex))
+                        {
+                            string[] indexStrings = parts[1].Split(',');
+                            foreach (var s in indexStrings)
+                            {
+                                int idx;
+                                if (int.TryParse(s.Trim(), out idx))
+                                {
+                                    shuffledIndices.Add(idx);
+                                }
+                            }
+                            
+                            if (shuffledIndices.Count == validTracksCount)
+                            {
+                                var sortedIndices = new List<int>(shuffledIndices);
+                                sortedIndices.Sort();
+                                for (int i = 0; i < validTracksCount; i++)
+                                {
+                                    if (sortedIndices[i] != i)
+                                    {
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            catch {}
+            return false;
+        }
+
+        private static List<int> GenerateShuffledIndices(int count)
+        {
+            List<int> list = new List<int>();
+            for (int i = 0; i < count; i++)
+            {
+                list.Add(i);
+            }
+            for (int i = list.Count - 1; i > 0; i--)
+            {
+                int j = rng.Next(0, i + 1);
+                int temp = list[i];
+                list[i] = list[j];
+                list[j] = temp;
+            }
+            return list;
+        }
+
+        private static void SaveShuffleState(string shuffleStatePath, int shuffleIndex, List<int> shuffledIndices)
+        {
+            try
+            {
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                sb.Append(shuffleIndex);
+                sb.Append("|");
+                for (int i = 0; i < shuffledIndices.Count; i++)
+                {
+                    if (i > 0) sb.Append(",");
+                    sb.Append(shuffledIndices[i]);
+                }
+                File.WriteAllText(shuffleStatePath, sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error saving shuffle state: {ex.Message}");
+            }
+        }
+
 
         private static void ApplyHarmonyPatches()
         {
@@ -1518,10 +2192,10 @@ namespace LiftoffAutoLobby
                 try
                 {
                     Assembly photonRealtimeAsm = Assembly.Load("PhotonRealtime");
-                    string[] callbackContainerTypes = new string[]
-                    {
-                        "Photon.Realtime.InRoomCallbacksContainer"
-                    };
+                    string[] callbackContainerTypes = photonRealtimeAsm.GetTypes()
+                        .Where(t => t.Name.EndsWith("CallbacksContainer") || t.Name.Contains("CallbackContainer"))
+                        .Select(t => t.FullName)
+                        .ToArray();
 
                     var harmony = new HarmonyLib.Harmony("com.lugus.liftoff.autolobby.photon");
                     var prefixMethod = typeof(AutoLobbyPlugin).GetMethod("PhotonContainerPrefix", BindingFlags.NonPublic | BindingFlags.Static);
@@ -1619,6 +2293,15 @@ namespace LiftoffAutoLobby
         {
             try
             {
+                string methodName = __originalMethod.Name;
+                if (methodName == "OnLeftRoom" || methodName == "OnDisconnected")
+                {
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Photon Callback: {methodName} detected. Immediately resetting lastInRoomTime to trigger lobby recovery.");
+                    lastInRoomTime = DateTime.MinValue;
+                    roomCreatedTime = DateTime.MinValue;
+                    isLeaving = false;
+                }
+
                 System.Collections.IList list = __instance as System.Collections.IList;
                 if (list == null) return true;
 
@@ -1671,6 +2354,8 @@ namespace LiftoffAutoLobby
                 return true; // Fallback to original method on error
             }
         }
+
+
 
         private static MethodInfo isConnectedMethod = null;
 
@@ -1733,6 +2418,25 @@ namespace LiftoffAutoLobby
                 if (type != null)
                 {
                     PropertyInfo prop = type.GetProperty("IsConnectedAndReady", BindingFlags.Public | BindingFlags.Static);
+                    if (prop != null)
+                    {
+                        return (bool)prop.GetValue(null);
+                    }
+                }
+            }
+            catch {}
+            return false;
+        }
+
+        private static bool GetPhotonBoolProperty(string propertyName)
+        {
+            try
+            {
+                Type type = Type.GetType("Photon.Pun.PhotonNetwork, PhotonUnityNetworking") ?? 
+                            Type.GetType("PhotonNetwork, Assembly-CSharp");
+                if (type != null)
+                {
+                    PropertyInfo prop = type.GetProperty(propertyName, BindingFlags.Public | BindingFlags.Static);
                     if (prop != null)
                     {
                         return (bool)prop.GetValue(null);
@@ -2118,35 +2822,125 @@ namespace LiftoffAutoLobby
 
         private static void HandleChatCommand(string userName, string userId, string cmdText)
         {
-            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Processing command from {userName}: {cmdText}");
+            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Processing command from {userName} ({userId}): {cmdText}");
             try
             {
-                string[] parts = cmdText.Split(' ');
+                string[] parts = cmdText.Split(new char[]{' '}, 2, StringSplitOptions.RemoveEmptyEntries);
                 string cmd = parts[0].ToLower();
+                string arg = parts.Length > 1 ? parts[1].Trim() : "";
 
                 if (cmd == "/info")
                 {
                     string currentPlaylist = "all_official_races";
                     string playlistPath = Path.Combine(pluginPath, "playlist_name.txt");
                     if (File.Exists(playlistPath))
-                    {
                         currentPlaylist = File.ReadAllText(playlistPath).Trim();
-                    }
 
                     double rotationInterval = GetRotationInterval();
-                    double elapsed = roomCreatedTime != DateTime.MinValue && roomCreatedTime != DateTime.MaxValue 
-                        ? (DateTime.Now - roomCreatedTime).TotalSeconds 
-                        : 0;
-                    
-                    double remaining = rotationInterval - elapsed;
-                    if (remaining < 0) remaining = 0;
+                    double elapsed = roomCreatedTime != DateTime.MinValue && roomCreatedTime != DateTime.MaxValue
+                        ? (DateTime.Now - roomCreatedTime).TotalSeconds : 0;
+                    double remaining = Math.Max(0, rotationInterval - elapsed);
 
                     string nextEnv, nextMode;
                     int trackIdx;
                     string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
 
-                    string response = $"<color=#0000FF>[INFO]</color> Playlist: <color=#00FF88><i>{currentPlaylist}</i></color> | Interval: <color=#00FF88><i>{rotationInterval:F0}s</i></color> | Next in: <color=#00FF88><i>{remaining:F0}s</i></color> | Next: <color=#00FF88><i>{nextEnv} - {nextTrackName}</i></color>";
+                    string response = $"<color=#0000FF>[INFO]</color> Playlist: <color=#00FF88><i>{currentPlaylist}</i></color> | Interval: <color=#00FF88><i>{rotationInterval:F0}s</i></color> | Next in: <color=#00FF88><i>{remaining:F0}s</i></color> | Next: <color=#00FF88><i>{nextEnv} - {nextTrackName}</i></color> ";
                     SendChatMessage(response);
+                    return;
+                }
+
+                // All other commands are admin-only — silently ignore non-admins to prevent probing
+                if (!IsAdmin(userId))
+                {
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Ignoring command '{cmd}' from non-admin {userName} ({userId})");
+                    return;
+                }
+
+                switch (cmd)
+                {
+                    case "/skip":
+                        skipRequested = true;
+                        chatWarnedAboutNextRace = false;
+                        SendChatMessage("[ADMIN] Skipping to next track.");
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} triggered /skip");
+                        break;
+
+                    case "/interval":
+                        double newInterval;
+                        if (double.TryParse(arg, out newInterval) && newInterval >= 30.0)
+                        {
+                            File.WriteAllText(Path.Combine(pluginPath, "rotation_interval.txt"), newInterval.ToString("F0"));
+                            SendChatMessage($"[ADMIN] Interval set to {newInterval:F0}s.");
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set interval to {newInterval}s");
+                        }
+                        else
+                        {
+                            SendChatMessage("[ADMIN] Usage: /interval <seconds> (min 30)");
+                        }
+                        break;
+
+                    case "/extend":
+                        double extendSecs;
+                        if (double.TryParse(arg, out extendSecs) && extendSecs > 0)
+                        {
+                            if (roomCreatedTime != DateTime.MinValue && roomCreatedTime != DateTime.MaxValue)
+                            {
+                                roomCreatedTime = roomCreatedTime.AddSeconds(extendSecs);
+                                double newRemaining = Math.Max(0, GetRotationInterval() - (DateTime.Now - roomCreatedTime).TotalSeconds);
+                                chatWarnedAboutNextRace = false;
+                                SendChatMessage($"[ADMIN] Extended by {extendSecs:F0}s. Next rotation in {newRemaining:F0}s.");
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} extended timer by {extendSecs}s");
+                            }
+                            else
+                            {
+                                SendChatMessage("[ADMIN] No active rotation timer.");
+                            }
+                        }
+                        else
+                        {
+                            SendChatMessage("[ADMIN] Usage: /extend <seconds>");
+                        }
+                        break;
+
+                    case "/shuffle":
+                        if (arg.Equals("on", StringComparison.OrdinalIgnoreCase))
+                        {
+                            shuffleMode = true;
+                            try
+                            {
+                                File.WriteAllText(Path.Combine(pluginPath, "shuffle_mode.txt"), "true");
+                            }
+                            catch (Exception ex)
+                            {
+                                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write shuffle_mode.txt: {ex.Message}");
+                            }
+                            SendChatMessage("[ADMIN] Shuffle on.");
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} enabled shuffle");
+                        }
+                        else if (arg.Equals("off", StringComparison.OrdinalIgnoreCase))
+                        {
+                            shuffleMode = false;
+                            try
+                            {
+                                File.WriteAllText(Path.Combine(pluginPath, "shuffle_mode.txt"), "false");
+                            }
+                            catch (Exception ex)
+                            {
+                                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write shuffle_mode.txt: {ex.Message}");
+                            }
+                            SendChatMessage("[ADMIN] Shuffle off.");
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} disabled shuffle");
+                        }
+                        else
+                        {
+                            SendChatMessage("[ADMIN] Usage: /shuffle on|off");
+                        }
+                        break;
+
+                    default:
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Unknown admin command '{cmd}' from {userName}");
+                        break;
                 }
             }
             catch (Exception ex)
