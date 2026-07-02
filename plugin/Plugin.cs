@@ -42,6 +42,13 @@ namespace LiftoffAutoLobby
         private static bool liftoffProLoginAttempted = false;
         private static DateTime liftoffProLoginClickTime = DateTime.MinValue;
         private static DateTime lastSignInClickTime = DateTime.MinValue;
+        // Multi-instance testing support: use_liftoff_pro.txt/bot_nickname.txt let separate
+        // Liftoff processes (same Linux user, per docs/features/doing/multi-lobby-bot-scaling.md)
+        // run as distinct anonymous "client" bots instead of all fighting over one Pro account.
+        private static bool useLiftoffPro = true;
+        private static string botNickname = "";
+        private static bool nicknameApplied = false;
+        private static DateTime lastSkipClickTime = DateTime.MinValue;
         private static bool triedCustomContentTab = false;
         private static bool steamStatusLogged = false;
         private static string lastSceneName = "";
@@ -83,6 +90,8 @@ namespace LiftoffAutoLobby
                 pluginPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BepInEx", "plugins");
 
                 LoadAdminIds();
+                LoadUseLiftoffPro();
+                LoadBotNickname();
 
                 // Load initial shuffle mode
                 shuffleMode = GetShuffleMode();
@@ -127,6 +136,63 @@ namespace LiftoffAutoLobby
 
         private static bool IsAdmin(string userId) => adminIds.Contains(userId);
 
+        private static void LoadUseLiftoffPro()
+        {
+            useLiftoffPro = true;
+            string path = Path.Combine(pluginPath, "use_liftoff_pro.txt");
+            if (File.Exists(path))
+            {
+                string content = File.ReadAllText(path).Trim();
+                if (content.Equals("false", StringComparison.OrdinalIgnoreCase))
+                {
+                    useLiftoffPro = false;
+                }
+            }
+            UnityEngine.Debug.Log($"[AutoLobbyPlugin] useLiftoffPro = {useLiftoffPro}");
+        }
+
+        private static void LoadBotNickname()
+        {
+            botNickname = "";
+            string path = Path.Combine(pluginPath, "bot_nickname.txt");
+            if (File.Exists(path))
+            {
+                botNickname = File.ReadAllText(path).Trim();
+            }
+            if (!string.IsNullOrEmpty(botNickname))
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Loaded bot nickname override: '{botNickname}'");
+            }
+        }
+
+        // Sets PhotonNetwork.NickName once the Photon assembly is resolvable. Retried from
+        // RunTick() (not called from Awake) because Photon's static classes aren't reliably
+        // loaded that early in BepInEx's boot sequence — same reasoning as the other reflective
+        // PhotonNetwork accessors below, which are also called per-tick rather than once.
+        private static void ApplyBotNicknameIfNeeded()
+        {
+            if (nicknameApplied || string.IsNullOrEmpty(botNickname)) return;
+            try
+            {
+                Type type = Type.GetType("Photon.Pun.PhotonNetwork, PhotonUnityNetworking") ??
+                            Type.GetType("PhotonNetwork, Assembly-CSharp");
+                if (type != null)
+                {
+                    PropertyInfo prop = type.GetProperty("NickName", BindingFlags.Public | BindingFlags.Static);
+                    if (prop != null && prop.CanWrite)
+                    {
+                        prop.SetValue(null, botNickname);
+                        nicknameApplied = true;
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Applied bot nickname: '{botNickname}'");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to apply bot nickname: {ex.Message}");
+            }
+        }
+
         private static void OnWillRenderCanvases()
         {
             try
@@ -164,6 +230,8 @@ namespace LiftoffAutoLobby
 
         private static void RunTick()
         {
+            ApplyBotNicknameIfNeeded();
+
             // 1. Check for external/internal maintenance mode
             try
             {
@@ -576,6 +644,30 @@ namespace LiftoffAutoLobby
             return null;
         }
 
+        // Matches the same skip/guest/anonymous/without-Liftoff-Pro text the existing
+        // sign-in-screen scan already uses to *exclude* candidates (see isSkip in
+        // HandleMultiplayerMenu) — reused here as the *inclusion* criteria for
+        // useLiftoffPro=false instances that want to click through anonymously instead.
+        private static Button FindSkipLiftoffProButton()
+        {
+            Button[] buttons = Resources.FindObjectsOfTypeAll<Button>();
+            foreach (Button btn in buttons)
+            {
+                if (btn == null || !btn.gameObject.activeInHierarchy || !btn.interactable) continue;
+                string txt = GetButtonText(btn);
+                if (string.IsNullOrEmpty(txt)) continue;
+                bool isSkip = txt.IndexOf("skip", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              txt.IndexOf("guest", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              txt.IndexOf("anonymous", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                              txt.IndexOf("without", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (isSkip)
+                {
+                    return btn;
+                }
+            }
+            return null;
+        }
+
         private static void HandleMainMenu()
         {
             // Reset rotation state
@@ -592,7 +684,14 @@ namespace LiftoffAutoLobby
                 return;
 
             // Step 1: Sign in with Liftoff Pro if we haven't yet this session
-            if (!liftoffProLoginAttempted)
+            if (!liftoffProLoginAttempted && !useLiftoffPro)
+            {
+                // use_liftoff_pro.txt says false: never click the Pro sign-in button, so this
+                // instance falls through to the anonymous-login screen in MultiplayerMenu instead.
+                UnityEngine.Debug.Log("[AutoLobbyPlugin] useLiftoffPro=false — skipping Liftoff Pro sign-in on MainMenu.");
+                liftoffProLoginAttempted = true;
+            }
+            else if (!liftoffProLoginAttempted)
             {
                 Button proBtn = FindLiftoffProSignInButton();
                 if (proBtn != null)
@@ -755,6 +854,32 @@ namespace LiftoffAutoLobby
         {
             DumpActiveSceneObjects();
             LogMultiplayerMenuState();
+
+            // use_liftoff_pro.txt=false: click through Skip/Guest/Anonymous instead of the
+            // credentialed sign-in flow below. Checked first so it takes priority whenever
+            // present — a useLiftoffPro=false instance should never fall into the sign-in
+            // candidate picker further down.
+            if (!useLiftoffPro)
+            {
+                Button skipBtn = FindSkipLiftoffProButton();
+                if (skipBtn != null)
+                {
+                    double timeSinceLoadSkip = (DateTime.Now - sceneLoadTime).TotalSeconds;
+                    if (timeSinceLoadSkip < 5.0)
+                    {
+                        if (DateTime.Now.Second % 5 == 0)
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Skip/anonymous button detected, waiting for UI to settle ({timeSinceLoadSkip:F1}s)...");
+                        return;
+                    }
+                    if ((DateTime.Now - lastSkipClickTime).TotalSeconds > 10.0)
+                    {
+                        lastSkipClickTime = DateTime.Now;
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] useLiftoffPro=false — clicking skip/anonymous button: name='{skipBtn.name}' text='{GetButtonText(skipBtn)}'");
+                        skipBtn.onClick.Invoke();
+                    }
+                    return;
+                }
+            }
 
             // If a sign-in screen is still showing here (Liftoff Pro didn't complete from MainMenu),
             // log it prominently and navigate back to MainMenu to retry sign-in there.
