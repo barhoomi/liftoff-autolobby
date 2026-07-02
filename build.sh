@@ -18,6 +18,6 @@ else
 fi
 
 echo "=== 3. Syncing to Bot Account ==="
-sudo "$SCRIPT_DIR/infra/setup_bot.sh"
+sudo /home/dev-user/Projects/procedural-fpv/infra/setup_bot.sh
 
 echo "=== Build and Sync Completed Successfully! ==="
