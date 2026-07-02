@@ -931,8 +931,14 @@ namespace LiftoffAutoLobby
                 Button skipBtn = FindSkipLiftoffProButton();
                 if (skipBtn != null)
                 {
+                    // 15s, not the original 5s: the game appears to fire its own automatic
+                    // connection/auto-login attempt as soon as this screen loads (matches the
+                    // "waits 10s for auto-login first" behavior already documented for the
+                    // credentialed path), and clicking Connect while that's still in flight is
+                    // the likely cause of the "still pending" error seen live 2026-07-02 on
+                    // literally the first click, even on a freshly-restarted Steam client.
                     double timeSinceLoadSkip = (DateTime.Now - sceneLoadTime).TotalSeconds;
-                    if (timeSinceLoadSkip < 5.0)
+                    if (timeSinceLoadSkip < 15.0)
                     {
                         if (DateTime.Now.Second % 5 == 0)
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Skip/anonymous button detected, waiting for UI to settle ({timeSinceLoadSkip:F1}s)...");
