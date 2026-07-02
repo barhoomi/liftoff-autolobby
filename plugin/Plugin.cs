@@ -47,6 +47,9 @@ namespace LiftoffAutoLobby
         private static string botNickname = "";
         private static bool nicknameApplied = false;
         private static DateTime lastSkipClickTime = DateTime.MinValue;
+        // Set by OnUnityLogMessageReceived the instant the stuck-auth error fires; consumed
+        // (and reset) at the top of the next HandleMultiplayerMenu() tick.
+        private static bool authPendingErrorDetected = false;
         private static bool signInClickAttempted = false; // limits MultiplayerMenu sign-in to exactly one click per appearance (reduce-login-retry-attempts)
         private static bool signInWasVisible = false;      // tracks appearance transitions so signInClickAttempted resets per-appearance, not per-tick
         private static bool triedCustomContentTab = false;
@@ -132,7 +135,16 @@ namespace LiftoffAutoLobby
 
                 // Subscribe to the static Canvas render event (runs on main thread every frame)
                 Canvas.willRenderCanvases += OnWillRenderCanvases;
-                
+
+                // Known long-standing Liftoff quirk (both Pro and anonymous sign-in): the
+                // sign-in flow can get stuck reporting "An authentication request is still
+                // pending. Cannot connect." on every further click, seemingly forever, until
+                // the MultiplayerMenu scene is torn down and reloaded (previously worked
+                // around by hand: back to MainMenu, back into Multiplayer). Hooking Unity's
+                // log callback lets HandleMultiplayerMenu() detect this the moment it fires
+                // and trigger that same recovery automatically instead of hanging.
+                Application.logMessageReceived += OnUnityLogMessageReceived;
+
                 Logger.LogInfo("[AutoLobbyPlugin] Static Canvas.willRenderCanvases hook registered successfully!");
             }
             catch (Exception ex)
@@ -217,6 +229,21 @@ namespace LiftoffAutoLobby
             catch (Exception ex)
             {
                 UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to apply bot nickname: {ex.Message}");
+            }
+        }
+
+        // Registered once in Awake() via Application.logMessageReceived. Runs on Unity's main
+        // thread for synchronous Debug.LogError calls (which this is), so it's safe to touch
+        // plugin state here, but kept minimal (just sets a flag) rather than acting directly —
+        // HandleMultiplayerMenu() is where scene navigation / all other plugin state changes
+        // normally happen, so recovery is handled there on the next tick instead of here.
+        private static void OnUnityLogMessageReceived(string logString, string stackTrace, LogType type)
+        {
+            if (type != LogType.Error) return;
+            if (!string.IsNullOrEmpty(logString) &&
+                logString.IndexOf("authentication request is still pending", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                authPendingErrorDetected = true;
             }
         }
 
@@ -919,6 +946,27 @@ namespace LiftoffAutoLobby
 
         private static void HandleMultiplayerMenu()
         {
+            // Known long-standing Liftoff quirk, confirmed live 2026-07-02 (affects both Pro
+            // and anonymous sign-in): once "An authentication request is still pending. Cannot
+            // connect." fires, every further click on this same MultiplayerMenu instance keeps
+            // failing the same way — some auth-manager flag never clears itself. The previous
+            // workaround was manual: back out to MainMenu, back into Multiplayer, retry. Doing
+            // that automatically here (scene reload destroys/recreates whatever holds the stuck
+            // flag) instead of leaving it to a human.
+            if (authPendingErrorDetected)
+            {
+                authPendingErrorDetected = false;
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Detected stuck 'authentication request still pending' error — cycling back to MainMenu to clear it (known Liftoff quirk).");
+                liftoffProLoginAttempted = false;
+                liftoffProLoginClickTime = DateTime.MinValue;
+                lastSkipClickTime = DateTime.MinValue;
+                lastSignInClickTime = DateTime.MinValue;
+                signInWasVisible = false;
+                signInClickAttempted = false;
+                NavigateToMainMenu();
+                return;
+            }
+
             DumpActiveSceneObjects();
             LogMultiplayerMenuState();
 
