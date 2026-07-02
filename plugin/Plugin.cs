@@ -37,9 +37,6 @@ namespace LiftoffAutoLobby
         private static bool isLeaving = false;
 
         private static bool chatWarnedAboutNextRace = false;
-        private static bool databaseDumped = false;
-        private static int databaseDumpRetries = 0;
-        private static DateTime lastDatabaseDumpTime = DateTime.MinValue;
         private static bool liftoffProLoginAttempted = false;
         private static DateTime liftoffProLoginClickTime = DateTime.MinValue;
         private static DateTime lastSignInClickTime = DateTime.MinValue;
@@ -50,6 +47,8 @@ namespace LiftoffAutoLobby
         private static string botNickname = "";
         private static bool nicknameApplied = false;
         private static DateTime lastSkipClickTime = DateTime.MinValue;
+        private static bool signInClickAttempted = false; // limits MultiplayerMenu sign-in to exactly one click per appearance (reduce-login-retry-attempts)
+        private static bool signInWasVisible = false;      // tracks appearance transitions so signInClickAttempted resets per-appearance, not per-tick
         private static bool triedCustomContentTab = false;
         private static bool steamStatusLogged = false;
         private static string lastSceneName = "";
@@ -82,6 +81,33 @@ namespace LiftoffAutoLobby
         private static int lastMaintenanceWarningMinutes = -1;
         private static bool maintenanceWarning30sSent = false;
         private static bool maintenanceWarning10sSent = false;
+
+        // Room visibility / max players / rename-via-recreate flow
+        private static bool pendingPrivateRoomRename = false;   // true while a /private <name> request is in flight
+        private static DateTime pendingPrivateRoomRenameStartTime = DateTime.MinValue; // global watchdog: aborts the whole rename if it never reaches a create/join attempt at all (e.g. an unrelated sign-in screen derails navigation before ConfigureAndCreateRoom ever runs)
+        private static string pendingPrivateRoomName = "";
+        private static string pendingPrivateRoomAdmin = "";
+        private static bool pendingJoinByName = false;          // set by OnCreateRoomFailed(GameIdAlreadyExists), consumed in MultiplayerMenu lobby list
+        private static DateTime pendingJoinByNameSetTime = DateTime.MinValue; // hard timeout for the whole join-by-name flow, regardless of which step gets stuck
+        private static DateTime joinByNameButtonClickedTime = DateTime.MinValue;
+        private static bool joinByNamePanelSubmitted = false;
+        private static bool roomOwnedByBot = true;              // false once the bot joins a room it did not create (no control over settings/rotation)
+        // Confirmed via live UI dump (see ProcessJoinByNameFlow): GameObject name is "InputFieldName".
+        // Shared so the leftover-panel self-correction check in HandleMultiplayerMenu can't drift
+        // from the names ProcessJoinByNameFlow actually matches against.
+        private static readonly string[] JoinByNameRoomFieldNames = { "InputFieldName", "fieldRoomName", "inputFieldRoomName", "RoomName" };
+
+        // Messages queued from Photon-callback context (create/join/master-switch handlers) that
+        // may fire while still on the MultiplayerMenu screen, before the in-room chat panel exists.
+        // Sending immediately there reliably throws ("chatPanel activeInHierarchy: False") and the
+        // message is lost. Flushed every GameRoom tick once the panel is actually available.
+        private static readonly List<string> pendingRoomChatMessages = new List<string>();
+
+        private static void QueueChatMessage(string message)
+        {
+            if (string.IsNullOrEmpty(message)) return;
+            pendingRoomChatMessages.Add(message);
+        }
 
         private void Awake()
         {
@@ -358,19 +384,26 @@ namespace LiftoffAutoLobby
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Tick running. Scene: {sceneName}, Room timer elapsed: {elapsed:F1}s / {GetRotationInterval()}s");
             }
 
-            if (!databaseDumped && databaseDumpRetries < 3 && (DateTime.Now - lastDatabaseDumpTime).TotalSeconds >= 120.0)
+            // Global safety net: the join-by-name flow's own internal timeouts (15s hard cap,
+            // 10s field-lookup cap) only fire from inside ProcessJoinByNameFlow/HandleCreateRoomFailed
+            // — if a /private <name> rename gets derailed onto an unrelated screen before ever
+            // reaching a create/join attempt (e.g. leaving a room triggers a full Photon disconnect
+            // that surfaces a sign-in prompt), none of those internal timeouts ever run, and the bot
+            // can wander indefinitely. This fires regardless of which scene/panel it's stuck on.
+            if (pendingPrivateRoomRename && pendingPrivateRoomRenameStartTime != DateTime.MinValue &&
+                (DateTime.Now - pendingPrivateRoomRenameStartTime).TotalSeconds > 90.0)
             {
-                if (sceneName == "MainMenu" || sceneName == "MultiplayerMenu")
-                {
-                    lastDatabaseDumpTime = DateTime.Now;
-                    databaseDumpRetries++;
-                    DumpGameDatabase();
-                    if (databaseDumpRetries >= 3)
-                    {
-                        UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Reached maximum database dump attempts. Stopping dump retries to prevent performance degradation.");
-                        databaseDumped = true;
-                    }
-                }
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Private room rename to '{pendingPrivateRoomName}' stuck for 90s+ with no create/join resolution — aborting and reloading MainMenu to recover.");
+                pendingPrivateRoomRename = false;
+                pendingPrivateRoomRenameStartTime = DateTime.MinValue;
+                pendingJoinByName = false;
+                joinByNamePanelSubmitted = false;
+                liftoffProLoginAttempted = false;
+                liftoffProLoginClickTime = DateTime.MinValue;
+                try { File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "false"); } catch { }
+                QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Room rename to '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>' got stuck and was aborted — recovering with a public room.");
+                SceneManager.LoadScene("MainMenu");
+                return;
             }
 
             if ((DateTime.Now - popupSubmittedTime).TotalSeconds < 5.0)
@@ -405,6 +438,21 @@ namespace LiftoffAutoLobby
                     }
 
                     popupWasOpen = true;
+                }
+
+                // A create attempt just failed on a name collision — back out of this popup
+                // instead of retrying Create with the same (still-taken) name, so the bot can
+                // reach the lobby-list screen and drive the join-by-name fallback from there.
+                if (pendingJoinByName && !joinByNamePanelSubmitted)
+                {
+                    isSubmittingSettings = false;
+                    Button cancelBtn = GetPopupCancelButton(popup);
+                    if (cancelBtn != null && cancelBtn.gameObject.activeInHierarchy && cancelBtn.interactable)
+                    {
+                        UnityEngine.Debug.Log("[AutoLobbyPlugin] Cancelling settings popup to pivot to join-by-name fallback.");
+                        cancelBtn.onClick.Invoke();
+                    }
+                    return;
                 }
 
                 // If settings are already submitted, do not touch the UI elements again
@@ -618,6 +666,14 @@ namespace LiftoffAutoLobby
                                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Track not shareable, skipping: {targetTrackName}");
                                 targetTrackName = GetNextTrackFromRotation(out targetEnvironment, out targetGameMode);
                                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Advanced to next track: {targetTrackName} ({targetEnvironment})");
+                                isSubmittingSettings = false;
+                            }
+                            else if (isSubmittingSettings)
+                            {
+                                // Some other alert (e.g. "room already exists") appeared after a
+                                // submit — don't leave the bot stuck waiting for a popup that will
+                                // never close on its own.
+                                UnityEngine.Debug.Log("[AutoLobbyPlugin] Dismissed an alert while a settings submission was in flight — resetting isSubmittingSettings so the bot can retry.");
                                 isSubmittingSettings = false;
                             }
                             break;
@@ -884,6 +940,26 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            // Self-correction: if the join-by-name sub-panel is active but we're not actually
+            // driving a join-by-name flow right now, it's a leftover from an aborted flow (e.g. a
+            // Photon disconnect mid-flow surfaced a sign-in screen and stranded this panel
+            // underneath it — the reproduced 2026-07-02 incident). Reload the scene to force back
+            // to the canonical lobby-list state instead of guessing at a "Back"/"Cancel" button
+            // name for a panel whose real names have already fooled a decompiled-class guess once
+            // (buttonJoinRoomByName vs. the real buttonJoinByName) — a fresh scene load destroys
+            // the leftover panel outright and is safe here since nothing legitimate is in flight.
+            bool expectedJoinByNameFlow = pendingJoinByName && !joinByNamePanelSubmitted;
+            if (!expectedJoinByNameFlow)
+            {
+                InputField leftoverJoinField = FindInputFieldByName(JoinByNameRoomFieldNames, "game name");
+                if (leftoverJoinField != null && leftoverJoinField.gameObject.activeInHierarchy)
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Found leftover join-by-name panel active with no join-by-name flow in progress — reloading MultiplayerMenu to recover.");
+                    SceneManager.LoadScene("MultiplayerMenu");
+                    return;
+                }
+            }
+
             // If a sign-in screen is still showing here (Liftoff Pro didn't complete from MainMenu),
             // log it prominently and navigate back to MainMenu to retry sign-in there.
             bool signInVisible = false;
@@ -908,6 +984,12 @@ namespace LiftoffAutoLobby
 
             if (signInVisible)
             {
+                if (!signInWasVisible)
+                {
+                    signInWasVisible = true;
+                    signInClickAttempted = false;
+                }
+
                 double timeSinceLoad = (DateTime.Now - sceneLoadTime).TotalSeconds;
 
                 // Wait 5s for the UI to fully settle before clicking anything
@@ -968,28 +1050,34 @@ namespace LiftoffAutoLobby
                     }
                 }
 
-                // Click with a 30s cooldown — auth takes time to process server-side
-                if ((DateTime.Now - lastSignInClickTime).TotalSeconds > 30.0)
+                // Exactly one click per sign-in-screen appearance (reduce-login-retry-attempts) —
+                // retrying every 30s just delayed noticing a failed attempt, since the give-up
+                // threshold below is now shorter than a second click's cooldown would allow anyway.
+                if (!signInClickAttempted)
                 {
+                    signInClickAttempted = true;
                     lastSignInClickTime = DateTime.Now;
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking center sign-in button: name='{bestBtn.name}' text='{GetButtonText(bestBtn)}' pos={bestBtn.transform.position}");
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking center sign-in button (single attempt): name='{bestBtn.name}' text='{GetButtonText(bestBtn)}' pos={bestBtn.transform.position}");
                     bestBtn.onClick.Invoke();
                 }
                 else if (DateTime.Now.Second % 5 == 0)
                 {
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Waiting for sign-in response ({(DateTime.Now - lastSignInClickTime).TotalSeconds:F0}s / 30s)...");
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Waiting for sign-in response after single attempt ({(DateTime.Now - lastSignInClickTime).TotalSeconds:F0}s / 35s)...");
                 }
 
-                // After 60s with no progress, go back to MainMenu to reset state
-                if (timeSinceLoad > 60.0)
+                // After 35s with no progress (just past the server-side ~30s auth window), go back
+                // to MainMenu to reset state rather than waiting out the old 60s cap.
+                if (timeSinceLoad > 35.0)
                 {
-                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Still on sign-in screen after 60s — returning to MainMenu.");
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Still on sign-in screen after 35s (single attempt exhausted) — returning to MainMenu.");
                     liftoffProLoginAttempted = false;
                     liftoffProLoginClickTime = DateTime.MinValue;
+                    signInClickAttempted = false;
                     NavigateToMainMenu();
                 }
                 return;
             }
+            signInWasVisible = false;
 
             // 3. Check if GameRoom is active
             GameObject gameRoomObj = GameObject.Find("GameRoom");
@@ -1005,32 +1093,47 @@ namespace LiftoffAutoLobby
             // Not in room — check grace period before doing anything.
             // GameRoom can temporarily disappear during settings updates and Photon state syncs.
             // If we were in a room within the last 120s, hold position — do NOT create a new lobby.
+            // Skipped entirely during a /private <name> rename: we left the room on purpose, so
+            // there's nothing transient to wait out — go straight to the join-by-name/create logic
+            // below. Without this, the grace period silently ate up to 120s doing nothing, and then
+            // the stuck-in-menu fallback below could fire immediately afterwards (since sceneLoadTime
+            // predates the leave), bouncing the bot out to MainMenu before it ever tried to recover.
             double timeInMenu = (DateTime.Now - sceneLoadTime).TotalSeconds;
             double timeSinceRoom = lastInRoomTime != DateTime.MinValue
                 ? (DateTime.Now - lastInRoomTime).TotalSeconds
                 : timeInMenu;
 
-            if (lastInRoomTime != DateTime.MinValue && timeSinceRoom < 120.0)
+            if (!pendingPrivateRoomRename)
             {
-                if (DateTime.Now.Second % 10 == 0)
+                if (lastInRoomTime != DateTime.MinValue && timeSinceRoom < 120.0)
                 {
-                    bool photonConnected = GetPhotonBoolProperty("IsConnected");
-                    bool photonInRoom = GetPhotonBoolProperty("InRoom");
-                    bool photonReady = GetPhotonBoolProperty("IsConnectedAndReady");
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] GameRoom not found but was in room {timeSinceRoom:F0}s ago (grace period 120s). Photon Status: IsConnected={photonConnected}, InRoom={photonInRoom}, IsConnectedAndReady={photonReady}");
+                    if (DateTime.Now.Second % 10 == 0)
+                    {
+                        bool photonConnected = GetPhotonBoolProperty("IsConnected");
+                        bool photonInRoom = GetPhotonBoolProperty("InRoom");
+                        bool photonReady = GetPhotonBoolProperty("IsConnectedAndReady");
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] GameRoom not found but was in room {timeSinceRoom:F0}s ago (grace period 120s). Photon Status: IsConnected={photonConnected}, InRoom={photonInRoom}, IsConnectedAndReady={photonReady}");
+                    }
+                    return;
                 }
-                return;
+
+                // Stuck-in-menu fallback: only fires after grace period
+                if (timeInMenu > 90.0 && timeSinceRoom > 120.0)
+                {
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Stuck in MultiplayerMenu for {timeInMenu:F0}s (out of room for {timeSinceRoom:F0}s) — navigating back to MainMenu.");
+                    NavigateToMainMenu();
+                    return;
+                }
             }
 
             // Grace period expired (or never been in a room this scene load) — reset state
             roomCreatedTime = DateTime.MinValue;
             isLeaving = false;
 
-            // Stuck-in-menu fallback: only fires after grace period
-            if (timeInMenu > 90.0 && timeSinceRoom > 120.0)
+            // 3b. If a /private <name> request hit a name collision, drive the join-by-name UI instead of Create Game
+            if (pendingJoinByName && !joinByNamePanelSubmitted)
             {
-                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Stuck in MultiplayerMenu for {timeInMenu:F0}s (out of room for {timeSinceRoom:F0}s) — navigating back to MainMenu.");
-                NavigateToMainMenu();
+                ProcessJoinByNameFlow();
                 return;
             }
 
@@ -1084,6 +1187,18 @@ namespace LiftoffAutoLobby
                 return;
             }
 
+            // Flush any chat messages that were queued while the chat panel wasn't available yet
+            // (e.g. sent from a Photon callback while still on the MultiplayerMenu screen).
+            if (pendingRoomChatMessages.Count > 0)
+            {
+                string[] toSend = pendingRoomChatMessages.ToArray();
+                pendingRoomChatMessages.Clear();
+                foreach (string msg in toSend)
+                {
+                    SendChatMessage(msg);
+                }
+            }
+
             if (roomCreatedTime == DateTime.MinValue || roomCreatedTime == DateTime.MaxValue)
             {
                 UnityEngine.Debug.Log("[AutoLobbyPlugin] Entered GameRoom. Starting room timer.");
@@ -1091,6 +1206,22 @@ namespace LiftoffAutoLobby
                 lastActivityTime = DateTime.UtcNow;
                 chatWarnedAboutNextRace = false;
                 firstStartGameClickTime = DateTime.MinValue;
+
+                // Apply a persisted max-players override (survives bot restarts), if one is configured.
+                string maxPlayersPath = Path.Combine(pluginPath, "max_players.txt");
+                if (File.Exists(maxPlayersPath))
+                {
+                    int configuredMax;
+                    if (int.TryParse(File.ReadAllText(maxPlayersPath).Trim(), out configuredMax))
+                    {
+                        int applied;
+                        string err;
+                        if (!SetRoomMaxPlayers(configuredMax, out applied, out err))
+                        {
+                            UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to apply persisted max_players.txt ({configuredMax}): {err}");
+                        }
+                    }
+                }
             }
 
             double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
@@ -1324,6 +1455,59 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // Top-level environment keys are always written at exactly 2-space indent by
+        // WriteTrackModeAvailabilityDump (mode keys nest one level deeper, at 4 spaces), so a
+        // plain indent-width scan is enough to recover them without a JSON parser dependency.
+        private static HashSet<string> ReadCachedTrackModeDumpEnvNames(string path)
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (string rawLine in File.ReadAllLines(path))
+                {
+                    if (rawLine.Length < 3 || rawLine[0] != ' ' || rawLine[1] != ' ' || rawLine[2] == ' ') continue;
+                    string line = rawLine.TrimStart();
+                    if (!line.StartsWith("\"")) continue;
+                    int endQuote = line.IndexOf('"', 1);
+                    if (endQuote <= 1) continue;
+                    names.Add(line.Substring(1, endQuote - 1));
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to read cached track_mode_availability.json: {ex.Message}");
+            }
+            return names;
+        }
+
+        // Skips the (multi-minute) dropdown-driven dump when a previous session's dump already
+        // covers the same set of environments — the common case during dev iteration, where a
+        // plugin rebuild forces a full bot restart but nothing about the Workshop
+        // subscriptions/installed environments actually changed. Fails closed (returns false, so
+        // the full dump runs) on anything unexpected, since a stale/incomplete cached file is a
+        // worse outcome than paying the one-time dump cost.
+        private static bool TryReuseCachedTrackModeDump(ContentSettingsPanel contentSettings)
+        {
+            string dumpFilePath = Path.Combine(pluginPath, "track_mode_availability.json");
+            if (!File.Exists(dumpFilePath)) return false;
+
+            LiftoffDropdown dropdownEnvironment = GetContentDropdownEnvironment(contentSettings);
+            if (dropdownEnvironment == null || dropdownEnvironment.options.Count == 0) return false;
+
+            var liveEnvNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var opt in dropdownEnvironment.options) liveEnvNames.Add(opt.text);
+
+            var cachedEnvNames = ReadCachedTrackModeDumpEnvNames(dumpFilePath);
+            if (cachedEnvNames.Count == 0 || !liveEnvNames.SetEquals(cachedEnvNames))
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Cached track/mode dump is stale or unreadable (live {liveEnvNames.Count} envs vs cached {cachedEnvNames.Count}) — re-dumping.");
+                return false;
+            }
+
+            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Reusing cached track/mode availability dump from a previous session ({cachedEnvNames.Count} environments match) — skipping re-dump.");
+            return true;
+        }
+
         private static bool TrySelectCustomContentTab(PopupQuickPlayMultiplayerSetup popup)
         {
             if (popup == null) return false;
@@ -1357,11 +1541,18 @@ namespace LiftoffAutoLobby
             {
                 if (!isDumpingTrackModes && !trackModeDumpDoneThisSession)
                 {
-                    isDumpingTrackModes = true;
-                    dumpEnvIndex2 = 0;
-                    dumpModeIndex2 = 0;
-                    dumpedTrackModeMap.Clear();
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Starting Environment x GameMode track availability dump ({TrackModeDumpCandidateModes.Length} candidate modes)...");
+                    if (TryReuseCachedTrackModeDump(contentSettings))
+                    {
+                        trackModeDumpDoneThisSession = true;
+                    }
+                    else
+                    {
+                        isDumpingTrackModes = true;
+                        dumpEnvIndex2 = 0;
+                        dumpModeIndex2 = 0;
+                        dumpedTrackModeMap.Clear();
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Starting Environment x GameMode track availability dump ({TrackModeDumpCandidateModes.Length} candidate modes)...");
+                    }
                 }
 
                 if (isDumpingTrackModes)
@@ -1984,9 +2175,12 @@ namespace LiftoffAutoLobby
                 {
                     var chats = Resources.FindObjectsOfTypeAll(chatType);
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Found {chats.Length} ChatWindowPanel objects.");
-                    if (chats.Length > 0 && chats[0] != null)
+                    // Prefer an active panel — during a room recreate, a stale inactive instance
+                    // from the old scene can briefly coexist with the new one.
+                    object chatObj = chats.FirstOrDefault(c => c != null && ((MonoBehaviour)c).gameObject.activeInHierarchy) ?? chats.FirstOrDefault(c => c != null);
+                    if (chatObj != null)
                     {
-                        MonoBehaviour chatPanel = (MonoBehaviour)chats[0];
+                        MonoBehaviour chatPanel = (MonoBehaviour)chatObj;
                         UnityEngine.Debug.Log($"[AutoLobbyPlugin] chatPanel activeInHierarchy: {chatPanel.gameObject.activeInHierarchy}");
                         var inputFieldField = chatType.GetField("fieldUserMessage", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                         if (inputFieldField != null)
@@ -2945,6 +3139,44 @@ namespace LiftoffAutoLobby
                     roomCreatedTime = DateTime.MinValue;
                     isLeaving = false;
                 }
+                else if (methodName == "OnCreateRoomFailed" && __args != null && __args.Length >= 2)
+                {
+                    // Not gated on pendingPrivateRoomRename: any create attempt (bot startup,
+                    // post-disconnect recreate, etc.) can hit a stale/occupied room name, not just
+                    // an explicit /private <name> request — always try to recover.
+                    HandleCreateRoomFailed((short)__args[0], __args[1] as string);
+                }
+                else if (methodName == "OnJoinRoomFailed" && joinByNamePanelSubmitted && __args != null && __args.Length >= 2)
+                {
+                    HandleJoinByNameFailed((short)__args[0], __args[1] as string);
+                }
+                else if (methodName == "OnCreatedRoom")
+                {
+                    roomOwnedByBot = true;
+                    if (pendingPrivateRoomRename)
+                    {
+                        UnityEngine.Debug.Log("[AutoLobbyPlugin] Private room rename: new room created successfully.");
+                        QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Room recreated as private. Join name: <color=#00FF88><i>{pendingPrivateRoomName}</i></color>.");
+                    }
+                    pendingPrivateRoomRename = false;
+                    pendingPrivateRoomRenameStartTime = DateTime.MinValue;
+                    pendingJoinByName = false;
+                    joinByNamePanelSubmitted = false;
+                }
+                else if (methodName == "OnJoinedRoom" && joinByNamePanelSubmitted)
+                {
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Joined an existing room by name instead of creating one — bot does not own this room.");
+                    roomOwnedByBot = false;
+                    QueueChatMessage($"<color=#0000FF>[ADMIN]</color> A room named '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>' already existed — joined it instead of creating a new one. <color=#FF0000><i>This bot is not the room owner and cannot control settings/rotation here.</i></color> Current host: please transfer host to this bot from the player list so it can control settings/rotation, or use /private with a different name to have the bot create its own room instead.");
+                    pendingPrivateRoomRename = false;
+                    pendingPrivateRoomRenameStartTime = DateTime.MinValue;
+                    pendingJoinByName = false;
+                    joinByNamePanelSubmitted = false;
+                }
+                else if (methodName == "OnMasterClientSwitched" && __args != null && __args.Length >= 1)
+                {
+                    HandleMasterClientSwitched(__args[0]);
+                }
 
                 System.Collections.IList list = __instance as System.Collections.IList;
                 if (list == null) return true;
@@ -2999,6 +3231,389 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // ---------------------------------------------------------------
+        // Room visibility / max players / private-room-rename (admin commands)
+        // ---------------------------------------------------------------
+
+        private static Type GetPhotonNetworkType()
+        {
+            return Type.GetType("Photon.Pun.PhotonNetwork, PhotonUnityNetworking") ??
+                   Type.GetType("PhotonNetwork, Assembly-CSharp");
+        }
+
+        private static object GetPhotonCurrentRoom()
+        {
+            try
+            {
+                Type type = GetPhotonNetworkType();
+                PropertyInfo prop = type?.GetProperty("CurrentRoom", BindingFlags.Public | BindingFlags.Static);
+                return prop?.GetValue(null);
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to read PhotonNetwork.CurrentRoom: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Sets IsVisible only — a private room stays IsOpen so it can still be joined by name.
+        private static bool SetRoomVisibility(bool makePrivate, out string roomName, out string error)
+        {
+            roomName = "";
+            error = "";
+            object room = GetPhotonCurrentRoom();
+            if (room == null) { error = "not currently in a room"; return false; }
+            try
+            {
+                Type roomType = room.GetType();
+                PropertyInfo visibleProp = roomType.GetProperty("IsVisible", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                PropertyInfo nameProp = roomType.GetProperty("Name", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                if (visibleProp == null) { error = "IsVisible property not found"; return false; }
+                visibleProp.SetValue(room, !makePrivate);
+                roomName = nameProp?.GetValue(room) as string ?? "";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to set room visibility: {ex}");
+                return false;
+            }
+        }
+
+        private static bool TryGetRoomInfo(out bool isVisible, out string roomName, out int maxPlayers, out int playerCount)
+        {
+            isVisible = true; roomName = ""; maxPlayers = 0; playerCount = 0;
+            object room = GetPhotonCurrentRoom();
+            if (room == null) return false;
+            try
+            {
+                Type roomType = room.GetType();
+                const BindingFlags roomPropFlags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+                isVisible = (bool)(roomType.GetProperty("IsVisible", roomPropFlags)?.GetValue(room) ?? true);
+                roomName = roomType.GetProperty("Name", roomPropFlags)?.GetValue(room) as string ?? "";
+                maxPlayers = (byte)(roomType.GetProperty("MaxPlayers", roomPropFlags)?.GetValue(room) ?? (byte)0);
+                playerCount = (byte)(roomType.GetProperty("PlayerCount", roomPropFlags)?.GetValue(room) ?? (byte)0);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to read room info: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static bool SetRoomMaxPlayers(int requested, out int applied, out string error)
+        {
+            applied = requested;
+            error = "";
+            object room = GetPhotonCurrentRoom();
+            if (room == null) { error = "not currently in a room"; return false; }
+            try
+            {
+                Type roomType = room.GetType();
+                PropertyInfo maxProp = roomType.GetProperty("MaxPlayers", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                PropertyInfo countProp = roomType.GetProperty("PlayerCount", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                if (maxProp == null) { error = "MaxPlayers property not found"; return false; }
+
+                int currentPlayers = countProp != null ? (byte)countProp.GetValue(room) : 0;
+                int clamped = Math.Max(requested, Math.Max(currentPlayers, 2));
+                clamped = Math.Min(clamped, 255);
+                maxProp.SetValue(room, (byte)clamped);
+                applied = clamped;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to set max players: {ex}");
+                return false;
+            }
+        }
+
+        private static bool TryLeaveCurrentRoom()
+        {
+            try
+            {
+                Type type = GetPhotonNetworkType();
+                MethodInfo leaveMethod = type?.GetMethod("LeaveRoom", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(bool) }, null);
+                if (leaveMethod == null) return false;
+                leaveMethod.Invoke(null, new object[] { false });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to call PhotonNetwork.LeaveRoom: {ex.Message}");
+                return false;
+            }
+        }
+
+        // Kicks off the leave -> recreate-with-new-name flow for `/private <name>`.
+        // The actual room creation is handled by the existing ConfigureAndCreateRoom path once the
+        // bot is back at the MultiplayerMenu lobby list (lobby_name.txt / room_private.txt already updated).
+        private static void BeginPrivateRoomRename(string newName, string adminName)
+        {
+            pendingPrivateRoomRename = true;
+            pendingPrivateRoomRenameStartTime = DateTime.Now;
+            pendingPrivateRoomName = newName;
+            pendingPrivateRoomAdmin = adminName;
+            pendingJoinByName = false;
+            joinByNamePanelSubmitted = false;
+            joinByNameButtonClickedTime = DateTime.MinValue;
+
+            try
+            {
+                File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "true");
+                File.WriteAllText(Path.Combine(pluginPath, "lobby_name.txt"), newName);
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write room_private.txt/lobby_name.txt: {ex.Message}");
+            }
+
+            targetLobbyName = newName; // picked up immediately if the popup is already open on next tick
+
+            bool wasInRoom = GetPhotonBoolProperty("InRoom");
+            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Recreating room as private with name <color=#00FF88><i>{newName}</i></color>. Current players will be disconnected.");
+            if (wasInRoom)
+            {
+                if (!TryLeaveCurrentRoom())
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Could not call LeaveRoom() — will rely on scene/menu recovery instead.");
+                }
+            }
+        }
+
+        // Keeps roomOwnedByBot in sync with the actual Photon master client, not just the bot's own
+        // create/join history — this is the only way it becomes accurate again after a human
+        // manually transfers host to the bot from Liftoff's player list following a by-name join.
+        private static void HandleMasterClientSwitched(object newMasterClient)
+        {
+            try
+            {
+                if (newMasterClient == null) return;
+                FieldInfo localField = newMasterClient.GetType().GetField("IsLocal", BindingFlags.Public | BindingFlags.Instance);
+                bool isLocal = localField != null && (bool)localField.GetValue(newMasterClient);
+                bool wasOwned = roomOwnedByBot;
+                roomOwnedByBot = isLocal;
+
+                if (isLocal && !wasOwned)
+                {
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Master client switched to this bot — room is now bot-owned.");
+                    QueueChatMessage("<color=#0000FF>[ADMIN]</color> This bot is now the room host — settings/rotation control restored.");
+                }
+                else if (!isLocal && wasOwned)
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Master client switched away from this bot — room is no longer bot-owned.");
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Exception in HandleMasterClientSwitched: {ex}");
+            }
+        }
+
+        // Handles ANY failed room creation, not just ones triggered by /private <name> — a stale
+        // lobby_name.txt or a leftover room from a previous session can collide just as easily
+        // during a normal bot-startup create. Always attempts the join-by-name -> public-fallback
+        // recovery chain rather than leaving the bot stuck on the settings popup forever.
+        private static void HandleCreateRoomFailed(short errorCode, string message)
+        {
+            isSubmittingSettings = false; // unstick RunTick's "waiting for popup to close" loop
+            UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Create room failed ({errorCode}) {message}");
+            if (errorCode == ErrorCode.GameIdAlreadyExists)
+            {
+                pendingPrivateRoomName = targetLobbyName;
+                pendingJoinByName = true;
+                pendingJoinByNameSetTime = DateTime.Now;
+                joinByNamePanelSubmitted = false;
+                joinByNameButtonClickedTime = DateTime.MinValue;
+                QueueChatMessage($"<color=#0000FF>[ADMIN]</color> A room named '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>' already exists — attempting to join it instead.");
+            }
+            else if (pendingPrivateRoomRename)
+            {
+                QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Failed to create private room '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>': {message}");
+                pendingPrivateRoomRename = false;
+                pendingPrivateRoomRenameStartTime = DateTime.MinValue;
+                pendingJoinByName = false;
+                joinByNamePanelSubmitted = false;
+            }
+            else
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Room creation failed for a reason other than a name collision — will retry with the same settings next tick.");
+            }
+        }
+
+        private static void HandleJoinByNameFailed(short errorCode, string message)
+        {
+            isSubmittingSettings = false;
+            UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Join by name failed ({errorCode}) {message}");
+            if (errorCode == ErrorCode.GameFull || errorCode == ErrorCode.GameClosed || errorCode == ErrorCode.GameDoesNotExist)
+            {
+                FallBackToPublicRoom($"Room '{pendingPrivateRoomName}' couldn't be joined ({message}).");
+            }
+            else
+            {
+                QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Failed to join room '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>': {message}. Giving up.");
+                pendingPrivateRoomRename = false;
+                pendingPrivateRoomRenameStartTime = DateTime.MinValue;
+                pendingJoinByName = false;
+                joinByNamePanelSubmitted = false;
+            }
+        }
+
+        // Last-resort recovery: abandon the private-name attempt and let the bot create a public
+        // room instead. Liftoff auto-generates a random public room name (see
+        // RoomSettingsPanel.ApplyToGameSettings/GenerateRoomName), so this can't collide again.
+        private static void FallBackToPublicRoom(string reasonForChat)
+        {
+            QueueChatMessage($"<color=#0000FF>[ADMIN]</color> {reasonForChat} Falling back to a public room.");
+            try
+            {
+                File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "false");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write room_private.txt: {ex.Message}");
+            }
+            pendingPrivateRoomRename = false;
+            pendingPrivateRoomRenameStartTime = DateTime.MinValue;
+            pendingJoinByName = false;
+            joinByNamePanelSubmitted = false;
+        }
+
+        private static InputField FindInputFieldByName(string[] targetNames, string placeholderSubstring = null)
+        {
+            InputField[] fields = Resources.FindObjectsOfTypeAll<InputField>();
+            foreach (InputField f in fields)
+            {
+                if (f == null || !f.gameObject.activeInHierarchy) continue;
+                foreach (string name in targetNames)
+                {
+                    if (f.name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                        return f;
+                }
+            }
+            // Fallback: allow inactive match too, in case the panel hasn't been SetActive(true) yet
+            foreach (InputField f in fields)
+            {
+                if (f == null) continue;
+                foreach (string name in targetNames)
+                {
+                    if (f.name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                        return f;
+                }
+            }
+            // Fallback: match by placeholder text, in case the field's GameObject name changes
+            // between game versions (name-based lookup already proved brittle once here).
+            if (!string.IsNullOrEmpty(placeholderSubstring))
+            {
+                foreach (InputField f in fields)
+                {
+                    if (f == null || f.placeholder == null) continue;
+                    Text pt = f.placeholder as Text;
+                    if (pt != null && pt.text != null &&
+                        pt.text.IndexOf(placeholderSubstring, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return f;
+                }
+            }
+            return null;
+        }
+
+        // Scoped lookup: searches only within root's hierarchy, to avoid matching one of many
+        // identically-named per-row buttons in a room list (e.g. "buttonJoin" appears once per
+        // visible public room row, so a global scene-wide search is ambiguous).
+        private static Button FindButtonInHierarchy(Transform root, string[] targetNames)
+        {
+            if (root == null) return null;
+            foreach (Button btn in root.GetComponentsInChildren<Button>(true))
+            {
+                if (btn == null) continue;
+                foreach (string name in targetNames)
+                {
+                    if (btn.name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                        return btn;
+                }
+            }
+            return null;
+        }
+
+        // Drives the "join by name" sub-flow once OnCreateRoomFailed(GameIdAlreadyExists) has set pendingJoinByName.
+        // Called every tick from HandleMultiplayerMenu while on the lobby list screen.
+        private static void ProcessJoinByNameFlow()
+        {
+            if (!pendingJoinByName || joinByNamePanelSubmitted) return;
+
+            // Hard timeout on the whole flow, independent of which specific step is stuck —
+            // never leave the bot spinning here indefinitely.
+            if (pendingJoinByNameSetTime != DateTime.MinValue &&
+                (DateTime.Now - pendingJoinByNameSetTime).TotalSeconds > 15.0)
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Join-by-name flow timed out.");
+                FallBackToPublicRoom($"Could not join room '{pendingPrivateRoomName}' in time.");
+                return;
+            }
+
+            if (joinByNameButtonClickedTime == DateTime.MinValue)
+            {
+                // Confirmed via live UI dump: GameObject name is "buttonJoinByName", button text
+                // is "Join game by name" (not the field name "buttonJoinRoomByName" guessed from
+                // the decompiled class, and not an exact "JOIN BY NAME" text match).
+                string[] joinByNameNames = { "buttonJoinByName", "btnJoinByName", "JoinByName" };
+                Button joinByNameBtn = FindButtonByTextOrName("Join game by name", joinByNameNames);
+                if (joinByNameBtn == null)
+                {
+                    foreach (Button b in Resources.FindObjectsOfTypeAll<Button>())
+                    {
+                        if (b == null || !b.gameObject.activeInHierarchy) continue;
+                        string txt = GetButtonText(b);
+                        if (!string.IsNullOrEmpty(txt) && txt.IndexOf("join", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                            txt.IndexOf("name", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            joinByNameBtn = b;
+                            break;
+                        }
+                    }
+                }
+                if (joinByNameBtn != null && joinByNameBtn.gameObject.activeInHierarchy && joinByNameBtn.interactable)
+                {
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Clicking Join By Name button to reveal the join panel.");
+                    joinByNameBtn.onClick.Invoke();
+                    joinByNameButtonClickedTime = DateTime.Now;
+                }
+                return;
+            }
+
+            // Give the panel a moment to activate before looking for its contents.
+            if ((DateTime.Now - joinByNameButtonClickedTime).TotalSeconds < 1.5) return;
+
+            // Confirmed via live UI dump: GameObject name is "InputFieldName", placeholder text
+            // is "Enter game name" (not "fieldRoomName" guessed from the decompiled class).
+            string[] joinButtonNames = { "buttonJoin", "btnJoin", "Join" };
+            InputField roomNameField = FindInputFieldByName(JoinByNameRoomFieldNames, "game name");
+            // Scope the Join-button search to the input field's own panel — a global search would
+            // ambiguously match one of the many per-row "buttonJoin" buttons in the room list.
+            Button joinBtn = roomNameField != null
+                ? (FindButtonInHierarchy(roomNameField.transform.parent, joinButtonNames)
+                   ?? FindButtonInHierarchy(roomNameField.transform.parent?.parent, joinButtonNames))
+                : null;
+
+            if (roomNameField == null || joinBtn == null)
+            {
+                // Panel may still be initializing; give up after 10s so we don't spin forever.
+                if ((DateTime.Now - joinByNameButtonClickedTime).TotalSeconds > 10.0)
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Could not find join-by-name panel fields.");
+                    FallBackToPublicRoom($"Could not locate the join-by-name UI for '{pendingPrivateRoomName}'.");
+                }
+                return;
+            }
+
+            roomNameField.text = pendingPrivateRoomName;
+            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Submitting join-by-name for room '{pendingPrivateRoomName}'.");
+            joinBtn.onClick.Invoke();
+            joinByNamePanelSubmitted = true;
+        }
 
 
         private static MethodInfo isConnectedMethod = null;
@@ -3115,355 +3730,6 @@ namespace LiftoffAutoLobby
             }
         }
 
-        private static void FindDepotsRecursively(object obj, HashSet<object> visited, List<object> foundDepots, Type shareableType)
-        {
-            if (obj == null) return;
-            if (visited.Contains(obj)) return;
-            visited.Add(obj);
-
-            Type t = obj.GetType();
-            
-            var fields = t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (fields == null) return;
-
-            bool isDepot = false;
-            foreach (var f in fields)
-            {
-                if (f != null && f.FieldType != null && f.FieldType.IsGenericType && f.FieldType.GetGenericTypeDefinition() == typeof(List<>))
-                {
-                    var genericArgs = f.FieldType.GetGenericArguments();
-                    if (genericArgs != null && genericArgs.Length > 0 && genericArgs[0] != null)
-                    {
-                        if (shareableType.IsAssignableFrom(genericArgs[0]) || genericArgs[0] == shareableType)
-                        {
-                            isDepot = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (isDepot)
-            {
-                if (!foundDepots.Contains(obj))
-                {
-                    foundDepots.Add(obj);
-                }
-                return;
-            }
-
-            foreach (var f in fields)
-            {
-                if (f != null && f.FieldType != null && f.FieldType.IsClass && f.FieldType != typeof(string) && !f.FieldType.IsPointer && !f.FieldType.IsPrimitive && !f.FieldType.IsValueType)
-                {
-                    try
-                    {
-                        object val = f.GetValue(obj);
-                        if (val != null)
-                        {
-                            FindDepotsRecursively(val, visited, foundDepots, shareableType);
-                        }
-                    }
-                    catch {}
-                }
-            }
-        }
-
-        private static void DumpGameDatabase()
-        {
-            try
-            {
-                UnityEngine.Debug.Log("[AutoLobbyPlugin] Starting game database dump...");
-                Assembly asm = Assembly.Load("Assembly-CSharp");
-                
-                Type shareableType = asm.GetType("ShareableContent") ?? asm.GetTypes().FirstOrDefault(t => t.Name == "ShareableContent");
-                Type environmentType = asm.GetType("Environment") ?? asm.GetTypes().FirstOrDefault(t => t.Name == "Environment");
-                Type trackType = asm.GetType("TrackQuickInfo") ?? asm.GetTypes().FirstOrDefault(t => t.Name == "TrackQuickInfo");
-                Type raceType = asm.GetType("RaceQuickInfo") ?? asm.GetTypes().FirstOrDefault(t => t.Name == "RaceQuickInfo");
-
-                if (shareableType == null || environmentType == null || trackType == null || raceType == null)
-                {
-                    UnityEngine.Debug.LogError("[AutoLobbyPlugin] DumpGameDatabase: Failed to resolve database types.");
-                    return;
-                }
-
-                // 1. Find all environments (Environment inherits from UnityEngine.Object)
-                UnityEngine.Object[] envObjects = Resources.FindObjectsOfTypeAll(environmentType);
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Found {envObjects.Length} Environment objects in Resources.");
-
-                // 2. Find all tracks and races by recursively scanning static fields in assembly
-                var tracks = new List<object>();
-                var races = new List<object>();
-                var foundDepots = new List<object>();
-                var visited = new HashSet<object>();
-
-                UnityEngine.Debug.Log("[AutoLobbyPlugin] Scanning assembly for static depots...");
-                foreach (Type t in asm.GetTypes())
-                {
-                    if (t == null || !t.IsClass) continue;
-                    
-                    var sf = t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                    if (sf == null) continue;
-
-                    foreach (var f in sf)
-                    {
-                        if (f != null && f.FieldType.IsClass && f.FieldType != typeof(string))
-                        {
-                            try
-                            {
-                                object val = f.GetValue(null);
-                                if (val != null)
-                                {
-                                    FindDepotsRecursively(val, visited, foundDepots, shareableType);
-                                }
-                            }
-                            catch {}
-                        }
-                    }
-                }
-
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Found {foundDepots.Count} depot instances in memory.");
-
-                foreach (var depotInstance in foundDepots)
-                {
-                    var fields = depotInstance.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (fields == null) continue;
-
-                    foreach (var f in fields)
-                    {
-                        if (f != null && f.FieldType != null && f.FieldType.IsGenericType && f.FieldType.GetGenericTypeDefinition() == typeof(List<>))
-                        {
-                            var genericArgs = f.FieldType.GetGenericArguments();
-                            if (genericArgs != null && genericArgs.Length > 0 && genericArgs[0] != null)
-                            {
-                                if (shareableType.IsAssignableFrom(genericArgs[0]) || genericArgs[0] == shareableType)
-                                {
-                                    var listVal = f.GetValue(depotInstance);
-                                    if (listVal != null)
-                                    {
-                                        var countProp = listVal.GetType().GetProperty("Count");
-                                        if (countProp != null)
-                                        {
-                                            int count = (int)countProp.GetValue(listVal);
-                                            var getItemMethod = listVal.GetType().GetMethod("get_Item");
-                                            if (getItemMethod != null)
-                                            {
-                                                for (int i = 0; i < count; i++)
-                                                {
-                                                    object item = getItemMethod.Invoke(listVal, new object[] { i });
-                                                    if (item != null)
-                                                    {
-                                                        if (trackType.IsAssignableFrom(item.GetType()))
-                                                        {
-                                                            if (!tracks.Contains(item)) tracks.Add(item);
-                                                        }
-                                                        else if (raceType.IsAssignableFrom(item.GetType()))
-                                                        {
-                                                            if (!races.Contains(item)) races.Add(item);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Final counts: Environments: {envObjects.Length}, Tracks: {tracks.Count}, Races: {races.Count}");
-
-                // 3. Build JSON representation
-                var envList = new List<Dictionary<string, object>>();
-                
-                // Track name mapper to map track ID to track name
-                var trackIdToName = new Dictionary<string, string>();
-                var trackIdToEnv = new Dictionary<string, string>();
-
-                foreach (var track in tracks)
-                {
-                    string tName = "";
-                    var nameProp = track.GetType().GetProperty("Name");
-                    if (nameProp != null) tName = (string)nameProp.GetValue(track) ?? "";
-
-                    string envName = "";
-                    var envField = track.GetType().GetField("environment", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (envField != null) envName = (string)envField.GetValue(track) ?? "";
-
-                    string localIdStr = "";
-                    var localIdProp = track.GetType().GetProperty("LocalID");
-                    if (localIdProp != null)
-                    {
-                        object localIdVal = localIdProp.GetValue(track);
-                        if (localIdVal != null) localIdStr = localIdVal.ToString() ?? "";
-                    }
-
-                    if (!string.IsNullOrEmpty(localIdStr))
-                    {
-                        trackIdToName[localIdStr] = tName;
-                        trackIdToEnv[localIdStr] = envName;
-                    }
-                }
-
-                // Group by Environment
-                var envGroups = new Dictionary<string, List<Dictionary<string, object>>>();
-
-                foreach (var track in tracks)
-                {
-                    string tName = "";
-                    var nameProp = track.GetType().GetProperty("Name");
-                    if (nameProp != null) tName = (string)nameProp.GetValue(track) ?? "";
-
-                    string envName = "";
-                    var envField = track.GetType().GetField("environment", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (envField != null) envName = (string)envField.GetValue(track) ?? "";
-                    if (string.IsNullOrEmpty(envName)) envName = "Unknown";
-
-                    string localIdStr = "";
-                    var localIdProp = track.GetType().GetProperty("LocalID");
-                    if (localIdProp != null)
-                    {
-                        object localIdVal = localIdProp.GetValue(track);
-                        if (localIdVal != null) localIdStr = localIdVal.ToString() ?? "";
-                    }
-
-                    if (!envGroups.ContainsKey(envName))
-                    {
-                        envGroups[envName] = new List<Dictionary<string, object>>();
-                    }
-
-                    // Find races for this track
-                    var trackRaces = new List<string>();
-                    foreach (var race in races)
-                    {
-                        string rName = "";
-                        var rNameProp = race.GetType().GetProperty("Name");
-                        if (rNameProp != null) rName = (string)rNameProp.GetValue(race) ?? "";
-
-                        string trackDepStr = "";
-                        var trackDepProp = race.GetType().GetProperty("TrackDependency");
-                        if (trackDepProp != null)
-                        {
-                            object trackDepVal = trackDepProp.GetValue(race);
-                            if (trackDepVal != null) trackDepStr = trackDepVal.ToString() ?? "";
-                        }
-
-                        if (trackDepStr == localIdStr && !string.IsNullOrEmpty(rName))
-                        {
-                            trackRaces.Add(rName);
-                        }
-                    }
-
-                    var trackDict = new Dictionary<string, object>
-                    {
-                        { "track_name", tName },
-                        { "local_id", localIdStr },
-                        { "races", trackRaces }
-                    };
-
-                    envGroups[envName].Add(trackDict);
-                }
-
-                foreach (var kvp in envGroups)
-                {
-                    string envDisplayName = kvp.Key;
-                    
-                    // Try to find the matching Environment object to get the display name
-                    if (envObjects != null)
-                    {
-                        foreach (var envObj in envObjects)
-                        {
-                            if (envObj != null)
-                            {
-                                var nameVal = envObj.name ?? "";
-                                var dispProp = envObj.GetType().GetProperty("DisplayName");
-                                string dispVal = dispProp != null ? (string)dispProp.GetValue(envObj) ?? "" : "";
-                                
-                                if (nameVal == kvp.Key || dispVal == kvp.Key)
-                                {
-                                    envDisplayName = dispVal;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    var envDict = new Dictionary<string, object>
-                    {
-                        { "environment_name", kvp.Key },
-                        { "display_name", envDisplayName },
-                        { "tracks", kvp.Value }
-                    };
-                    envList.Add(envDict);
-                }
-
-                // Serialize manually to avoid dependency on Newtonsoft.Json
-                StringBuilder sb = new StringBuilder();
-                sb.AppendLine("[");
-                for (int i = 0; i < envList.Count; i++)
-                {
-                    var env = envList[i];
-                    sb.AppendLine("  {");
-                    sb.AppendLine($"    \"environment_name\": \"{EscapeJson(env["environment_name"].ToString())}\",");
-                    sb.AppendLine($"    \"display_name\": \"{EscapeJson(env["display_name"].ToString())}\",");
-                    sb.AppendLine("    \"tracks\": [");
-                    
-                    var envTracks = (List<Dictionary<string, object>>)env["tracks"];
-                    for (int j = 0; j < envTracks.Count; j++)
-                    {
-                        var track = envTracks[j];
-                        sb.AppendLine("      {");
-                        sb.AppendLine($"        \"track_name\": \"{EscapeJson(track["track_name"].ToString())}\",");
-                        sb.AppendLine($"        \"local_id\": \"{EscapeJson(track["local_id"].ToString())}\",");
-                        sb.Append("        \"races\": [");
-                        
-                        var trackRaces = (List<string>)track["races"];
-                        for (int k = 0; k < trackRaces.Count; k++)
-                        {
-                            sb.Append($"\"{EscapeJson(trackRaces[k])}\"");
-                            if (k < trackRaces.Count - 1) sb.Append(", ");
-                        }
-                        sb.AppendLine("]");
-                        
-                        sb.Append("      }");
-                        if (j < envTracks.Count - 1) sb.AppendLine(",");
-                        else sb.AppendLine();
-                    }
-                    sb.AppendLine("    ]");
-                    sb.Append("  }");
-                    if (i < envList.Count - 1) sb.AppendLine(",");
-                    else sb.AppendLine();
-                }
-                sb.AppendLine("]");
-
-                if (tracks.Count > 0 && races.Count > 0)
-                {
-                    string dumpPath = Path.Combine(pluginPath, "liftoff_database_dump.json");
-                    File.WriteAllText(dumpPath, sb.ToString());
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Game database successfully dumped to: {dumpPath}");
-                    databaseDumped = true;
-                }
-                else
-                {
-                    if (DateTime.Now.Second % 10 == 0)
-                    {
-                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] DumpGameDatabase: Database not ready yet (Environments: {envObjects.Length}, Tracks: {tracks.Count}, Races: {races.Count}). Retrying...");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] DumpGameDatabase failed: {ex}");
-            }
-        }
-
-        private static string EscapeJson(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
-        }
-
         private static void HandleChatCommand(string userName, string userId, string cmdText)
         {
             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Processing command from {userName} ({userId}): {cmdText}");
@@ -3491,6 +3757,15 @@ namespace LiftoffAutoLobby
 
                     string response = $"<color=#0000FF>[INFO]</color> Playlist: <color=#00FF88><i>{currentPlaylist}</i></color> | Interval: <color=#00FF88><i>{rotationInterval:F0}s</i></color> | Next in: <color=#00FF88><i>{remaining:F0}s</i></color> | Next: <color=#00FF88><i>{nextEnv} - {nextTrackName}</i></color> ";
                     SendChatMessage(response);
+
+                    bool isVisible; string roomName; int maxPlayers; int playerCount;
+                    if (TryGetRoomInfo(out isVisible, out roomName, out maxPlayers, out playerCount))
+                    {
+                        string visibility = isVisible ? "public" : "private";
+                        string ownership = roomOwnedByBot ? "bot-owned" : "<color=#FF0000>NOT bot-owned — settings/rotation unavailable</color>";
+                        string roomInfo = $"<color=#0000FF>[INFO]</color> Room: <color=#00FF88><i>{roomName}</i></color> | Visibility: <color=#00FF88><i>{visibility}</i></color> | Players: <color=#00FF88><i>{playerCount}/{maxPlayers}</i></color> | {ownership}";
+                        SendChatMessage(roomInfo);
+                    }
                     return;
                 }
 
@@ -3502,6 +3777,24 @@ namespace LiftoffAutoLobby
                 }
 
                 lastActivityTime = DateTime.UtcNow;
+
+                // Commands that mutate room state require the bot to actually be the room's master
+                // client — Photon/Liftoff silently ignore property writes from non-master clients,
+                // which previously made these commands look like they succeeded (e.g. /skip printing
+                // "Skipping to next track." while nothing actually changed). /private <name> is
+                // exempt: it leaves and creates/joins a different room regardless of current
+                // ownership — that's the actual recovery path out of this situation.
+                bool requiresOwnership = cmd == "/skip" || cmd == "/interval" || cmd == "/extend" ||
+                    cmd == "/shuffle" || cmd == "/playlist" || cmd == "/mode" || cmd == "/kick" ||
+                    cmd == "/maxplayers" || cmd == "/public" ||
+                    (cmd == "/private" && string.IsNullOrWhiteSpace(arg));
+
+                if (requiresOwnership && !roomOwnedByBot)
+                {
+                    SendChatMessage($"<color=#0000FF>[ADMIN]</color> <color=#FF0000>'{cmd}' cannot be executed — this bot does not own the room.</color> Transfer host to the bot from the player list, or use /private <name> to have it create/join a different room.");
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Refusing '{cmd}' from {userName} — bot does not own the room.");
+                    return;
+                }
 
                 switch (cmd)
                 {
@@ -3718,6 +4011,75 @@ namespace LiftoffAutoLobby
                             }
                             SendChatMessage($"<color=#0000FF>[ADMIN]</color> Shutdown for maintenance scheduled in <color=#00FF88><i>{mins:F1}m</i></color>.");
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} scheduled maintenance in {mins} minutes.");
+                        }
+                        break;
+
+                    case "/private":
+                        if (pendingPrivateRoomRename)
+                        {
+                            SendChatMessage("<color=#0000FF>[ADMIN]</color> A room rename is already in progress. Please wait for it to finish.");
+                        }
+                        else if (string.IsNullOrWhiteSpace(arg))
+                        {
+                            // No name given: just toggle visibility on the current room, name unchanged.
+                            string curName;
+                            string setErr;
+                            if (SetRoomVisibility(true, out curName, out setErr))
+                            {
+                                try { File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "true"); } catch { }
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Room is now private. Join name: <color=#00FF88><i>{curName}</i></color>.");
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set room to private.");
+                            }
+                            else
+                            {
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Could not change visibility: {setErr}. Usage: /private [name] (name recreates the room with that join name).");
+                            }
+                        }
+                        else
+                        {
+                            BeginPrivateRoomRename(arg.Trim(), userName);
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} requested private room rename to '{arg.Trim()}'.");
+                        }
+                        break;
+
+                    case "/public":
+                        {
+                            string curName;
+                            string setErr;
+                            if (SetRoomVisibility(false, out curName, out setErr))
+                            {
+                                try { File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "false"); } catch { }
+                                SendChatMessage("<color=#0000FF>[ADMIN]</color> Room is now public.");
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set room to public.");
+                            }
+                            else
+                            {
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Could not change visibility: {setErr}.");
+                            }
+                        }
+                        break;
+
+                    case "/maxplayers":
+                        int requestedMax;
+                        if (!int.TryParse(arg, out requestedMax) || requestedMax < 2)
+                        {
+                            SendChatMessage("<color=#0000FF>[ADMIN]</color> Usage: /maxplayers <number> (min 2)");
+                        }
+                        else
+                        {
+                            int applied;
+                            string setErr;
+                            if (SetRoomMaxPlayers(requestedMax, out applied, out setErr))
+                            {
+                                try { File.WriteAllText(Path.Combine(pluginPath, "max_players.txt"), applied.ToString()); } catch { }
+                                string clampNote = applied != requestedMax ? $" (clamped from {requestedMax})" : "";
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Max players set to <color=#00FF88><i>{applied}</i></color>{clampNote}.");
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set max players to {applied} (requested {requestedMax}).");
+                            }
+                            else
+                            {
+                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Could not set max players: {setErr}.");
+                            }
                         }
                         break;
 
