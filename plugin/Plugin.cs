@@ -36,12 +36,11 @@ namespace LiftoffAutoLobby
         private static bool isLeaving = false;
 
         private static bool chatWarnedAboutNextRace = false;
-        private static bool databaseDumped = false;
-        private static int databaseDumpRetries = 0;
-        private static DateTime lastDatabaseDumpTime = DateTime.MinValue;
         private static bool liftoffProLoginAttempted = false;
         private static DateTime liftoffProLoginClickTime = DateTime.MinValue;
         private static DateTime lastSignInClickTime = DateTime.MinValue;
+        private static bool signInClickAttempted = false; // limits MultiplayerMenu sign-in to exactly one click per appearance (reduce-login-retry-attempts)
+        private static bool signInWasVisible = false;      // tracks appearance transitions so signInClickAttempted resets per-appearance, not per-tick
         private static bool triedCustomContentTab = false;
         private static bool steamStatusLogged = false;
         private static string lastSceneName = "";
@@ -85,6 +84,10 @@ namespace LiftoffAutoLobby
         private static DateTime joinByNameButtonClickedTime = DateTime.MinValue;
         private static bool joinByNamePanelSubmitted = false;
         private static bool roomOwnedByBot = true;              // false once the bot joins a room it did not create (no control over settings/rotation)
+        // Confirmed via live UI dump (see ProcessJoinByNameFlow): GameObject name is "InputFieldName".
+        // Shared so the leftover-panel self-correction check in HandleMultiplayerMenu can't drift
+        // from the names ProcessJoinByNameFlow actually matches against.
+        private static readonly string[] JoinByNameRoomFieldNames = { "InputFieldName", "fieldRoomName", "inputFieldRoomName", "RoomName" };
 
         // Messages queued from Photon-callback context (create/join/master-switch handlers) that
         // may fire while still on the MultiplayerMenu screen, before the in-room chat panel exists.
@@ -331,21 +334,6 @@ namespace LiftoffAutoLobby
                 QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Room rename to '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>' got stuck and was aborted — recovering with a public room.");
                 SceneManager.LoadScene("MainMenu");
                 return;
-            }
-
-            if (!databaseDumped && databaseDumpRetries < 3 && (DateTime.Now - lastDatabaseDumpTime).TotalSeconds >= 120.0)
-            {
-                if (sceneName == "MainMenu" || sceneName == "MultiplayerMenu")
-                {
-                    lastDatabaseDumpTime = DateTime.Now;
-                    databaseDumpRetries++;
-                    DumpGameDatabase();
-                    if (databaseDumpRetries >= 3)
-                    {
-                        UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Reached maximum database dump attempts. Stopping dump retries to prevent performance degradation.");
-                        databaseDumped = true;
-                    }
-                }
             }
 
             if ((DateTime.Now - popupSubmittedTime).TotalSeconds < 5.0)
@@ -824,6 +812,26 @@ namespace LiftoffAutoLobby
             DumpActiveSceneObjects();
             LogMultiplayerMenuState();
 
+            // Self-correction: if the join-by-name sub-panel is active but we're not actually
+            // driving a join-by-name flow right now, it's a leftover from an aborted flow (e.g. a
+            // Photon disconnect mid-flow surfaced a sign-in screen and stranded this panel
+            // underneath it — the reproduced 2026-07-02 incident). Reload the scene to force back
+            // to the canonical lobby-list state instead of guessing at a "Back"/"Cancel" button
+            // name for a panel whose real names have already fooled a decompiled-class guess once
+            // (buttonJoinRoomByName vs. the real buttonJoinByName) — a fresh scene load destroys
+            // the leftover panel outright and is safe here since nothing legitimate is in flight.
+            bool expectedJoinByNameFlow = pendingJoinByName && !joinByNamePanelSubmitted;
+            if (!expectedJoinByNameFlow)
+            {
+                InputField leftoverJoinField = FindInputFieldByName(JoinByNameRoomFieldNames, "game name");
+                if (leftoverJoinField != null && leftoverJoinField.gameObject.activeInHierarchy)
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Found leftover join-by-name panel active with no join-by-name flow in progress — reloading MultiplayerMenu to recover.");
+                    SceneManager.LoadScene("MultiplayerMenu");
+                    return;
+                }
+            }
+
             // If a sign-in screen is still showing here (Liftoff Pro didn't complete from MainMenu),
             // log it prominently and navigate back to MainMenu to retry sign-in there.
             bool signInVisible = false;
@@ -848,6 +856,12 @@ namespace LiftoffAutoLobby
 
             if (signInVisible)
             {
+                if (!signInWasVisible)
+                {
+                    signInWasVisible = true;
+                    signInClickAttempted = false;
+                }
+
                 double timeSinceLoad = (DateTime.Now - sceneLoadTime).TotalSeconds;
 
                 // Wait 5s for the UI to fully settle before clicking anything
@@ -908,28 +922,34 @@ namespace LiftoffAutoLobby
                     }
                 }
 
-                // Click with a 30s cooldown — auth takes time to process server-side
-                if ((DateTime.Now - lastSignInClickTime).TotalSeconds > 30.0)
+                // Exactly one click per sign-in-screen appearance (reduce-login-retry-attempts) —
+                // retrying every 30s just delayed noticing a failed attempt, since the give-up
+                // threshold below is now shorter than a second click's cooldown would allow anyway.
+                if (!signInClickAttempted)
                 {
+                    signInClickAttempted = true;
                     lastSignInClickTime = DateTime.Now;
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking center sign-in button: name='{bestBtn.name}' text='{GetButtonText(bestBtn)}' pos={bestBtn.transform.position}");
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Clicking center sign-in button (single attempt): name='{bestBtn.name}' text='{GetButtonText(bestBtn)}' pos={bestBtn.transform.position}");
                     bestBtn.onClick.Invoke();
                 }
                 else if (DateTime.Now.Second % 5 == 0)
                 {
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Waiting for sign-in response ({(DateTime.Now - lastSignInClickTime).TotalSeconds:F0}s / 30s)...");
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Waiting for sign-in response after single attempt ({(DateTime.Now - lastSignInClickTime).TotalSeconds:F0}s / 35s)...");
                 }
 
-                // After 60s with no progress, go back to MainMenu to reset state
-                if (timeSinceLoad > 60.0)
+                // After 35s with no progress (just past the server-side ~30s auth window), go back
+                // to MainMenu to reset state rather than waiting out the old 60s cap.
+                if (timeSinceLoad > 35.0)
                 {
-                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Still on sign-in screen after 60s — returning to MainMenu.");
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Still on sign-in screen after 35s (single attempt exhausted) — returning to MainMenu.");
                     liftoffProLoginAttempted = false;
                     liftoffProLoginClickTime = DateTime.MinValue;
+                    signInClickAttempted = false;
                     NavigateToMainMenu();
                 }
                 return;
             }
+            signInWasVisible = false;
 
             // 3. Check if GameRoom is active
             GameObject gameRoomObj = GameObject.Find("GameRoom");
@@ -1305,6 +1325,59 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // Top-level environment keys are always written at exactly 2-space indent by
+        // WriteTrackModeAvailabilityDump (mode keys nest one level deeper, at 4 spaces), so a
+        // plain indent-width scan is enough to recover them without a JSON parser dependency.
+        private static HashSet<string> ReadCachedTrackModeDumpEnvNames(string path)
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (string rawLine in File.ReadAllLines(path))
+                {
+                    if (rawLine.Length < 3 || rawLine[0] != ' ' || rawLine[1] != ' ' || rawLine[2] == ' ') continue;
+                    string line = rawLine.TrimStart();
+                    if (!line.StartsWith("\"")) continue;
+                    int endQuote = line.IndexOf('"', 1);
+                    if (endQuote <= 1) continue;
+                    names.Add(line.Substring(1, endQuote - 1));
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to read cached track_mode_availability.json: {ex.Message}");
+            }
+            return names;
+        }
+
+        // Skips the (multi-minute) dropdown-driven dump when a previous session's dump already
+        // covers the same set of environments — the common case during dev iteration, where a
+        // plugin rebuild forces a full bot restart but nothing about the Workshop
+        // subscriptions/installed environments actually changed. Fails closed (returns false, so
+        // the full dump runs) on anything unexpected, since a stale/incomplete cached file is a
+        // worse outcome than paying the one-time dump cost.
+        private static bool TryReuseCachedTrackModeDump(ContentSettingsPanel contentSettings)
+        {
+            string dumpFilePath = Path.Combine(pluginPath, "track_mode_availability.json");
+            if (!File.Exists(dumpFilePath)) return false;
+
+            LiftoffDropdown dropdownEnvironment = GetContentDropdownEnvironment(contentSettings);
+            if (dropdownEnvironment == null || dropdownEnvironment.options.Count == 0) return false;
+
+            var liveEnvNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var opt in dropdownEnvironment.options) liveEnvNames.Add(opt.text);
+
+            var cachedEnvNames = ReadCachedTrackModeDumpEnvNames(dumpFilePath);
+            if (cachedEnvNames.Count == 0 || !liveEnvNames.SetEquals(cachedEnvNames))
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Cached track/mode dump is stale or unreadable (live {liveEnvNames.Count} envs vs cached {cachedEnvNames.Count}) — re-dumping.");
+                return false;
+            }
+
+            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Reusing cached track/mode availability dump from a previous session ({cachedEnvNames.Count} environments match) — skipping re-dump.");
+            return true;
+        }
+
         private static bool TrySelectCustomContentTab(PopupQuickPlayMultiplayerSetup popup)
         {
             if (popup == null) return false;
@@ -1338,11 +1411,18 @@ namespace LiftoffAutoLobby
             {
                 if (!isDumpingTrackModes && !trackModeDumpDoneThisSession)
                 {
-                    isDumpingTrackModes = true;
-                    dumpEnvIndex2 = 0;
-                    dumpModeIndex2 = 0;
-                    dumpedTrackModeMap.Clear();
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Starting Environment x GameMode track availability dump ({TrackModeDumpCandidateModes.Length} candidate modes)...");
+                    if (TryReuseCachedTrackModeDump(contentSettings))
+                    {
+                        trackModeDumpDoneThisSession = true;
+                    }
+                    else
+                    {
+                        isDumpingTrackModes = true;
+                        dumpEnvIndex2 = 0;
+                        dumpModeIndex2 = 0;
+                        dumpedTrackModeMap.Clear();
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Starting Environment x GameMode track availability dump ({TrackModeDumpCandidateModes.Length} candidate modes)...");
+                    }
                 }
 
                 if (isDumpingTrackModes)
@@ -3298,9 +3378,8 @@ namespace LiftoffAutoLobby
 
             // Confirmed via live UI dump: GameObject name is "InputFieldName", placeholder text
             // is "Enter game name" (not "fieldRoomName" guessed from the decompiled class).
-            string[] roomNameFieldNames = { "InputFieldName", "fieldRoomName", "inputFieldRoomName", "RoomName" };
             string[] joinButtonNames = { "buttonJoin", "btnJoin", "Join" };
-            InputField roomNameField = FindInputFieldByName(roomNameFieldNames, "game name");
+            InputField roomNameField = FindInputFieldByName(JoinByNameRoomFieldNames, "game name");
             // Scope the Join-button search to the input field's own panel — a global search would
             // ambiguously match one of the many per-row "buttonJoin" buttons in the room list.
             Button joinBtn = roomNameField != null
@@ -3438,355 +3517,6 @@ namespace LiftoffAutoLobby
                 var methodName = onClick.GetPersistentMethodName(i);
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin]     Persistent {i}: Target={target?.GetType().FullName}, Method={methodName}");
             }
-        }
-
-        private static void FindDepotsRecursively(object obj, HashSet<object> visited, List<object> foundDepots, Type shareableType)
-        {
-            if (obj == null) return;
-            if (visited.Contains(obj)) return;
-            visited.Add(obj);
-
-            Type t = obj.GetType();
-            
-            var fields = t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (fields == null) return;
-
-            bool isDepot = false;
-            foreach (var f in fields)
-            {
-                if (f != null && f.FieldType != null && f.FieldType.IsGenericType && f.FieldType.GetGenericTypeDefinition() == typeof(List<>))
-                {
-                    var genericArgs = f.FieldType.GetGenericArguments();
-                    if (genericArgs != null && genericArgs.Length > 0 && genericArgs[0] != null)
-                    {
-                        if (shareableType.IsAssignableFrom(genericArgs[0]) || genericArgs[0] == shareableType)
-                        {
-                            isDepot = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (isDepot)
-            {
-                if (!foundDepots.Contains(obj))
-                {
-                    foundDepots.Add(obj);
-                }
-                return;
-            }
-
-            foreach (var f in fields)
-            {
-                if (f != null && f.FieldType != null && f.FieldType.IsClass && f.FieldType != typeof(string) && !f.FieldType.IsPointer && !f.FieldType.IsPrimitive && !f.FieldType.IsValueType)
-                {
-                    try
-                    {
-                        object val = f.GetValue(obj);
-                        if (val != null)
-                        {
-                            FindDepotsRecursively(val, visited, foundDepots, shareableType);
-                        }
-                    }
-                    catch {}
-                }
-            }
-        }
-
-        private static void DumpGameDatabase()
-        {
-            try
-            {
-                UnityEngine.Debug.Log("[AutoLobbyPlugin] Starting game database dump...");
-                Assembly asm = Assembly.Load("Assembly-CSharp");
-                
-                Type shareableType = asm.GetType("ShareableContent") ?? asm.GetTypes().FirstOrDefault(t => t.Name == "ShareableContent");
-                Type environmentType = asm.GetType("Environment") ?? asm.GetTypes().FirstOrDefault(t => t.Name == "Environment");
-                Type trackType = asm.GetType("TrackQuickInfo") ?? asm.GetTypes().FirstOrDefault(t => t.Name == "TrackQuickInfo");
-                Type raceType = asm.GetType("RaceQuickInfo") ?? asm.GetTypes().FirstOrDefault(t => t.Name == "RaceQuickInfo");
-
-                if (shareableType == null || environmentType == null || trackType == null || raceType == null)
-                {
-                    UnityEngine.Debug.LogError("[AutoLobbyPlugin] DumpGameDatabase: Failed to resolve database types.");
-                    return;
-                }
-
-                // 1. Find all environments (Environment inherits from UnityEngine.Object)
-                UnityEngine.Object[] envObjects = Resources.FindObjectsOfTypeAll(environmentType);
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Found {envObjects.Length} Environment objects in Resources.");
-
-                // 2. Find all tracks and races by recursively scanning static fields in assembly
-                var tracks = new List<object>();
-                var races = new List<object>();
-                var foundDepots = new List<object>();
-                var visited = new HashSet<object>();
-
-                UnityEngine.Debug.Log("[AutoLobbyPlugin] Scanning assembly for static depots...");
-                foreach (Type t in asm.GetTypes())
-                {
-                    if (t == null || !t.IsClass) continue;
-                    
-                    var sf = t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                    if (sf == null) continue;
-
-                    foreach (var f in sf)
-                    {
-                        if (f != null && f.FieldType.IsClass && f.FieldType != typeof(string))
-                        {
-                            try
-                            {
-                                object val = f.GetValue(null);
-                                if (val != null)
-                                {
-                                    FindDepotsRecursively(val, visited, foundDepots, shareableType);
-                                }
-                            }
-                            catch {}
-                        }
-                    }
-                }
-
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Found {foundDepots.Count} depot instances in memory.");
-
-                foreach (var depotInstance in foundDepots)
-                {
-                    var fields = depotInstance.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (fields == null) continue;
-
-                    foreach (var f in fields)
-                    {
-                        if (f != null && f.FieldType != null && f.FieldType.IsGenericType && f.FieldType.GetGenericTypeDefinition() == typeof(List<>))
-                        {
-                            var genericArgs = f.FieldType.GetGenericArguments();
-                            if (genericArgs != null && genericArgs.Length > 0 && genericArgs[0] != null)
-                            {
-                                if (shareableType.IsAssignableFrom(genericArgs[0]) || genericArgs[0] == shareableType)
-                                {
-                                    var listVal = f.GetValue(depotInstance);
-                                    if (listVal != null)
-                                    {
-                                        var countProp = listVal.GetType().GetProperty("Count");
-                                        if (countProp != null)
-                                        {
-                                            int count = (int)countProp.GetValue(listVal);
-                                            var getItemMethod = listVal.GetType().GetMethod("get_Item");
-                                            if (getItemMethod != null)
-                                            {
-                                                for (int i = 0; i < count; i++)
-                                                {
-                                                    object item = getItemMethod.Invoke(listVal, new object[] { i });
-                                                    if (item != null)
-                                                    {
-                                                        if (trackType.IsAssignableFrom(item.GetType()))
-                                                        {
-                                                            if (!tracks.Contains(item)) tracks.Add(item);
-                                                        }
-                                                        else if (raceType.IsAssignableFrom(item.GetType()))
-                                                        {
-                                                            if (!races.Contains(item)) races.Add(item);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Final counts: Environments: {envObjects.Length}, Tracks: {tracks.Count}, Races: {races.Count}");
-
-                // 3. Build JSON representation
-                var envList = new List<Dictionary<string, object>>();
-                
-                // Track name mapper to map track ID to track name
-                var trackIdToName = new Dictionary<string, string>();
-                var trackIdToEnv = new Dictionary<string, string>();
-
-                foreach (var track in tracks)
-                {
-                    string tName = "";
-                    var nameProp = track.GetType().GetProperty("Name");
-                    if (nameProp != null) tName = (string)nameProp.GetValue(track) ?? "";
-
-                    string envName = "";
-                    var envField = track.GetType().GetField("environment", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (envField != null) envName = (string)envField.GetValue(track) ?? "";
-
-                    string localIdStr = "";
-                    var localIdProp = track.GetType().GetProperty("LocalID");
-                    if (localIdProp != null)
-                    {
-                        object localIdVal = localIdProp.GetValue(track);
-                        if (localIdVal != null) localIdStr = localIdVal.ToString() ?? "";
-                    }
-
-                    if (!string.IsNullOrEmpty(localIdStr))
-                    {
-                        trackIdToName[localIdStr] = tName;
-                        trackIdToEnv[localIdStr] = envName;
-                    }
-                }
-
-                // Group by Environment
-                var envGroups = new Dictionary<string, List<Dictionary<string, object>>>();
-
-                foreach (var track in tracks)
-                {
-                    string tName = "";
-                    var nameProp = track.GetType().GetProperty("Name");
-                    if (nameProp != null) tName = (string)nameProp.GetValue(track) ?? "";
-
-                    string envName = "";
-                    var envField = track.GetType().GetField("environment", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (envField != null) envName = (string)envField.GetValue(track) ?? "";
-                    if (string.IsNullOrEmpty(envName)) envName = "Unknown";
-
-                    string localIdStr = "";
-                    var localIdProp = track.GetType().GetProperty("LocalID");
-                    if (localIdProp != null)
-                    {
-                        object localIdVal = localIdProp.GetValue(track);
-                        if (localIdVal != null) localIdStr = localIdVal.ToString() ?? "";
-                    }
-
-                    if (!envGroups.ContainsKey(envName))
-                    {
-                        envGroups[envName] = new List<Dictionary<string, object>>();
-                    }
-
-                    // Find races for this track
-                    var trackRaces = new List<string>();
-                    foreach (var race in races)
-                    {
-                        string rName = "";
-                        var rNameProp = race.GetType().GetProperty("Name");
-                        if (rNameProp != null) rName = (string)rNameProp.GetValue(race) ?? "";
-
-                        string trackDepStr = "";
-                        var trackDepProp = race.GetType().GetProperty("TrackDependency");
-                        if (trackDepProp != null)
-                        {
-                            object trackDepVal = trackDepProp.GetValue(race);
-                            if (trackDepVal != null) trackDepStr = trackDepVal.ToString() ?? "";
-                        }
-
-                        if (trackDepStr == localIdStr && !string.IsNullOrEmpty(rName))
-                        {
-                            trackRaces.Add(rName);
-                        }
-                    }
-
-                    var trackDict = new Dictionary<string, object>
-                    {
-                        { "track_name", tName },
-                        { "local_id", localIdStr },
-                        { "races", trackRaces }
-                    };
-
-                    envGroups[envName].Add(trackDict);
-                }
-
-                foreach (var kvp in envGroups)
-                {
-                    string envDisplayName = kvp.Key;
-                    
-                    // Try to find the matching Environment object to get the display name
-                    if (envObjects != null)
-                    {
-                        foreach (var envObj in envObjects)
-                        {
-                            if (envObj != null)
-                            {
-                                var nameVal = envObj.name ?? "";
-                                var dispProp = envObj.GetType().GetProperty("DisplayName");
-                                string dispVal = dispProp != null ? (string)dispProp.GetValue(envObj) ?? "" : "";
-                                
-                                if (nameVal == kvp.Key || dispVal == kvp.Key)
-                                {
-                                    envDisplayName = dispVal;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    var envDict = new Dictionary<string, object>
-                    {
-                        { "environment_name", kvp.Key },
-                        { "display_name", envDisplayName },
-                        { "tracks", kvp.Value }
-                    };
-                    envList.Add(envDict);
-                }
-
-                // Serialize manually to avoid dependency on Newtonsoft.Json
-                StringBuilder sb = new StringBuilder();
-                sb.AppendLine("[");
-                for (int i = 0; i < envList.Count; i++)
-                {
-                    var env = envList[i];
-                    sb.AppendLine("  {");
-                    sb.AppendLine($"    \"environment_name\": \"{EscapeJson(env["environment_name"].ToString())}\",");
-                    sb.AppendLine($"    \"display_name\": \"{EscapeJson(env["display_name"].ToString())}\",");
-                    sb.AppendLine("    \"tracks\": [");
-                    
-                    var envTracks = (List<Dictionary<string, object>>)env["tracks"];
-                    for (int j = 0; j < envTracks.Count; j++)
-                    {
-                        var track = envTracks[j];
-                        sb.AppendLine("      {");
-                        sb.AppendLine($"        \"track_name\": \"{EscapeJson(track["track_name"].ToString())}\",");
-                        sb.AppendLine($"        \"local_id\": \"{EscapeJson(track["local_id"].ToString())}\",");
-                        sb.Append("        \"races\": [");
-                        
-                        var trackRaces = (List<string>)track["races"];
-                        for (int k = 0; k < trackRaces.Count; k++)
-                        {
-                            sb.Append($"\"{EscapeJson(trackRaces[k])}\"");
-                            if (k < trackRaces.Count - 1) sb.Append(", ");
-                        }
-                        sb.AppendLine("]");
-                        
-                        sb.Append("      }");
-                        if (j < envTracks.Count - 1) sb.AppendLine(",");
-                        else sb.AppendLine();
-                    }
-                    sb.AppendLine("    ]");
-                    sb.Append("  }");
-                    if (i < envList.Count - 1) sb.AppendLine(",");
-                    else sb.AppendLine();
-                }
-                sb.AppendLine("]");
-
-                if (tracks.Count > 0 && races.Count > 0)
-                {
-                    string dumpPath = Path.Combine(pluginPath, "liftoff_database_dump.json");
-                    File.WriteAllText(dumpPath, sb.ToString());
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Game database successfully dumped to: {dumpPath}");
-                    databaseDumped = true;
-                }
-                else
-                {
-                    if (DateTime.Now.Second % 10 == 0)
-                    {
-                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] DumpGameDatabase: Database not ready yet (Environments: {envObjects.Length}, Tracks: {tracks.Count}, Races: {races.Count}). Retrying...");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] DumpGameDatabase failed: {ex}");
-            }
-        }
-
-        private static string EscapeJson(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
         }
 
         private static void HandleChatCommand(string userName, string userId, string cmdText)
