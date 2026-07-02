@@ -21,6 +21,7 @@ namespace LiftoffAutoLobby
     {
         private static string pluginPath;
         private static DateTime lastTickTime = DateTime.MinValue;
+        private static DateTime lastActivityTime = DateTime.UtcNow;
 
         // Rotation & State Management
         private static DateTime roomCreatedTime = DateTime.MinValue;
@@ -344,6 +345,7 @@ namespace LiftoffAutoLobby
                 {
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Level loaded. Resetting room timer.");
                     roomCreatedTime = DateTime.Now;
+                    lastActivityTime = DateTime.UtcNow;
                     isLeaving = false;
                     firstStartGameClickTime = DateTime.MinValue; // race loaded successfully, disarm runtime watchdog
                 }
@@ -439,6 +441,7 @@ namespace LiftoffAutoLobby
                     {
                         UnityEngine.Debug.Log("[AutoLobbyPlugin] Unfreezing room timer (setting to DateTime.Now).");
                         roomCreatedTime = DateTime.Now;
+                        lastActivityTime = DateTime.UtcNow;
                         chatWarnedAboutNextRace = false;
                     }
                     isSubmittingSettings = false;
@@ -1085,6 +1088,7 @@ namespace LiftoffAutoLobby
             {
                 UnityEngine.Debug.Log("[AutoLobbyPlugin] Entered GameRoom. Starting room timer.");
                 roomCreatedTime = DateTime.Now;
+                lastActivityTime = DateTime.UtcNow;
                 chatWarnedAboutNextRace = false;
                 firstStartGameClickTime = DateTime.MinValue;
             }
@@ -1176,6 +1180,7 @@ namespace LiftoffAutoLobby
                 return;
             }
 
+            HandleKeepAlive();
         }
 
         private static void HandleFlightLevel()
@@ -1675,6 +1680,7 @@ namespace LiftoffAutoLobby
                     if (inRoom)
                     {
                         roomCreatedTime = DateTime.Now;
+                        lastActivityTime = DateTime.UtcNow;
                         chatWarnedAboutNextRace = false;
                     }
                     return;
@@ -1699,6 +1705,7 @@ namespace LiftoffAutoLobby
                         isSubmittingSettings = true;
                         updateBtn.onClick.Invoke();
                         roomCreatedTime = DateTime.Now; // Reset the rotation timer!
+                        lastActivityTime = DateTime.UtcNow;
                         chatWarnedAboutNextRace = false;
                     }
                 }
@@ -1943,6 +1950,7 @@ namespace LiftoffAutoLobby
         private static void SendChatMessage(string message)
         {
             if (string.IsNullOrEmpty(message)) return;
+            lastActivityTime = DateTime.UtcNow;
 
             if (message.Length <= CHAT_MAX_CHARS)
             {
@@ -2356,6 +2364,84 @@ namespace LiftoffAutoLobby
             }
             catch {}
             return 600.0; // Default: 10 mins
+        }
+
+        private static readonly string[] DefaultProTips = new string[]
+        {
+            "High camera tilt (e.g., 30°+) is ideal for fast forward flight but makes landing and hovering harder.",
+            "Increase your camera FOV to improve peripheral vision and awareness of obstacles.",
+            "If your drone feels loose in corners, try slightly increasing your Pitch/Roll D gains.",
+            "Pro tip: To get a faster lap time, simply fly faster.",
+            "Avoid hitting trees. They do not move, and they will win every fight.",
+            "Remember: Gravity is not just a suggestion, it is the law."
+        };
+
+        private static double GetKeepAliveInterval()
+        {
+            try
+            {
+                string path = Path.Combine(pluginPath, "keep_alive_seconds.txt");
+                if (File.Exists(path))
+                {
+                    double val;
+                    if (double.TryParse(File.ReadAllText(path).Trim(), out val))
+                    {
+                        return val;
+                    }
+                }
+            }
+            catch {}
+            return 240.0; // Default: 4 minutes (resets timer right before 5m kick)
+        }
+
+        private static string GetRandomProTip()
+        {
+            try
+            {
+                string path = Path.Combine(pluginPath, "pro_tips.txt");
+                if (File.Exists(path))
+                {
+                    List<string> lines = new List<string>();
+                    foreach (var line in File.ReadAllLines(path))
+                    {
+                        string trimmed = line.Trim();
+                        if (!string.IsNullOrEmpty(trimmed) && !trimmed.StartsWith("#"))
+                        {
+                            lines.Add(trimmed);
+                        }
+                    }
+                    if (lines.Count > 0)
+                    {
+                        int index = rng.Next(0, lines.Count);
+                        return lines[index];
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error loading pro_tips.txt: {ex.Message}");
+            }
+
+            int fallbackIndex = rng.Next(0, DefaultProTips.Length);
+            return DefaultProTips[fallbackIndex];
+        }
+
+        private static void HandleKeepAlive()
+        {
+            try
+            {
+                double interval = GetKeepAliveInterval();
+                if ((DateTime.UtcNow - lastActivityTime).TotalSeconds >= interval)
+                {
+                    string tip = GetRandomProTip();
+                    SendChatMessage($"<b><color=#00FF88>[PRO TIP]</color></b> {tip}");
+                    lastActivityTime = DateTime.UtcNow;
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error in HandleKeepAlive: {ex}");
+            }
         }
 
         private static bool GetAutoStart()
@@ -3414,6 +3500,8 @@ namespace LiftoffAutoLobby
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Ignoring command '{cmd}' from non-admin {userName} ({userId})");
                     return;
                 }
+
+                lastActivityTime = DateTime.UtcNow;
 
                 switch (cmd)
                 {
