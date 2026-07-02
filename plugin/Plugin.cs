@@ -2528,34 +2528,18 @@ namespace LiftoffAutoLobby
                     return "";
                 }
 
-                // Sync shuffleMode from disk
+                // Sync shuffleMode from disk (kept for logging parity; selection itself is
+                // mode-agnostic now that shuffling rewrites tracks_to_rotate.txt in place)
                 shuffleMode = GetShuffleMode();
 
                 int index = 0;
-                List<int> shuffledIndices = null;
-                int shuffleIndex = 0;
-                if (shuffleMode)
+                if (File.Exists(statePath))
                 {
-                    string shuffleStatePath = Path.Combine(pluginPath, "shuffle_state.txt");
-                    if (!ParseShuffleState(shuffleStatePath, validTracks.Count, out shuffleIndex, out shuffledIndices))
-                    {
-                        shuffledIndices = null;
-                    }
-                    else if (shuffleIndex < 0 || shuffleIndex >= shuffledIndices.Count)
-                    {
-                        shuffleIndex = 0;
-                    }
+                    int.TryParse(File.ReadAllText(statePath).Trim(), out index);
                 }
-                else
+                if (index < 0 || index >= validTracks.Count)
                 {
-                    if (File.Exists(statePath))
-                    {
-                        int.TryParse(File.ReadAllText(statePath).Trim(), out index);
-                    }
-                    if (index < 0 || index >= validTracks.Count)
-                    {
-                        index = 0;
-                    }
+                    index = 0;
                 }
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Current state index: {index}, validTracks count: {validTracks.Count}");
 
@@ -2567,9 +2551,7 @@ namespace LiftoffAutoLobby
                 // next" chat announcement never names a track that will be skipped instantly.
                 for (int attempt = 0; attempt < validTracks.Count; attempt++)
                 {
-                    int candidateIndex = (shuffleMode && shuffledIndices != null)
-                        ? shuffledIndices[(shuffleIndex + attempt) % shuffledIndices.Count]
-                        : (index + attempt) % validTracks.Count;
+                    int candidateIndex = (index + attempt) % validTracks.Count;
 
                     string selectedLine = validTracks[candidateIndex];
                     string[] parts = selectedLine.Split(',');
@@ -2678,48 +2660,23 @@ namespace LiftoffAutoLobby
                 shuffleMode = GetShuffleMode();
 
                 int index = 0;
-                if (shuffleMode)
-                {
-                    string shuffleStatePath = Path.Combine(pluginPath, "shuffle_state.txt");
-                    int shuffleIndex;
-                    List<int> shuffledIndices;
-                    
-                    if (!ParseShuffleState(shuffleStatePath, validTracks.Count, out shuffleIndex, out shuffledIndices))
-                    {
-                        shuffledIndices = GenerateShuffledIndices(validTracks.Count);
-                        shuffleIndex = 0;
-                    }
-                    
-                    if (shuffleIndex < 0 || shuffleIndex >= shuffledIndices.Count)
-                    {
-                        shuffleIndex = 0;
-                    }
-                    
-                    index = shuffledIndices[shuffleIndex];
-                    
-                    int nextShuffleIndex = shuffleIndex + 1;
-                    if (nextShuffleIndex >= shuffledIndices.Count)
-                    {
-                        // Generate a new shuffle for the next cycle
-                        var nextShuffled = GenerateShuffledIndices(validTracks.Count);
-                        SaveShuffleState(shuffleStatePath, 0, nextShuffled);
-                    }
-                    else
-                    {
-                        SaveShuffleState(shuffleStatePath, nextShuffleIndex, shuffledIndices);
-                    }
-                }
-                else
-                {
-                    if (File.Exists(statePath))
-                        int.TryParse(File.ReadAllText(statePath).Trim(), out index);
+                if (File.Exists(statePath))
+                    int.TryParse(File.ReadAllText(statePath).Trim(), out index);
 
-                    if (index < 0 || index >= validTracks.Count)
-                        index = 0;
+                if (index < 0 || index >= validTracks.Count)
+                    index = 0;
 
-                    int nextIndex = (index + 1) % validTracks.Count;
-                    File.WriteAllText(statePath, nextIndex.ToString());
+                int nextIndex = (index + 1) % validTracks.Count;
+
+                // tracks_to_rotate.txt's line order IS the rotation order in both modes.
+                // In shuffle mode, once a full pass completes, deal a fresh random order
+                // for the next cycle before advancing the cursor back to 0.
+                if (shuffleMode && nextIndex == 0)
+                {
+                    ShuffleTracksFile(tracksPath);
                 }
+
+                File.WriteAllText(statePath, nextIndex.ToString());
 
                 string selectedLine = validTracks[index];
 
@@ -3089,86 +3046,94 @@ namespace LiftoffAutoLobby
             }
         }
 
-        private static bool ParseShuffleState(string shuffleStatePath, int validTracksCount, out int shuffleIndex, out List<int> shuffledIndices)
-        {
-            shuffleIndex = 0;
-            shuffledIndices = new List<int>();
-            try
-            {
-                if (File.Exists(shuffleStatePath))
-                {
-                    string content = File.ReadAllText(shuffleStatePath).Trim();
-                    string[] parts = content.Split('|');
-                    if (parts.Length == 2)
-                    {
-                        if (int.TryParse(parts[0], out shuffleIndex))
-                        {
-                            string[] indexStrings = parts[1].Split(',');
-                            foreach (var s in indexStrings)
-                            {
-                                int idx;
-                                if (int.TryParse(s.Trim(), out idx))
-                                {
-                                    shuffledIndices.Add(idx);
-                                }
-                            }
-                            
-                            if (shuffledIndices.Count == validTracksCount)
-                            {
-                                var sortedIndices = new List<int>(shuffledIndices);
-                                sortedIndices.Sort();
-                                for (int i = 0; i < validTracksCount; i++)
-                                {
-                                    if (sortedIndices[i] != i)
-                                    {
-                                        return false;
-                                    }
-                                }
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            catch {}
-            return false;
-        }
-
-        private static List<int> GenerateShuffledIndices(int count)
-        {
-            List<int> list = new List<int>();
-            for (int i = 0; i < count; i++)
-            {
-                list.Add(i);
-            }
-            for (int i = list.Count - 1; i > 0; i--)
-            {
-                int j = rng.Next(0, i + 1);
-                int temp = list[i];
-                list[i] = list[j];
-                list[j] = temp;
-            }
-            return list;
-        }
-
-        private static void SaveShuffleState(string shuffleStatePath, int shuffleIndex, List<int> shuffledIndices)
+        // Re-shuffles tracks_to_rotate.txt's own line order in place (a real Fisher-Yates
+        // deal, not a derived index list) and preserves any leading '#' header/comment
+        // lines as-is at the top. This is the only place a fresh shuffle gets dealt from
+        // the C# side; the file's order is the single source of truth for both rotation
+        // modes, so there is no separate shuffled/unshuffled state to keep in sync.
+        private static void ShuffleTracksFile(string tracksPath)
         {
             try
             {
-                System.Text.StringBuilder sb = new System.Text.StringBuilder();
-                sb.Append(shuffleIndex);
-                sb.Append("|");
-                for (int i = 0; i < shuffledIndices.Count; i++)
+                string[] lines = File.ReadAllLines(tracksPath);
+                var header = new List<string>();
+                var trackLines = new List<string>();
+                foreach (var line in lines)
                 {
-                    if (i > 0) sb.Append(",");
-                    sb.Append(shuffledIndices[i]);
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    if (line.Trim().StartsWith("#")) header.Add(line);
+                    else trackLines.Add(line);
                 }
-                File.WriteAllText(shuffleStatePath, sb.ToString());
+
+                trackLines = RoundRobinShuffleByEnvironment(trackLines);
+
+                var sb = new System.Text.StringBuilder();
+                foreach (var h in header) sb.AppendLine(h);
+                foreach (var t in trackLines) sb.AppendLine(t);
+                File.WriteAllText(tracksPath, sb.ToString());
             }
             catch (Exception ex)
             {
-                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error saving shuffle state: {ex.Message}");
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error shuffling tracks file: {ex.Message}");
             }
+        }
+
+        // Shuffles each environment's lines among themselves, shuffles the order environments
+        // are visited in, then interleaves round-robin across environments. A flat shuffle can
+        // (and does, by chance) land two tracks from the same environment back-to-back — the
+        // environment is the dominant visual cue players notice, so that reads as "stale" even
+        // though no individual track repeated. Round-robin guarantees same-environment picks
+        // are spread apart (until an environment runs out of tracks) while staying random.
+        private static List<string> RoundRobinShuffleByEnvironment(List<string> trackLines)
+        {
+            var groups = new Dictionary<string, List<string>>();
+            var envOrder = new List<string>();
+            foreach (var line in trackLines)
+            {
+                string[] parts = line.Split(',');
+                string env = parts.Length > 1 ? parts[1].Trim() : "";
+                if (!groups.ContainsKey(env))
+                {
+                    groups[env] = new List<string>();
+                    envOrder.Add(env);
+                }
+                groups[env].Add(line);
+            }
+
+            foreach (var env in envOrder)
+            {
+                var g = groups[env];
+                for (int i = g.Count - 1; i > 0; i--)
+                {
+                    int j = rng.Next(0, i + 1);
+                    string temp = g[i]; g[i] = g[j]; g[j] = temp;
+                }
+            }
+
+            for (int i = envOrder.Count - 1; i > 0; i--)
+            {
+                int j = rng.Next(0, i + 1);
+                string temp = envOrder[i]; envOrder[i] = envOrder[j]; envOrder[j] = temp;
+            }
+
+            var result = new List<string>();
+            int round = 0;
+            bool addedAny = true;
+            while (result.Count < trackLines.Count && addedAny)
+            {
+                addedAny = false;
+                foreach (var env in envOrder)
+                {
+                    var g = groups[env];
+                    if (round < g.Count)
+                    {
+                        result.Add(g[round]);
+                        addedAny = true;
+                    }
+                }
+                round++;
+            }
+            return result;
         }
 
 
@@ -4127,6 +4092,10 @@ namespace LiftoffAutoLobby
                             {
                                 UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write shuffle_mode.txt: {ex.Message}");
                             }
+                            // Deal a fresh order right now rather than waiting for the current
+                            // pass to finish, so "on" visibly takes effect immediately.
+                            ShuffleTracksFile(Path.Combine(pluginPath, "tracks_to_rotate.txt"));
+                            File.WriteAllText(Path.Combine(pluginPath, "rotation_state.txt"), "0");
                             SendChatMessage("[ADMIN] Shuffle on.");
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} enabled shuffle");
                         }

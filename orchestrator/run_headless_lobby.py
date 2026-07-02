@@ -65,6 +65,43 @@ def cross_validate_tracks(resolved_tracks, availability_data, env_normalization)
     return kept, dropped_missing, dropped_mode
 
 
+def round_robin_shuffle_by_environment(resolved_tracks):
+    """Shuffles each environment's tracks among themselves, shuffles the order environments
+    are visited in, then interleaves round-robin across environments. A plain flat shuffle
+    can (and does, by chance) land two tracks from the same environment back-to-back — the
+    environment is the dominant visual cue players notice, so that reads as "stale"/repetitive
+    even though no individual track repeated. Round-robin guarantees same-environment picks
+    are spread apart (until an environment runs out of tracks) while staying genuinely random.
+    """
+    import random
+
+    groups = {}
+    env_order = []
+    for track in resolved_tracks:
+        env = track[1]
+        if env not in groups:
+            groups[env] = []
+            env_order.append(env)
+        groups[env].append(track)
+
+    for env in env_order:
+        random.shuffle(groups[env])
+    random.shuffle(env_order)
+
+    result = []
+    round_idx = 0
+    while len(result) < len(resolved_tracks):
+        added_any = False
+        for env in env_order:
+            if round_idx < len(groups[env]):
+                result.append(groups[env][round_idx])
+                added_any = True
+        if not added_any:
+            break
+        round_idx += 1
+    return result
+
+
 def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_fallback=False):
     import random
 
@@ -199,9 +236,17 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
             print(f"[Playlist] CRITICAL: '{playlist_name}' resolved to 0 tracks (fallback exhausted or unavailable). "
                   f"Writing empty rotation file — bot may get stuck.")
 
-    # Always write in playlist definition order so that C# plugin can control shuffle mode dynamically.
-    print("[Playlist] Using track rotation in playlist definition order...")
-        
+    # tracks_to_rotate.txt's line order IS the rotation order — there's no separate
+    # "shuffled" vs "unshuffled" state. When shuffle is requested we randomize the
+    # order once here; the plugin re-shuffles this same file in place (and resets
+    # rotation_state.txt to 0) whenever it completes a full pass or shuffle is
+    # toggled on mid-session, so every fresh deal is a genuine new permutation.
+    if shuffle_enabled:
+        resolved_tracks = round_robin_shuffle_by_environment(resolved_tracks)
+        print("[Playlist] Shuffling track rotation order (round-robin by environment)...")
+    else:
+        print("[Playlist] Using track rotation in playlist definition order...")
+
     # Write to tracks_to_rotate.txt
     with open(output_file, "w") as f:
         f.write("# Generated from playlist: " + playlist_name + "\n")
@@ -209,7 +254,7 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
             f.write(f"{track_name},{ui_env},{game_mode}\n")
     print(f"[Playlist] Wrote tracks to rotate to: {output_file}")
 
-    # Reset rotation state to 0
+    # Reset rotation state to 0 — the single cursor used for both modes.
     state_file = os.path.join(os.path.dirname(output_file), "rotation_state.txt")
     try:
         with open(state_file, "w") as f:
