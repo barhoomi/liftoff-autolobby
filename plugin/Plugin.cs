@@ -57,6 +57,12 @@ namespace LiftoffAutoLobby
         private static string liftoffProUsername = "";
         private static string liftoffProPassword = "";
         private static DateTime lastCredentialSubmitTime = DateTime.MinValue;
+        // Scripted "client" mode for the black-box scenario harness (automated-testing.md
+        // Phase 3): client_script.txt, when present, is a sequence of chat lines to send
+        // automatically once in-room, so a test instance can trigger server-bot behavior
+        // without GUI/keyboard automation. Absent file = zero effect on normal operation.
+        private static List<Tuple<double, string>> clientScriptSteps = new List<Tuple<double, string>>();
+        private static int clientScriptNextIndex = 0;
         // Set by OnUnityLogMessageReceived the instant the stuck-auth error fires; consumed
         // (and reset) at the top of the next HandleMultiplayerMenu() tick.
         private static bool authPendingErrorDetected = false;
@@ -133,6 +139,7 @@ namespace LiftoffAutoLobby
                 LoadUseLiftoffPro();
                 LoadBotNickname();
                 LoadLiftoffProCredentials();
+                LoadClientScript();
 
                 // Load initial shuffle mode
                 shuffleMode = GetShuffleMode();
@@ -226,6 +233,47 @@ namespace LiftoffAutoLobby
             if (!string.IsNullOrEmpty(liftoffProUsername) && !string.IsNullOrEmpty(liftoffProPassword))
             {
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Loaded distinct Liftoff Pro credentials for user '{liftoffProUsername}'.");
+            }
+        }
+
+        // client_script.txt format: one step per line, "<delaySeconds> <message>" — delay is
+        // seconds since entering the room (not since the previous step). Blank lines and lines
+        // starting with '#' are skipped. Read once at Awake(), same as every other config file.
+        private static void LoadClientScript()
+        {
+            clientScriptSteps.Clear();
+            clientScriptNextIndex = 0;
+            string path = Path.Combine(pluginPath, "client_script.txt");
+            if (!File.Exists(path)) return;
+            foreach (var line in File.ReadAllLines(path))
+            {
+                string trimmed = line.Trim();
+                if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith("#")) continue;
+                int spaceIdx = trimmed.IndexOf(' ');
+                if (spaceIdx < 0) continue;
+                double delay;
+                if (double.TryParse(trimmed.Substring(0, spaceIdx), out delay))
+                {
+                    clientScriptSteps.Add(Tuple.Create(delay, trimmed.Substring(spaceIdx + 1)));
+                }
+            }
+            if (clientScriptSteps.Count > 0)
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Loaded client script with {clientScriptSteps.Count} step(s).");
+            }
+        }
+
+        // Sends the next due scripted line, if any, once elapsed room time reaches its
+        // scheduled delay. Called every HandleGameRoom tick; no-op when no script is loaded.
+        private static void ProcessClientScript(double elapsedSinceRoomEntered)
+        {
+            if (clientScriptNextIndex >= clientScriptSteps.Count) return;
+            var step = clientScriptSteps[clientScriptNextIndex];
+            if (elapsedSinceRoomEntered >= step.Item1)
+            {
+                SendChatMessage(step.Item2);
+                LogEvent("client_script_step", ("index", clientScriptNextIndex.ToString()), ("message", step.Item2));
+                clientScriptNextIndex++;
             }
         }
 
@@ -446,6 +494,7 @@ namespace LiftoffAutoLobby
                 sceneObjectsDumped = false;
                 lastMenuStateDumpTime = DateTime.MinValue;
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Scene changed to: {sceneName}");
+                LogEvent("scene_change", ("scene", sceneName));
 
                 // Reset room timer when loading into a flight level scene
                 if (sceneName != "MainMenu" && sceneName != "MultiplayerMenu" &&
@@ -1395,6 +1444,7 @@ namespace LiftoffAutoLobby
             if (roomCreatedTime == DateTime.MinValue || roomCreatedTime == DateTime.MaxValue)
             {
                 UnityEngine.Debug.Log("[AutoLobbyPlugin] Entered GameRoom. Starting room timer.");
+                LogEvent("room_entered");
                 roomCreatedTime = DateTime.Now;
                 lastActivityTime = DateTime.UtcNow;
                 chatWarnedAboutNextRace = false;
@@ -1418,6 +1468,7 @@ namespace LiftoffAutoLobby
             }
 
             double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
+            ProcessClientScript(elapsed);
 
             // Auto-start: click the START button 15 seconds after entering the room to give players time to join
             if (GetAutoStart() && elapsed >= 15.0 && (DateTime.Now - lastStartGameClickedTime).TotalSeconds > 30.0)
@@ -1573,6 +1624,33 @@ namespace LiftoffAutoLobby
         }
 
         private static string JsonEscape(string s) => s.Replace("\"", "\\\"");
+
+        // Structured logging slice for the black-box scenario harness
+        // (docs/features/doing/automated-testing.md Phase 2/3): a small set of JSON-line
+        // events, additive alongside the existing free-text Debug.Log calls rather than
+        // replacing them, so scenario assertions can grep/parse instead of pattern-matching
+        // free text. Escapes more than JsonEscape above since these fields carry
+        // user-supplied chat text, not just internal track names.
+        private static string JsonEscapeStrict(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "").Replace("\t", "\\t");
+
+        private static void LogEvent(string eventType, params (string key, string value)[] fields)
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                sb.Append("{\"event\":\"").Append(JsonEscapeStrict(eventType)).Append("\"");
+                foreach (var f in fields)
+                {
+                    sb.Append(",\"").Append(f.key).Append("\":\"").Append(JsonEscapeStrict(f.value ?? "")).Append("\"");
+                }
+                sb.Append("}");
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin:EVENT] {sb}");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] LogEvent failed: {ex.Message}");
+            }
+        }
 
         // Union of tracks per environment across all dumped modes — keeps the existing flat
         // schema so gather_tracks.py's ui_tracks_dump.json consumer contract is unchanged.
@@ -2361,6 +2439,7 @@ namespace LiftoffAutoLobby
         private static void SendChatMessageRaw(string message)
         {
             UnityEngine.Debug.Log($"[AutoLobbyPlugin] SendChatMessage called: '{message}'");
+            LogEvent("chat_response", ("message", message));
             try
             {
                 Type chatType = FindType("Liftoff.Multiplayer.Chat.ChatWindowPanel");
@@ -3931,6 +4010,7 @@ namespace LiftoffAutoLobby
                 string[] parts = cmdText.Split(new char[]{' '}, 2, StringSplitOptions.RemoveEmptyEntries);
                 string cmd = parts[0].ToLower();
                 string arg = parts.Length > 1 ? parts[1].Trim() : "";
+                LogEvent("chat_command", ("cmd", cmd), ("arg", arg), ("user_name", userName), ("user_id", userId));
 
                 if (cmd == "/info")
                 {

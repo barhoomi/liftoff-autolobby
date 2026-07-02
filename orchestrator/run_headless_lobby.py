@@ -311,6 +311,7 @@ def main():
     parser.add_argument("--auto-start", action="store_true", help="Automatically start the race after players join, instead of staying in the lobby.")
     parser.add_argument("--width", type=int, default=640, help="Game window width (default: 640).")
     parser.add_argument("--height", type=int, default=480, help="Game window height (default: 480).")
+    parser.add_argument("--log-file", type=str, default=None, help="Redirect Unity's Player.log to this path via -logFile, instead of the shared default location. Used to isolate concurrent instances' logs (see docs/features/doing/automated-testing.md).")
     args = parser.parse_args()
 
     config = load_config()
@@ -511,13 +512,16 @@ def main():
                         sys.exit(0)
                     
                     print("[Host] Liftoff is not running. Starting game server...")
-                    proc = subprocess.Popen([
+                    launch_args = [
                         launch_sh_path,
                         os.path.join(game_dir, "Liftoff.x86_64"),
                         "-screen-width", str(args.width),
                         "-screen-height", str(args.height),
                         "-screen-fullscreen", "0"
-                    ], env=env, cwd=game_dir)
+                    ]
+                    if args.log_file:
+                        launch_args += ["-logFile", args.log_file]
+                    proc = subprocess.Popen(launch_args, env=env, cwd=game_dir)
                     print(f"[Host] Started Liftoff server process (PID: {proc.pid}).")
             
             time.sleep(1)
