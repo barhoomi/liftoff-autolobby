@@ -47,6 +47,16 @@ namespace LiftoffAutoLobby
         private static string botNickname = "";
         private static bool nicknameApplied = false;
         private static DateTime lastSkipClickTime = DateTime.MinValue;
+        // Distinct Liftoff Pro account per instance: anonymous sign-in still authenticates to
+        // Photon via the shared Steam ticket (see multi-lobby-bot-scaling.md), so every
+        // anonymous instance under one Steam login collides as the same Photon player. A
+        // credentialed sign-in with its own account/password doesn't touch the Steam ticket at
+        // all (confirmed via decompile: SignInWithProAccount never calls
+        // PlatformProvider.GetPlatformAuthenticationData()), so distinct accounts should give
+        // each instance a genuinely distinct identity.
+        private static string liftoffProUsername = "";
+        private static string liftoffProPassword = "";
+        private static DateTime lastCredentialSubmitTime = DateTime.MinValue;
         // Set by OnUnityLogMessageReceived the instant the stuck-auth error fires; consumed
         // (and reset) at the top of the next HandleMultiplayerMenu() tick.
         private static bool authPendingErrorDetected = false;
@@ -122,6 +132,7 @@ namespace LiftoffAutoLobby
                 LoadAdminIds();
                 LoadUseLiftoffPro();
                 LoadBotNickname();
+                LoadLiftoffProCredentials();
 
                 // Load initial shuffle mode
                 shuffleMode = GetShuffleMode();
@@ -201,6 +212,20 @@ namespace LiftoffAutoLobby
             if (!string.IsNullOrEmpty(botNickname))
             {
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Loaded bot nickname override: '{botNickname}'");
+            }
+        }
+
+        private static void LoadLiftoffProCredentials()
+        {
+            liftoffProUsername = "";
+            liftoffProPassword = "";
+            string userPath = Path.Combine(pluginPath, "liftoff_pro_username.txt");
+            string passPath = Path.Combine(pluginPath, "liftoff_pro_password.txt");
+            if (File.Exists(userPath)) liftoffProUsername = File.ReadAllText(userPath).Trim();
+            if (File.Exists(passPath)) liftoffProPassword = File.ReadAllText(passPath).Trim();
+            if (!string.IsNullOrEmpty(liftoffProUsername) && !string.IsNullOrEmpty(liftoffProPassword))
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Loaded distinct Liftoff Pro credentials for user '{liftoffProUsername}'.");
             }
         }
 
@@ -808,11 +833,16 @@ namespace LiftoffAutoLobby
                 return;
 
             // Step 1: Sign in with Liftoff Pro if we haven't yet this session
-            if (!liftoffProLoginAttempted && !useLiftoffPro)
+            bool hasDistinctCredentials = !string.IsNullOrEmpty(liftoffProUsername) && !string.IsNullOrEmpty(liftoffProPassword);
+            if (!liftoffProLoginAttempted && (!useLiftoffPro || hasDistinctCredentials))
             {
-                // use_liftoff_pro.txt says false: never click the Pro sign-in button, so this
-                // instance falls through to the anonymous-login screen in MultiplayerMenu instead.
-                UnityEngine.Debug.Log("[AutoLobbyPlugin] useLiftoffPro=false — skipping Liftoff Pro sign-in on MainMenu.");
+                // use_liftoff_pro.txt=false, or distinct liftoff_pro_username/password.txt configured:
+                // never click the MainMenu Pro sign-in button, since that would auto-login using
+                // whatever account is already saved to this shared install's Credentials.xml
+                // (production's own account) rather than the account we actually want this
+                // instance to use. Falls through to MultiplayerMenu's sign-in screen instead,
+                // where the credentialed or anonymous path takes over.
+                UnityEngine.Debug.Log("[AutoLobbyPlugin] Skipping default Liftoff Pro sign-in on MainMenu (useLiftoffPro=false or distinct credentials configured).");
                 liftoffProLoginAttempted = true;
             }
             else if (!liftoffProLoginAttempted)
@@ -974,6 +1004,51 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // Fills the same MultiplayerSignIn form fieldUsername/fieldPassword (real names, confirmed
+        // live 2026-07-02 via LogMultiplayerMenuState's button/input dump) that a human would type
+        // into, then clicks buttonSignInCredentials — same UI path as SignInWithProAccount's
+        // manual-credentials branch (OnSignInWithCredentials → username+password, not the saved
+        // userid+authToken branch, since typing into fieldPassword resets useSavedCredentials via
+        // the game's own OnPasswordChange listener).
+        private static void HandleDistinctLiftoffProCredentials()
+        {
+            double timeSinceLoad = (DateTime.Now - sceneLoadTime).TotalSeconds;
+            if (timeSinceLoad < 15.0)
+            {
+                if (DateTime.Now.Second % 5 == 0)
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Distinct Liftoff Pro credentials configured, waiting for sign-in UI to settle ({timeSinceLoad:F1}s)...");
+                return;
+            }
+
+            InputField userField = FindInputFieldByName(new[] { "fieldUsername" }, "username");
+            InputField passField = FindInputFieldByName(new[] { "fieldPassword" }, "password");
+            if (userField == null || passField == null)
+            {
+                if (DateTime.Now.Second % 5 == 0)
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Waiting for Liftoff Pro username/password fields to appear...");
+                return;
+            }
+
+            if (userField.text != liftoffProUsername) userField.text = liftoffProUsername;
+            if (passField.text != liftoffProPassword) passField.text = liftoffProPassword;
+
+            // Give the field writes above a tick to propagate (onValueChanged listeners, e.g. the
+            // useSavedCredentials reset) before trusting the fields are actually in the state we
+            // just set — same one-tick-behind caution used for the room-name InputField elsewhere.
+            if (userField.text != liftoffProUsername || passField.text != liftoffProPassword) return;
+
+            Button signInBtn = FindButtonByTextOrName("SIGN IN", new[] { "buttonSignInCredentials", "btnSignInCredentials" });
+            if (signInBtn == null || !signInBtn.gameObject.activeInHierarchy || !signInBtn.interactable) return;
+
+            // Same 30s cooldown as the other sign-in paths, for the same "still pending" reason.
+            if ((DateTime.Now - lastCredentialSubmitTime).TotalSeconds > 30.0)
+            {
+                lastCredentialSubmitTime = DateTime.Now;
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Submitting distinct Liftoff Pro credentials for user '{liftoffProUsername}'.");
+                signInBtn.onClick.Invoke();
+            }
+        }
+
         private static void HandleMultiplayerMenu()
         {
             // Known long-standing Liftoff quirk, confirmed live 2026-07-02 (affects both Pro
@@ -999,6 +1074,7 @@ namespace LiftoffAutoLobby
                 liftoffProLoginClickTime = DateTime.MinValue;
                 lastSkipClickTime = DateTime.MinValue;
                 lastSignInClickTime = DateTime.MinValue;
+                lastCredentialSubmitTime = DateTime.MinValue;
                 signInWasVisible = false;
                 signInClickAttempted = false;
                 NavigateToMainMenu();
@@ -1007,6 +1083,17 @@ namespace LiftoffAutoLobby
 
             DumpActiveSceneObjects();
             LogMultiplayerMenuState();
+
+            // Distinct Liftoff Pro credentials (liftoff_pro_username.txt/liftoff_pro_password.txt)
+            // take priority over both the anonymous and default-credentialed paths below — this
+            // is how a test-client instance gets a genuinely distinct Photon identity instead of
+            // colliding with other instances sharing this Steam login (see field comment above).
+            bool hasDistinctCredentials = !string.IsNullOrEmpty(liftoffProUsername) && !string.IsNullOrEmpty(liftoffProPassword);
+            if (hasDistinctCredentials)
+            {
+                HandleDistinctLiftoffProCredentials();
+                return;
+            }
 
             // use_liftoff_pro.txt=false: click through Skip/Guest/Anonymous instead of the
             // credentialed sign-in flow below. Checked first so it takes priority whenever
