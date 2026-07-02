@@ -703,23 +703,31 @@ namespace LiftoffAutoLobby
             return null;
         }
 
-        // Matches the same skip/guest/anonymous/without-Liftoff-Pro text the existing
-        // sign-in-screen scan already uses to *exclude* candidates (see isSkip in
-        // HandleMultiplayerMenu) — reused here as the *inclusion* criteria for
-        // useLiftoffPro=false instances that want to click through anonymously instead.
+        // Confirmed live 2026-07-02: the real anonymous-login button on the
+        // MultiplayerMenu sign-in screen is
+        // Menu/SignIn/MultiplayerSignIn/panelSignInForm/Content/panelLoginAnonymous/buttonSignInAnonymous,
+        // with visible TEXT just "Connect" — "anonymous" only appears in its name, not its
+        // label. Matching on text alone (skip/guest/anonymous/without, the original guess)
+        // found nothing and fell through to the credentialed-recovery path below, which
+        // clicked "Sign in" instead and got stuck waiting on a response that never comes.
+        // Match on name first (reliable, confirmed); keep the text-based guesses as a
+        // fallback in case a different screen/build phrases this differently.
         private static Button FindSkipLiftoffProButton()
         {
             Button[] buttons = Resources.FindObjectsOfTypeAll<Button>();
             foreach (Button btn in buttons)
             {
                 if (btn == null || !btn.gameObject.activeInHierarchy || !btn.interactable) continue;
+                string name = btn.name ?? "";
                 string txt = GetButtonText(btn);
-                if (string.IsNullOrEmpty(txt)) continue;
-                bool isSkip = txt.IndexOf("skip", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                              txt.IndexOf("guest", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                              txt.IndexOf("anonymous", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                              txt.IndexOf("without", StringComparison.OrdinalIgnoreCase) >= 0;
-                if (isSkip)
+                bool isSkipByName = name.IndexOf("SignInAnonymous", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                     name.IndexOf("Anonymous", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool isSkipByText = !string.IsNullOrEmpty(txt) && (
+                                     txt.IndexOf("skip", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                     txt.IndexOf("guest", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                     txt.IndexOf("anonymous", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                     txt.IndexOf("without", StringComparison.OrdinalIgnoreCase) >= 0);
+                if (isSkipByName || isSkipByText)
                 {
                     return btn;
                 }
@@ -930,7 +938,13 @@ namespace LiftoffAutoLobby
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Skip/anonymous button detected, waiting for UI to settle ({timeSinceLoadSkip:F1}s)...");
                         return;
                     }
-                    if ((DateTime.Now - lastSkipClickTime).TotalSeconds > 10.0)
+                    // Confirmed live 2026-07-02: re-clicking Connect while the first anonymous
+                    // auth request is still in flight gets rejected by the game with
+                    // "An authentication request is still pending. Cannot connect." — 10s
+                    // wasn't enough. Matches the 30s cooldown the credentialed-recovery path
+                    // below already uses for the same reason ("auth takes time to process
+                    // server-side").
+                    if ((DateTime.Now - lastSkipClickTime).TotalSeconds > 30.0)
                     {
                         lastSkipClickTime = DateTime.Now;
                         UnityEngine.Debug.Log($"[AutoLobbyPlugin] useLiftoffPro=false — clicking skip/anonymous button: name='{skipBtn.name}' text='{GetButtonText(skipBtn)}'");
