@@ -244,6 +244,36 @@ namespace LiftoffAutoLobby
                 logString.IndexOf("authentication request is still pending", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 authPendingErrorDetected = true;
+                // Temporary root-cause diagnostics (2026-07-02): captures Photon's own
+                // connection state machine at the exact moment this error fires, before any
+                // recovery runs, to check whether PhotonNetwork.Disconnect() alone could
+                // resolve this without the full MainMenu round-trip. Remove once resolved.
+                LogPhotonAuthDiagnostics();
+            }
+        }
+
+        private static void LogPhotonAuthDiagnostics()
+        {
+            try
+            {
+                Type type = Type.GetType("Photon.Pun.PhotonNetwork, PhotonUnityNetworking") ??
+                            Type.GetType("PhotonNetwork, Assembly-CSharp");
+                if (type == null)
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] [Diag] PhotonNetwork type not resolvable.");
+                    return;
+                }
+                PropertyInfo stateProp = type.GetProperty("NetworkClientState", BindingFlags.Public | BindingFlags.Static);
+                object state = stateProp?.GetValue(null);
+                bool isConnected = GetPhotonBoolProperty("IsConnected");
+                bool isConnectedAndReady = GetPhotonBoolProperty("IsConnectedAndReady");
+                bool inRoom = GetPhotonBoolProperty("InRoom");
+                bool inLobby = GetPhotonBoolProperty("InLobby");
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] [Diag] Photon state at stuck-auth error: NetworkClientState={state}, IsConnected={isConnected}, IsConnectedAndReady={isConnectedAndReady}, InRoom={inRoom}, InLobby={inLobby}");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] [Diag] LogPhotonAuthDiagnostics failed: {ex.Message}");
             }
         }
 
@@ -949,10 +979,18 @@ namespace LiftoffAutoLobby
             // Known long-standing Liftoff quirk, confirmed live 2026-07-02 (affects both Pro
             // and anonymous sign-in): once "An authentication request is still pending. Cannot
             // connect." fires, every further click on this same MultiplayerMenu instance keeps
-            // failing the same way — some auth-manager flag never clears itself. The previous
-            // workaround was manual: back out to MainMenu, back into Multiplayer, retry. Doing
-            // that automatically here (scene reload destroys/recreates whatever holds the stuck
-            // flag) instead of leaving it to a human.
+            // failing the same way — some auth-manager flag never clears itself. Confirmed via
+            // reflection that Photon's own connection is healthy when this fires
+            // (NetworkClientState=ConnectedToMasterServer, IsConnectedAndReady=true), so it's a
+            // game-logic-level guard flag, not a Photon-level stuck connection.
+            //
+            // Tried and disproven: reloading only the MultiplayerMenu scene in place
+            // (SceneManager.LoadScene("MultiplayerMenu")) does NOT clear it — looped 25+ times
+            // live, every retry hit the identical error. That rules out scene-bound state and
+            // confirms the stuck flag lives on a cross-scene-persistent object (SignInManager is
+            // a LugusSingletonCrossScene<T>; PlatformProvider.Instance is a similar singleton),
+            // which a same-scene reload never touches. Only the full MainMenu round-trip has
+            // actually been confirmed to clear it.
             if (authPendingErrorDetected)
             {
                 authPendingErrorDetected = false;
