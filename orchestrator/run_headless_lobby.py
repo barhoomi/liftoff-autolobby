@@ -307,6 +307,7 @@ def main():
     parser.add_argument("--shuffle", action="store_true", help="Shuffle the tracks in the playlist before writing to rotation.")
     parser.add_argument("--lobby-name", type=str, default=None, help="Override the lobby name (room name) for the server.")
     parser.add_argument("--public", action="store_true", help="Make the lobby public instead of private.")
+    parser.add_argument("--max-players", type=int, default=None, help="Max players allowed in the room (applied once the room is created).")
     parser.add_argument("--auto-start", action="store_true", help="Automatically start the race after players join, instead of staying in the lobby.")
     parser.add_argument("--width", type=int, default=640, help="Game window width (default: 640).")
     parser.add_argument("--height", type=int, default=480, help="Game window height (default: 480).")
@@ -363,7 +364,10 @@ def main():
         f.write("true" if args.auto_start else "false")
     with open(os.path.join(plugins_dir, "shuffle_mode.txt"), "w") as f:
         f.write("true" if args.shuffle else "false")
-    
+    if args.max_players is not None:
+        with open(os.path.join(plugins_dir, "max_players.txt"), "w") as f:
+            f.write(str(args.max_players))
+
     playlist_val = args.playlist if args.playlist else "custom"
     with open(os.path.join(plugins_dir, "playlist_name.txt"), "w") as f:
         f.write(playlist_val)
