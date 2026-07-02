@@ -3004,12 +3004,20 @@ namespace LiftoffAutoLobby
                 }
                 if (matches.Count == 1)
                 {
-                    matchedName = matchNames[0];
+                    // PhotonNetwork.CloseConnection() is a silent no-op unless this flag is set —
+                    // it's off by default and the game never turns it on itself.
+                    FieldInfo enableCloseField = networkType.GetField("EnableCloseConnection", BindingFlags.Public | BindingFlags.Static);
+                    if (enableCloseField != null) enableCloseField.SetValue(null, true);
+
                     MethodInfo closeMethod = networkType.GetMethod("CloseConnection", BindingFlags.Public | BindingFlags.Static, null, new[] { matches[0].GetType() }, null);
                     if (closeMethod != null)
                     {
-                        closeMethod.Invoke(null, new[] { matches[0] });
-                        return true;
+                        object result = closeMethod.Invoke(null, new[] { matches[0] });
+                        if (result is bool success && success)
+                        {
+                            matchedName = matchNames[0];
+                            return true;
+                        }
                     }
                 }
                 else
