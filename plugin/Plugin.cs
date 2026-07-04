@@ -4447,6 +4447,20 @@ namespace LiftoffAutoLobby
                         }
                         break;
 
+                    case "/reloadtheme":
+                        bool themeLoaded = LoadThemeConfig();
+                        if (themeLoaded)
+                        {
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Chat theme reloaded successfully.");
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} reloaded chat theme.");
+                        }
+                        else
+                        {
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Failed to load chat theme configuration (invalid JSON). Defaults applied.");
+                            UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Admin {userName} attempted /reloadtheme but chat_theme.json was invalid; defaults applied.");
+                        }
+                        break;
+
                     default:
                         UnityEngine.Debug.Log($"[AutoLobbyPlugin] Unknown admin command '{cmd}' from {userName}");
                         break;
