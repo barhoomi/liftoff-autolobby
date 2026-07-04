@@ -35,6 +35,10 @@
       <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.JSONSerializeModule">
+      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.JSONSerializeModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Assembly-CSharp">
       <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/Assembly-CSharp.dll</HintPath>
       <Private>false</Private>

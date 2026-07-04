@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Reflection;
 using System.Collections.Generic;
 using System.Linq;
@@ -20,6 +21,26 @@ namespace LiftoffAutoLobby
     public class AutoLobbyPlugin : BaseUnityPlugin
     {
         private static string pluginPath;
+
+        // Configurable chat color scheme, loaded from chat_theme.json in the plugins dir
+        // (see LoadThemeConfig / /reloadtheme). JsonUtility requires public fields on a
+        // [System.Serializable] class; the defaults here double as the fallback values.
+        [System.Serializable]
+        public class ChatTheme
+        {
+            public string systemTagColor = "#FF0000";
+            public string infoTagColor = "#0000FF";
+            public string adminTagColor = "#0000FF";
+            public string democracyTagColor = "#FF00FF";
+            public string welcomeTagColor = "#00FF88";
+            public string alertTagColor = "#FF0000";
+            public string variableValueColor = "#00FF88";
+            public string highlightTextColor = "#00FFFF";
+            public string defaultTextColor = "#FFFFFF";
+        }
+
+        private static ChatTheme activeTheme = new ChatTheme();
+
         private static DateTime lastTickTime = DateTime.MinValue;
         private static DateTime lastActivityTime = DateTime.UtcNow;
 
@@ -135,6 +156,7 @@ namespace LiftoffAutoLobby
             {
                 pluginPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BepInEx", "plugins");
 
+                LoadThemeConfig();
                 LoadAdminIds();
                 LoadUseLiftoffPro();
                 LoadBotNickname();
@@ -192,6 +214,100 @@ namespace LiftoffAutoLobby
         }
 
         private static bool IsAdmin(string userId) => adminIds.Contains(userId);
+
+        // Loads the chat color scheme from chat_theme.json in the plugins dir, following the
+        // same file-access pattern as the other config loaders. Writes the default theme to
+        // disk if the file is missing. Parsing uses Unity's built-in JsonUtility (no third-party
+        // JSON dependency). Each color is validated against ^#[0-9A-Fa-f]{6}$ with a per-field
+        // fallback to the built-in default, so a single bad field can't leak a broken tag into
+        // chat. Returns false only when the JSON itself is unparseable (defaults are applied and
+        // the caller — /reloadtheme — reports the failure); true otherwise.
+        private static bool LoadThemeConfig()
+        {
+            string path = Path.Combine(pluginPath, "chat_theme.json");
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    activeTheme = new ChatTheme();
+                    try
+                    {
+                        File.WriteAllText(path, JsonUtility.ToJson(activeTheme, true));
+                        UnityEngine.Debug.Log("[AutoLobbyPlugin] chat_theme.json not found — wrote default theme.");
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Could not write default chat_theme.json: {ex.Message}");
+                    }
+                    return true;
+                }
+
+                string jsonText = File.ReadAllText(path);
+                ChatTheme parsed = null;
+                try
+                {
+                    parsed = JsonUtility.FromJson<ChatTheme>(jsonText);
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to parse chat_theme.json: {ex.Message}. Applying defaults.");
+                }
+
+                if (parsed == null)
+                {
+                    activeTheme = new ChatTheme();
+                    return false;
+                }
+
+                var defaults = new ChatTheme();
+                parsed.systemTagColor = ValidateColor(parsed.systemTagColor, defaults.systemTagColor);
+                parsed.infoTagColor = ValidateColor(parsed.infoTagColor, defaults.infoTagColor);
+                parsed.adminTagColor = ValidateColor(parsed.adminTagColor, defaults.adminTagColor);
+                parsed.democracyTagColor = ValidateColor(parsed.democracyTagColor, defaults.democracyTagColor);
+                parsed.welcomeTagColor = ValidateColor(parsed.welcomeTagColor, defaults.welcomeTagColor);
+                parsed.alertTagColor = ValidateColor(parsed.alertTagColor, defaults.alertTagColor);
+                parsed.variableValueColor = ValidateColor(parsed.variableValueColor, defaults.variableValueColor);
+                parsed.highlightTextColor = ValidateColor(parsed.highlightTextColor, defaults.highlightTextColor);
+                parsed.defaultTextColor = ValidateColor(parsed.defaultTextColor, defaults.defaultTextColor);
+
+                activeTheme = parsed;
+                UnityEngine.Debug.Log("[AutoLobbyPlugin] Loaded chat theme from chat_theme.json.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error loading chat theme: {ex.Message}. Applying defaults.");
+                activeTheme = new ChatTheme();
+                return false;
+            }
+        }
+
+        private static readonly Regex HexColorRegex = new Regex("^#[0-9A-Fa-f]{6}$");
+
+        private static string ValidateColor(string candidate, string fallback)
+        {
+            if (!string.IsNullOrEmpty(candidate) && HexColorRegex.IsMatch(candidate))
+                return candidate;
+            return fallback;
+        }
+
+        // Chat-color formatting helpers. Every helper emits a fully balanced, properly nested
+        // tag block (<b>/<i>/<color=…>) so the SplitMessage tag-tracking/re-opening logic stays
+        // correct across chunk boundaries. Do not emit unbalanced tags here.
+        private static string FormatTag(string text, string colorHex)
+        {
+            return $"<b><color={colorHex}>[{text}]</color></b>";
+        }
+
+        private static string FormatVariable(string text)
+        {
+            return $"<color={activeTheme.variableValueColor}><i>{text}</i></color>";
+        }
+
+        private static string FormatHighlight(string text)
+        {
+            return $"<b><color={activeTheme.highlightTextColor}>{text}</color></b>";
+        }
 
         private static void LoadUseLiftoffPro()
         {
