@@ -44,10 +44,14 @@ LIFTOFF_EXE = f"{GAME_DIR}/Liftoff.x86_64"
 # '/home/dev-user/.../run_headless_lobby.py': [Errno 13] Permission denied").
 BOT_PROJECT_DIR = "/home/fpv_bot/procedural-fpv"
 ORCHESTRATOR_SCRIPT_REMOTE = f"{BOT_PROJECT_DIR}/orchestrator/run_headless_lobby.py"
+# run_headless_lobby.py imports event_log at module load; it must be deployed alongside
+# or the orchestrator ImportErrors on start.
+EVENT_LOG_MODULE_REMOTE = f"{BOT_PROJECT_DIR}/orchestrator/event_log.py"
 
 THIS_REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCAL_DLL_PATH = os.path.join(THIS_REPO_DIR, "plugin", "bin", "Debug", "LiftoffAutoLobby.dll")
 LOCAL_ORCHESTRATOR_SCRIPT = os.path.join(THIS_REPO_DIR, "orchestrator", "run_headless_lobby.py")
+LOCAL_EVENT_LOG_MODULE = os.path.join(THIS_REPO_DIR, "orchestrator", "event_log.py")
 LOCAL_RUN_LOG_DIR = os.path.join(THIS_REPO_DIR, "orchestrator", "scenario_run_logs")
 
 
@@ -159,9 +163,11 @@ def deploy_orchestrator_script():
     fpv_bot's project copy so the 'server bot' launch can actually use it. Only this one
     file is touched -- gather_tracks.py and the JSON configs already there (from
     infra/setup_bot.sh) are untouched and unmodified by this branch."""
-    print("[Harness] Deploying orchestrator script (run_headless_lobby.py) for the test run...")
+    print("[Harness] Deploying orchestrator script (run_headless_lobby.py + event_log.py) for the test run...")
     with open(LOCAL_ORCHESTRATOR_SCRIPT, "rb") as f:
         write_fpv_binary(ORCHESTRATOR_SCRIPT_REMOTE, f.read())
+    with open(LOCAL_EVENT_LOG_MODULE, "rb") as f:
+        write_fpv_binary(EVENT_LOG_MODULE_REMOTE, f.read())
 
 
 def build_plugin():
