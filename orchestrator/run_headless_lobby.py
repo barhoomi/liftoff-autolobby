@@ -6,6 +6,41 @@ import subprocess
 import argparse
 import fnmatch
 
+# Structured JSONL logging (see docs/features/doing/structured-logging.md). Imported
+# defensively: if event_log.py isn't co-deployed (e.g. a partial rollout that only pushed
+# run_headless_lobby.py), the orchestrator must still run -- logging degrades to a no-op
+# rather than crashing the control loop.
+try:
+    from event_log import EventLogger, resolve_log_dir
+    _EVENT_LOG_AVAILABLE = True
+except Exception as _event_log_import_err:  # pragma: no cover - defensive
+    _EVENT_LOG_AVAILABLE = False
+    print(f"[Host] WARNING: event_log module unavailable ({_event_log_import_err}); "
+          f"structured logging disabled.")
+
+
+class _NullLogger:
+    """No-op stand-in with the EventLogger method surface, used when event_log is
+    unavailable so call sites need no `if logger` guards for availability."""
+
+    def _noop(self, *args, **kwargs):
+        return None
+
+    def __getattr__(self, _name):
+        return self._noop
+
+
+def make_event_logger(config, project_dir):
+    """Build the structured event logger (or a no-op stand-in if the module is missing)."""
+    if not _EVENT_LOG_AVAILABLE:
+        return _NullLogger()
+    try:
+        log_dir = resolve_log_dir(config, project_dir)
+        return EventLogger(log_dir)
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"[Host] WARNING: failed to initialize structured logging ({e}); disabling.")
+        return _NullLogger()
+
 def load_track_mode_availability(plugins_dir):
     """Ground-truth (environment, game mode) -> [track names] data, produced by the plugin's
     nested dropdown dump (BepInEx/plugins/track_mode_availability.json). Returns None if the
@@ -102,7 +137,7 @@ def round_robin_shuffle_by_environment(resolved_tracks):
     return result
 
 
-def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_fallback=False):
+def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_fallback=False, logger=None):
     import random
 
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -231,10 +266,17 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
         if not is_fallback and playlist_name != "all_official_races" and "all_official_races" in playlists_data:
             print(f"[Playlist] CRITICAL: '{playlist_name}' resolved to 0 valid tracks after cross-validation. "
                   f"Falling back to 'all_official_races'.")
-            return resolve_and_write_playlist("all_official_races", shuffle_enabled, output_file, is_fallback=True)
+            if logger:
+                logger.error("playlist resolved to 0 tracks; falling back to all_official_races",
+                             context="playlist_resolution", playlist=playlist_name)
+            return resolve_and_write_playlist("all_official_races", shuffle_enabled, output_file,
+                                              is_fallback=True, logger=logger)
         else:
             print(f"[Playlist] CRITICAL: '{playlist_name}' resolved to 0 tracks (fallback exhausted or unavailable). "
                   f"Writing empty rotation file — bot may get stuck.")
+            if logger:
+                logger.error("playlist resolved to 0 tracks; fallback exhausted, writing empty rotation",
+                             context="playlist_resolution", playlist=playlist_name)
 
     # tracks_to_rotate.txt's line order IS the rotation order — there's no separate
     # "shuffled" vs "unshuffled" state. When shuffle is requested we randomize the
@@ -253,6 +295,12 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
         for track_name, ui_env, game_mode in resolved_tracks:
             f.write(f"{track_name},{ui_env},{game_mode}\n")
     print(f"[Playlist] Wrote tracks to rotate to: {output_file}")
+
+    # The orchestrator's "track change" signal: the set of tracks in rotation just changed.
+    if logger:
+        logger.playlist_resolved(playlist_name, len(resolved_tracks), shuffle=shuffle_enabled,
+                                 dropped_missing=n_missing, dropped_mode=n_mode,
+                                 fallback=is_fallback)
 
     # Reset rotation state to 0 — the single cursor used for both modes.
     state_file = os.path.join(os.path.dirname(output_file), "rotation_state.txt")
@@ -360,6 +408,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config()
+    logger = make_event_logger(config, project_dir)
     display = config.get("display", ":99")
     liftoff_path = os.path.expanduser(config.get("liftoff_path", ""))
     lobby_name = args.lobby_name if args.lobby_name else config.get("lobby_name", "Procedural Loop Room")
@@ -392,6 +441,7 @@ def main():
         gather_tracks_and_races()
     except Exception as e:
         print(f"[Host] WARNING: Failed to update track list database: {e}")
+        logger.error(f"Failed to update track list database: {e}", context="gather_tracks")
 
     # 3. Write rotation parameters to BepInEx plugin directory
     # The C# mod reads these files at runtime to configure itself
@@ -436,9 +486,10 @@ def main():
     tracks_file = os.path.join(plugins_dir, "tracks_to_rotate.txt")
     if args.playlist:
         try:
-            resolve_and_write_playlist(args.playlist, args.shuffle, tracks_file)
+            resolve_and_write_playlist(args.playlist, args.shuffle, tracks_file, logger=logger)
         except ValueError as e:
             print(f"ERROR: {e}")
+            logger.error(str(e), context="playlist_resolution", playlist=args.playlist)
             sys.exit(1)
     else:
         # Copy tracks_to_rotate.txt from current directory if it exists, otherwise create/keep existing
@@ -504,11 +555,14 @@ def main():
         print(f"ERROR: run_bepinex.sh loader script not found at: {launch_sh_path}")
         sys.exit(1)
 
+    logger.orchestrator_start(args.interval, playlist=playlist_val, lobby_name=lobby_name,
+                              gui=args.gui, auto_start=args.auto_start)
+
     try:
         proc = None
         last_process_check = 0.0
         active_playlist = playlist_val
-        
+
         while True:
             current_time = time.time()
             
@@ -520,18 +574,21 @@ def main():
                         current_playlist_name = f.read().strip()
                     if current_playlist_name and current_playlist_name != active_playlist:
                         print(f"[Host] Playlist change detected: '{active_playlist}' -> '{current_playlist_name}'")
+                        logger.playlist_change(active_playlist, current_playlist_name)
                         # Read shuffle mode
                         shuffle_enabled = False
                         shuffle_mode_path = os.path.join(plugins_dir, "shuffle_mode.txt")
                         if os.path.exists(shuffle_mode_path):
                             with open(shuffle_mode_path, "r") as sf:
                                 shuffle_enabled = (sf.read().strip().lower() == "true")
-                        
+
                         try:
-                            resolve_and_write_playlist(current_playlist_name, shuffle_enabled, tracks_file)
+                            resolve_and_write_playlist(current_playlist_name, shuffle_enabled, tracks_file, logger=logger)
                             active_playlist = current_playlist_name
                         except Exception as ex:
                             print(f"[Host] Failed to resolve and write playlist '{current_playlist_name}': {ex}")
+                            logger.error(f"Failed to resolve and write playlist: {ex}",
+                                         context="playlist_resolution", playlist=current_playlist_name)
                 except Exception as e:
                     print(f"[Host] Error checking playlist change: {e}")
 
@@ -550,6 +607,7 @@ def main():
                     maintenance_active_path = os.path.join(plugins_dir, "maintenance_active.txt")
                     if os.path.exists(maintenance_active_path):
                         print("[Host] Liftoff exited and maintenance mode is active. Exiting orchestrator cleanly.")
+                        logger.shutdown("maintenance")
                         try:
                             os.remove(maintenance_active_path)
                         except Exception:
@@ -568,11 +626,14 @@ def main():
                         launch_args += ["-logFile", args.log_file]
                     proc = subprocess.Popen(launch_args, env=env, cwd=game_dir)
                     print(f"[Host] Started Liftoff server process (PID: {proc.pid}).")
+                    logger.game_start(proc.pid, playlist=active_playlist,
+                                      width=args.width, height=args.height)
             
             time.sleep(1)
 
     except KeyboardInterrupt:
         print("\n[Host] Stopped by user request. Exiting...")
+        logger.shutdown("keyboard_interrupt")
         # Terminate any running Liftoff process
         try:
             run_command(["pkill", "-f", "Liftoff.x86_64"], check=False)
