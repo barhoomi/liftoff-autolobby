@@ -37,6 +37,8 @@ namespace LiftoffAutoLobby
             public string variableValueColor = "#00FF88";
             public string highlightTextColor = "#00FFFF";
             public string defaultTextColor = "#FFFFFF";
+            // Dim/muted color for the multi-line continuation marker (↳). See FormatContinuation.
+            public string mutedTextColor = "#888888";
         }
 
         private static ChatTheme activeTheme = new ChatTheme();
@@ -273,6 +275,7 @@ namespace LiftoffAutoLobby
                 parsed.variableValueColor = ValidateColor(parsed.variableValueColor, defaults.variableValueColor);
                 parsed.highlightTextColor = ValidateColor(parsed.highlightTextColor, defaults.highlightTextColor);
                 parsed.defaultTextColor = ValidateColor(parsed.defaultTextColor, defaults.defaultTextColor);
+                parsed.mutedTextColor = ValidateColor(parsed.mutedTextColor, defaults.mutedTextColor);
 
                 activeTheme = parsed;
                 UnityEngine.Debug.Log("[AutoLobbyPlugin] Loaded chat theme from chat_theme.json.");
@@ -311,6 +314,14 @@ namespace LiftoffAutoLobby
         private static string FormatHighlight(string text)
         {
             return $"<b><color={activeTheme.highlightTextColor}>{text}</color></b>";
+        }
+
+        // Continuation marker for multi-line bot messages: the tag ([INFO]/[ADMIN]/…) appears
+        // only on line 1; each subsequent line gets this dim ↳ marker instead of repeating the
+        // tag. Emits a fully balanced tag block so SplitMessage's tag tracking stays correct.
+        private static string FormatContinuation()
+        {
+            return $"<color={activeTheme.mutedTextColor}>  ↳</color> ";
         }
 
         private static void LoadUseLiftoffPro()
@@ -2536,6 +2547,29 @@ namespace LiftoffAutoLobby
                 result.Add(currentString);
             }
             return result;
+        }
+
+        // Sends a logically-single bot message that spans multiple chat lines: the tag block
+        // ([INFO]/[ADMIN]/…) appears only on the first line; every later line is prefixed with the
+        // dim ↳ continuation marker. Each line is routed through SendChatMessage individually so
+        // per-line SplitMessage safety is preserved. Null/empty lines are skipped gracefully.
+        private static void SendTaggedLines(string tagText, string tagColor, params string[] lines)
+        {
+            if (lines == null) return;
+            bool firstEmitted = false;
+            foreach (string line in lines)
+            {
+                if (string.IsNullOrEmpty(line)) continue;
+                if (!firstEmitted)
+                {
+                    SendChatMessage($"{FormatTag(tagText, tagColor)} {line}");
+                    firstEmitted = true;
+                }
+                else
+                {
+                    SendChatMessage($"{FormatContinuation()}{line}");
+                }
+            }
         }
 
         private static void SendChatMessage(string message)
