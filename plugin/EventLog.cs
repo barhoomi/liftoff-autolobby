@@ -135,7 +135,7 @@ namespace LiftoffAutoLobby
                         AppendJsonValue(sb, f.value);
                     }
                 }
-                sb.Append('\n');
+                sb.Append("}\n");
 
                 File.AppendAllText(file, sb.ToString(), EventLogEncoding);
             }
