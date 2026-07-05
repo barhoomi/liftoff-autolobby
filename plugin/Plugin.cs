@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Reflection;
 using System.Collections.Generic;
 using System.Linq;
@@ -20,6 +21,26 @@ namespace LiftoffAutoLobby
     public class AutoLobbyPlugin : BaseUnityPlugin
     {
         private static string pluginPath;
+
+        // Configurable chat color scheme, loaded from chat_theme.json in the plugins dir
+        // (see LoadThemeConfig / /reloadtheme). JsonUtility requires public fields on a
+        // [System.Serializable] class; the defaults here double as the fallback values.
+        [System.Serializable]
+        public class ChatTheme
+        {
+            public string systemTagColor = "#FF0000";
+            public string infoTagColor = "#0000FF";
+            public string adminTagColor = "#0000FF";
+            public string democracyTagColor = "#FF00FF";
+            public string welcomeTagColor = "#00FF88";
+            public string alertTagColor = "#FF0000";
+            public string variableValueColor = "#00FF88";
+            public string highlightTextColor = "#00FFFF";
+            public string defaultTextColor = "#FFFFFF";
+        }
+
+        private static ChatTheme activeTheme = new ChatTheme();
+
         private static DateTime lastTickTime = DateTime.MinValue;
         private static DateTime lastActivityTime = DateTime.UtcNow;
 
@@ -135,6 +156,7 @@ namespace LiftoffAutoLobby
             {
                 pluginPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BepInEx", "plugins");
 
+                LoadThemeConfig();
                 LoadAdminIds();
                 LoadUseLiftoffPro();
                 LoadBotNickname();
@@ -192,6 +214,100 @@ namespace LiftoffAutoLobby
         }
 
         private static bool IsAdmin(string userId) => adminIds.Contains(userId);
+
+        // Loads the chat color scheme from chat_theme.json in the plugins dir, following the
+        // same file-access pattern as the other config loaders. Writes the default theme to
+        // disk if the file is missing. Parsing uses Unity's built-in JsonUtility (no third-party
+        // JSON dependency). Each color is validated against ^#[0-9A-Fa-f]{6}$ with a per-field
+        // fallback to the built-in default, so a single bad field can't leak a broken tag into
+        // chat. Returns false only when the JSON itself is unparseable (defaults are applied and
+        // the caller — /reloadtheme — reports the failure); true otherwise.
+        private static bool LoadThemeConfig()
+        {
+            string path = Path.Combine(pluginPath, "chat_theme.json");
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    activeTheme = new ChatTheme();
+                    try
+                    {
+                        File.WriteAllText(path, JsonUtility.ToJson(activeTheme, true));
+                        UnityEngine.Debug.Log("[AutoLobbyPlugin] chat_theme.json not found — wrote default theme.");
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Could not write default chat_theme.json: {ex.Message}");
+                    }
+                    return true;
+                }
+
+                string jsonText = File.ReadAllText(path);
+                ChatTheme parsed = null;
+                try
+                {
+                    parsed = JsonUtility.FromJson<ChatTheme>(jsonText);
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to parse chat_theme.json: {ex.Message}. Applying defaults.");
+                }
+
+                if (parsed == null)
+                {
+                    activeTheme = new ChatTheme();
+                    return false;
+                }
+
+                var defaults = new ChatTheme();
+                parsed.systemTagColor = ValidateColor(parsed.systemTagColor, defaults.systemTagColor);
+                parsed.infoTagColor = ValidateColor(parsed.infoTagColor, defaults.infoTagColor);
+                parsed.adminTagColor = ValidateColor(parsed.adminTagColor, defaults.adminTagColor);
+                parsed.democracyTagColor = ValidateColor(parsed.democracyTagColor, defaults.democracyTagColor);
+                parsed.welcomeTagColor = ValidateColor(parsed.welcomeTagColor, defaults.welcomeTagColor);
+                parsed.alertTagColor = ValidateColor(parsed.alertTagColor, defaults.alertTagColor);
+                parsed.variableValueColor = ValidateColor(parsed.variableValueColor, defaults.variableValueColor);
+                parsed.highlightTextColor = ValidateColor(parsed.highlightTextColor, defaults.highlightTextColor);
+                parsed.defaultTextColor = ValidateColor(parsed.defaultTextColor, defaults.defaultTextColor);
+
+                activeTheme = parsed;
+                UnityEngine.Debug.Log("[AutoLobbyPlugin] Loaded chat theme from chat_theme.json.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error loading chat theme: {ex.Message}. Applying defaults.");
+                activeTheme = new ChatTheme();
+                return false;
+            }
+        }
+
+        private static readonly Regex HexColorRegex = new Regex("^#[0-9A-Fa-f]{6}$");
+
+        private static string ValidateColor(string candidate, string fallback)
+        {
+            if (!string.IsNullOrEmpty(candidate) && HexColorRegex.IsMatch(candidate))
+                return candidate;
+            return fallback;
+        }
+
+        // Chat-color formatting helpers. Every helper emits a fully balanced, properly nested
+        // tag block (<b>/<i>/<color=…>) so the SplitMessage tag-tracking/re-opening logic stays
+        // correct across chunk boundaries. Do not emit unbalanced tags here.
+        private static string FormatTag(string text, string colorHex)
+        {
+            return $"<b><color={colorHex}>[{text}]</color></b>";
+        }
+
+        private static string FormatVariable(string text)
+        {
+            return $"<color={activeTheme.variableValueColor}><i>{text}</i></color>";
+        }
+
+        private static string FormatHighlight(string text)
+        {
+            return $"<b><color={activeTheme.highlightTextColor}>{text}</color></b>";
+        }
 
         private static void LoadUseLiftoffPro()
         {
@@ -402,7 +518,7 @@ namespace LiftoffAutoLobby
                         lastMaintenanceWarningMinutes = -1;
                         maintenanceWarning30sSent = false;
                         maintenanceWarning10sSent = false;
-                        SendChatMessage("<color=#0000FF>[ADMIN]</color> Shutdown for maintenance scheduled in <color=#00FF88><i>3.0m</i></color> (triggered externally).");
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Shutdown for maintenance scheduled in {FormatVariable($"3.0m")} (triggered externally).");
                         UnityEngine.Debug.Log("[AutoLobbyPlugin] Maintenance mode triggered externally.");
                     }
                 }
@@ -411,7 +527,7 @@ namespace LiftoffAutoLobby
                     if (maintenanceActive)
                     {
                         CancelMaintenance();
-                        SendChatMessage("<color=#0000FF>[ADMIN]</color> Scheduled maintenance cancelled externally.");
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Scheduled maintenance cancelled externally.");
                         UnityEngine.Debug.Log("[AutoLobbyPlugin] Maintenance mode cancelled externally.");
                     }
                 }
@@ -426,7 +542,7 @@ namespace LiftoffAutoLobby
                 double remainingSecs = (maintenanceTime - DateTime.Now).TotalSeconds;
                 if (remainingSecs <= 0)
                 {
-                    SendChatMessage("<color=#0000FF>[ADMIN]</color> Going down for maintenance.");
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Going down for maintenance.");
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Maintenance time reached. Exiting game.");
                     Application.Quit();
                     return; // Prevent running other tick logic
@@ -437,17 +553,17 @@ namespace LiftoffAutoLobby
                     if (remainingMinutes > 0 && remainingMinutes != lastMaintenanceWarningMinutes && remainingSecs > 30.0)
                     {
                         lastMaintenanceWarningMinutes = remainingMinutes;
-                        SendChatMessage($"<color=#0000FF>[ADMIN]</color> Shutdown for maintenance in <color=#00FF88><i>{remainingMinutes}m</i></color>.");
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Shutdown for maintenance in {FormatVariable($"{remainingMinutes}m")}.");
                     }
                     else if (remainingSecs <= 30.0 && !maintenanceWarning30sSent)
                     {
                         maintenanceWarning30sSent = true;
-                        SendChatMessage("<color=#0000FF>[ADMIN]</color> Shutdown for maintenance in <color=#00FF88><i>30s</i></color>.");
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Shutdown for maintenance in {FormatVariable($"30s")}.");
                     }
                     else if (remainingSecs <= 10.0 && !maintenanceWarning10sSent)
                     {
                         maintenanceWarning10sSent = true;
-                        SendChatMessage("<color=#0000FF>[ADMIN]</color> Shutdown for maintenance in <color=#00FF88><i>10s</i></color>.");
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Shutdown for maintenance in {FormatVariable($"10s")}.");
                     }
                 }
             }
@@ -532,7 +648,7 @@ namespace LiftoffAutoLobby
                 liftoffProLoginAttempted = false;
                 liftoffProLoginClickTime = DateTime.MinValue;
                 try { File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "false"); } catch { }
-                QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Room rename to '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>' got stuck and was aborted — recovering with a public room.");
+                QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Room rename to '{FormatVariable($"{pendingPrivateRoomName}")}' got stuck and was aborted — recovering with a public room.");
                 SceneManager.LoadScene("MainMenu");
                 return;
             }
@@ -1526,9 +1642,7 @@ namespace LiftoffAutoLobby
                 string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
                 if (!string.IsNullOrEmpty(nextTrackName))
                 {
-                    string[] cycleColors = { "#FF0000", "#00FFFF", "#FF00FF" };
-                    string cycleColor = cycleColors[(trackIdx % cycleColors.Length + cycleColors.Length) % cycleColors.Length];
-                    SendChatMessage($"<b><color=#FF0000>[SYSTEM]</color></b> Up next: <b><color={cycleColor}>{nextEnv} - {nextTrackName}</color></b>");
+                    SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} Up next: {FormatHighlight($"{nextEnv} - {nextTrackName}")}");
                 }
                 else
                 {
@@ -2857,7 +2971,7 @@ namespace LiftoffAutoLobby
                 if ((DateTime.UtcNow - lastActivityTime).TotalSeconds >= interval)
                 {
                     string tip = GetRandomProTip();
-                    SendChatMessage($"<b><color=#00FF88>[PRO TIP]</color></b> {tip}");
+                    SendChatMessage($"{FormatTag("PRO TIP", activeTheme.welcomeTagColor)} {tip}");
                     lastActivityTime = DateTime.UtcNow;
                 }
             }
@@ -3401,7 +3515,7 @@ namespace LiftoffAutoLobby
                     if (pendingPrivateRoomRename)
                     {
                         UnityEngine.Debug.Log("[AutoLobbyPlugin] Private room rename: new room created successfully.");
-                        QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Room recreated as private. Join name: <color=#00FF88><i>{pendingPrivateRoomName}</i></color>.");
+                        QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Room recreated as private. Join name: {FormatVariable($"{pendingPrivateRoomName}")}.");
                     }
                     pendingPrivateRoomRename = false;
                     pendingPrivateRoomRenameStartTime = DateTime.MinValue;
@@ -3412,7 +3526,7 @@ namespace LiftoffAutoLobby
                 {
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Joined an existing room by name instead of creating one — bot does not own this room.");
                     roomOwnedByBot = false;
-                    QueueChatMessage($"<color=#0000FF>[ADMIN]</color> A room named '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>' already existed — joined it instead of creating a new one. <color=#FF0000><i>This bot is not the room owner and cannot control settings/rotation here.</i></color> Current host: please transfer host to this bot from the player list so it can control settings/rotation, or use /private with a different name to have the bot create its own room instead.");
+                    QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} A room named '{FormatVariable($"{pendingPrivateRoomName}")}' already existed — joined it instead of creating a new one. <color={activeTheme.alertTagColor}><i>This bot is not the room owner and cannot control settings/rotation here.</i></color> Current host: please transfer host to this bot from the player list so it can control settings/rotation, or use /private with a different name to have the bot create its own room instead.");
                     pendingPrivateRoomRename = false;
                     pendingPrivateRoomRenameStartTime = DateTime.MinValue;
                     pendingJoinByName = false;
@@ -3619,7 +3733,7 @@ namespace LiftoffAutoLobby
             targetLobbyName = newName; // picked up immediately if the popup is already open on next tick
 
             bool wasInRoom = GetPhotonBoolProperty("InRoom");
-            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Recreating room as private with name <color=#00FF88><i>{newName}</i></color>. Current players will be disconnected.");
+            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Recreating room as private with name {FormatVariable($"{newName}")}. Current players will be disconnected.");
             if (wasInRoom)
             {
                 if (!TryLeaveCurrentRoom())
@@ -3645,7 +3759,7 @@ namespace LiftoffAutoLobby
                 if (isLocal && !wasOwned)
                 {
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Master client switched to this bot — room is now bot-owned.");
-                    QueueChatMessage("<color=#0000FF>[ADMIN]</color> This bot is now the room host — settings/rotation control restored.");
+                    QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} This bot is now the room host — settings/rotation control restored.");
                 }
                 else if (!isLocal && wasOwned)
                 {
@@ -3673,11 +3787,11 @@ namespace LiftoffAutoLobby
                 pendingJoinByNameSetTime = DateTime.Now;
                 joinByNamePanelSubmitted = false;
                 joinByNameButtonClickedTime = DateTime.MinValue;
-                QueueChatMessage($"<color=#0000FF>[ADMIN]</color> A room named '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>' already exists — attempting to join it instead.");
+                QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} A room named '{FormatVariable($"{pendingPrivateRoomName}")}' already exists — attempting to join it instead.");
             }
             else if (pendingPrivateRoomRename)
             {
-                QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Failed to create private room '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>': {message}");
+                QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Failed to create private room '{FormatVariable($"{pendingPrivateRoomName}")}': {message}");
                 pendingPrivateRoomRename = false;
                 pendingPrivateRoomRenameStartTime = DateTime.MinValue;
                 pendingJoinByName = false;
@@ -3699,7 +3813,7 @@ namespace LiftoffAutoLobby
             }
             else
             {
-                QueueChatMessage($"<color=#0000FF>[ADMIN]</color> Failed to join room '<color=#00FF88><i>{pendingPrivateRoomName}</i></color>': {message}. Giving up.");
+                QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Failed to join room '{FormatVariable($"{pendingPrivateRoomName}")}': {message}. Giving up.");
                 pendingPrivateRoomRename = false;
                 pendingPrivateRoomRenameStartTime = DateTime.MinValue;
                 pendingJoinByName = false;
@@ -3712,7 +3826,7 @@ namespace LiftoffAutoLobby
         // RoomSettingsPanel.ApplyToGameSettings/GenerateRoomName), so this can't collide again.
         private static void FallBackToPublicRoom(string reasonForChat)
         {
-            QueueChatMessage($"<color=#0000FF>[ADMIN]</color> {reasonForChat} Falling back to a public room.");
+            QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} {reasonForChat} Falling back to a public room.");
             try
             {
                 File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "false");
@@ -4001,15 +4115,15 @@ namespace LiftoffAutoLobby
                     int trackIdx;
                     string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
 
-                    string response = $"<color=#0000FF>[INFO]</color> Playlist: <color=#00FF88><i>{currentPlaylist}</i></color> | Interval: <color=#00FF88><i>{rotationInterval:F0}s</i></color> | Next in: <color=#00FF88><i>{remaining:F0}s</i></color> | Next: <color=#00FF88><i>{nextEnv} - {nextTrackName}</i></color> ";
+                    string response = $"{FormatTag("INFO", activeTheme.infoTagColor)} Playlist: {FormatVariable($"{currentPlaylist}")} | Interval: {FormatVariable($"{rotationInterval:F0}s")} | Next in: {FormatVariable($"{remaining:F0}s")} | Next: {FormatVariable($"{nextEnv} - {nextTrackName}")} ";
                     SendChatMessage(response);
 
                     bool isVisible; string roomName; int maxPlayers; int playerCount;
                     if (TryGetRoomInfo(out isVisible, out roomName, out maxPlayers, out playerCount))
                     {
                         string visibility = isVisible ? "public" : "private";
-                        string ownership = roomOwnedByBot ? "bot-owned" : "<color=#FF0000>NOT bot-owned — settings/rotation unavailable</color>";
-                        string roomInfo = $"<color=#0000FF>[INFO]</color> Room: <color=#00FF88><i>{roomName}</i></color> | Visibility: <color=#00FF88><i>{visibility}</i></color> | Players: <color=#00FF88><i>{playerCount}/{maxPlayers}</i></color> | {ownership}";
+                        string ownership = roomOwnedByBot ? "bot-owned" : $"<color={activeTheme.alertTagColor}>NOT bot-owned — settings/rotation unavailable</color>";
+                        string roomInfo = $"{FormatTag("INFO", activeTheme.infoTagColor)} Room: {FormatVariable($"{roomName}")} | Visibility: {FormatVariable($"{visibility}")} | Players: {FormatVariable($"{playerCount}/{maxPlayers}")} | {ownership}";
                         SendChatMessage(roomInfo);
                     }
                     return;
@@ -4037,7 +4151,7 @@ namespace LiftoffAutoLobby
 
                 if (requiresOwnership && !roomOwnedByBot)
                 {
-                    SendChatMessage($"<color=#0000FF>[ADMIN]</color> <color=#FF0000>'{cmd}' cannot be executed — this bot does not own the room.</color> Transfer host to the bot from the player list, or use /private <name> to have it create/join a different room.");
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} <color={activeTheme.alertTagColor}>'{cmd}' cannot be executed — this bot does not own the room.</color> Transfer host to the bot from the player list, or use /private <name> to have it create/join a different room.");
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Refusing '{cmd}' from {userName} — bot does not own the room.");
                     return;
                 }
@@ -4047,7 +4161,7 @@ namespace LiftoffAutoLobby
                     case "/skip":
                         skipRequested = true;
                         chatWarnedAboutNextRace = false;
-                        SendChatMessage("[ADMIN] Skipping to next track.");
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Skipping to next track.");
                         UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} triggered /skip");
                         break;
 
@@ -4056,12 +4170,12 @@ namespace LiftoffAutoLobby
                         if (double.TryParse(arg, out newInterval) && newInterval >= 30.0)
                         {
                             File.WriteAllText(Path.Combine(pluginPath, "rotation_interval.txt"), newInterval.ToString("F0"));
-                            SendChatMessage($"[ADMIN] Interval set to {newInterval:F0}s.");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Interval set to {newInterval:F0}s.");
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set interval to {newInterval}s");
                         }
                         else
                         {
-                            SendChatMessage("[ADMIN] Usage: /interval <seconds> (min 30)");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Usage: /interval <seconds> (min 30)");
                         }
                         break;
 
@@ -4074,17 +4188,17 @@ namespace LiftoffAutoLobby
                                 roomCreatedTime = roomCreatedTime.AddSeconds(extendSecs);
                                 double newRemaining = Math.Max(0, GetRotationInterval() - (DateTime.Now - roomCreatedTime).TotalSeconds);
                                 chatWarnedAboutNextRace = false;
-                                SendChatMessage($"[ADMIN] Extended by {extendSecs:F0}s. Next rotation in {newRemaining:F0}s.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Extended by {extendSecs:F0}s. Next rotation in {newRemaining:F0}s.");
                                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} extended timer by {extendSecs}s");
                             }
                             else
                             {
-                                SendChatMessage("[ADMIN] No active rotation timer.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} No active rotation timer.");
                             }
                         }
                         else
                         {
-                            SendChatMessage("[ADMIN] Usage: /extend <seconds>");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Usage: /extend <seconds>");
                         }
                         break;
 
@@ -4104,7 +4218,7 @@ namespace LiftoffAutoLobby
                             // pass to finish, so "on" visibly takes effect immediately.
                             ShuffleTracksFile(Path.Combine(pluginPath, "tracks_to_rotate.txt"));
                             File.WriteAllText(Path.Combine(pluginPath, "rotation_state.txt"), "0");
-                            SendChatMessage("[ADMIN] Shuffle on.");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Shuffle on.");
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} enabled shuffle");
                         }
                         else if (arg.Equals("off", StringComparison.OrdinalIgnoreCase))
@@ -4118,12 +4232,12 @@ namespace LiftoffAutoLobby
                             {
                                 UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write shuffle_mode.txt: {ex.Message}");
                             }
-                            SendChatMessage("[ADMIN] Shuffle off.");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Shuffle off.");
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} disabled shuffle");
                         }
                         else
                         {
-                            SendChatMessage("[ADMIN] Usage: /shuffle on|off");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Usage: /shuffle on|off");
                         }
                         break;
 
@@ -4133,25 +4247,25 @@ namespace LiftoffAutoLobby
                             string current = "";
                             string playlistPath = Path.Combine(pluginPath, "playlist_name.txt");
                             if (File.Exists(playlistPath)) current = File.ReadAllText(playlistPath).Trim();
-                            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Current playlist: <color=#00FF88><i>{current}</i></color>. Available: <color=#00FF88><i>{GetAvailablePlaylistsString()}</i></color>");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Current playlist: {FormatVariable($"{current}")}. Available: {FormatVariable($"{GetAvailablePlaylistsString()}")}");
                         }
                         else if (PlaylistExists(arg))
                         {
                             try
                             {
                                 File.WriteAllText(Path.Combine(pluginPath, "playlist_name.txt"), arg.Trim());
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Playlist set to <color=#00FF88><i>{arg.Trim()}</i></color>. Next track will be from the new playlist.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Playlist set to {FormatVariable($"{arg.Trim()}")}. Next track will be from the new playlist.");
                                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set playlist to {arg}");
                             }
                             catch (Exception ex)
                             {
                                 UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write playlist_name.txt: {ex.Message}");
-                                SendChatMessage("<color=#0000FF>[ADMIN]</color> Failed to change playlist due to internal error.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Failed to change playlist due to internal error.");
                             }
                         }
                         else
                         {
-                            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Unknown playlist. Available: <color=#00FF88><i>{GetAvailablePlaylistsString()}</i></color>");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Unknown playlist. Available: {FormatVariable($"{GetAvailablePlaylistsString()}")}");
                         }
                         break;
 
@@ -4160,7 +4274,7 @@ namespace LiftoffAutoLobby
                         {
                             string currentMode = GetOverrideGameMode();
                             if (string.IsNullOrEmpty(currentMode)) currentMode = "auto (playlist default)";
-                            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Current mode: <color=#00FF88><i>{currentMode}</i></color>. Usage: /mode infinite|circuit|dropout|survival|auto");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Current mode: {FormatVariable($"{currentMode}")}. Usage: /mode infinite|circuit|dropout|survival|auto");
                         }
                         else
                         {
@@ -4174,7 +4288,7 @@ namespace LiftoffAutoLobby
 
                             if (targetMode == "")
                             {
-                                SendChatMessage("<color=#0000FF>[ADMIN]</color> Invalid mode. Supported: infinite, circuit, dropout, survival, auto");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Invalid mode. Supported: infinite, circuit, dropout, survival, auto");
                             }
                             else if (targetMode == "auto")
                             {
@@ -4182,7 +4296,7 @@ namespace LiftoffAutoLobby
                                 {
                                     string path = Path.Combine(pluginPath, "override_game_mode.txt");
                                     if (File.Exists(path)) File.Delete(path);
-                                    SendChatMessage("<color=#0000FF>[ADMIN]</color> Game mode reset to <color=#00FF88><i>playlist default</i></color>.");
+                                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Game mode reset to {FormatVariable($"playlist default")}.");
                                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} reset override game mode to auto.");
                                 }
                                 catch (Exception ex)
@@ -4195,7 +4309,7 @@ namespace LiftoffAutoLobby
                                 try
                                 {
                                     File.WriteAllText(Path.Combine(pluginPath, "override_game_mode.txt"), targetMode);
-                                    SendChatMessage($"<color=#0000FF>[ADMIN]</color> Game mode set to <color=#00FF88><i>{targetMode}</i></color>.");
+                                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Game mode set to {FormatVariable($"{targetMode}")}.");
                                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set override game mode to {targetMode}.");
                                 }
                                 catch (Exception ex)
@@ -4209,7 +4323,7 @@ namespace LiftoffAutoLobby
                     case "/kick":
                         if (string.IsNullOrEmpty(arg))
                         {
-                            SendChatMessage("<color=#0000FF>[ADMIN]</color> Usage: /kick <player_name>");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Usage: /kick <player_name>");
                         }
                         else
                         {
@@ -4217,16 +4331,16 @@ namespace LiftoffAutoLobby
                             string matchesList;
                             if (KickPlayer(arg, out matchedName, out matchesList))
                             {
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Kicked player <color=#00FF88><i>{matchedName}</i></color>.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Kicked player {FormatVariable($"{matchedName}")}.");
                                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} kicked player {matchedName}");
                             }
                             else if (matchedName == "multiple")
                             {
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Multiple matches found: <color=#00FF88><i>{matchesList}</i></color>. Please be more specific.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Multiple matches found: {FormatVariable($"{matchesList}")}. Please be more specific.");
                             }
                             else
                             {
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> No player found matching <color=#00FF88><i>'{arg}'</i></color>.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} No player found matching {FormatVariable($"'{arg}'")}.");
                             }
                         }
                         break;
@@ -4235,7 +4349,7 @@ namespace LiftoffAutoLobby
                         if (!string.IsNullOrEmpty(arg) && arg.Equals("cancel", StringComparison.OrdinalIgnoreCase))
                         {
                             CancelMaintenance();
-                            SendChatMessage("<color=#0000FF>[ADMIN]</color> Scheduled maintenance cancelled.");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Scheduled maintenance cancelled.");
                         }
                         else
                         {
@@ -4259,7 +4373,7 @@ namespace LiftoffAutoLobby
                             {
                                 UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write maintenance_active.txt: {ex.Message}");
                             }
-                            SendChatMessage($"<color=#0000FF>[ADMIN]</color> Shutdown for maintenance scheduled in <color=#00FF88><i>{mins:F1}m</i></color>.");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Shutdown for maintenance scheduled in {FormatVariable($"{mins:F1}m")}.");
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} scheduled maintenance in {mins} minutes.");
                         }
                         break;
@@ -4267,7 +4381,7 @@ namespace LiftoffAutoLobby
                     case "/private":
                         if (pendingPrivateRoomRename)
                         {
-                            SendChatMessage("<color=#0000FF>[ADMIN]</color> A room rename is already in progress. Please wait for it to finish.");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} A room rename is already in progress. Please wait for it to finish.");
                         }
                         else if (string.IsNullOrWhiteSpace(arg))
                         {
@@ -4277,12 +4391,12 @@ namespace LiftoffAutoLobby
                             if (SetRoomVisibility(true, out curName, out setErr))
                             {
                                 try { File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "true"); } catch { }
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Room is now private. Join name: <color=#00FF88><i>{curName}</i></color>.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Room is now private. Join name: {FormatVariable($"{curName}")}.");
                                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set room to private.");
                             }
                             else
                             {
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Could not change visibility: {setErr}. Usage: /private [name] (name recreates the room with that join name).");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Could not change visibility: {setErr}. Usage: /private [name] (name recreates the room with that join name).");
                             }
                         }
                         else
@@ -4299,12 +4413,12 @@ namespace LiftoffAutoLobby
                             if (SetRoomVisibility(false, out curName, out setErr))
                             {
                                 try { File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), "false"); } catch { }
-                                SendChatMessage("<color=#0000FF>[ADMIN]</color> Room is now public.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Room is now public.");
                                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set room to public.");
                             }
                             else
                             {
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Could not change visibility: {setErr}.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Could not change visibility: {setErr}.");
                             }
                         }
                         break;
@@ -4313,7 +4427,7 @@ namespace LiftoffAutoLobby
                         int requestedMax;
                         if (!int.TryParse(arg, out requestedMax) || requestedMax < 2)
                         {
-                            SendChatMessage("<color=#0000FF>[ADMIN]</color> Usage: /maxplayers <number> (min 2)");
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Usage: /maxplayers <number> (min 2)");
                         }
                         else
                         {
@@ -4323,13 +4437,27 @@ namespace LiftoffAutoLobby
                             {
                                 try { File.WriteAllText(Path.Combine(pluginPath, "max_players.txt"), applied.ToString()); } catch { }
                                 string clampNote = applied != requestedMax ? $" (clamped from {requestedMax})" : "";
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Max players set to <color=#00FF88><i>{applied}</i></color>{clampNote}.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Max players set to {FormatVariable($"{applied}")}{clampNote}.");
                                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} set max players to {applied} (requested {requestedMax}).");
                             }
                             else
                             {
-                                SendChatMessage($"<color=#0000FF>[ADMIN]</color> Could not set max players: {setErr}.");
+                                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Could not set max players: {setErr}.");
                             }
+                        }
+                        break;
+
+                    case "/reloadtheme":
+                        bool themeLoaded = LoadThemeConfig();
+                        if (themeLoaded)
+                        {
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Chat theme reloaded successfully.");
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} reloaded chat theme.");
+                        }
+                        else
+                        {
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Failed to load chat theme configuration (invalid JSON). Defaults applied.");
+                            UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Admin {userName} attempted /reloadtheme but chat_theme.json was invalid; defaults applied.");
                         }
                         break;
 
