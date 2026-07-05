@@ -608,6 +608,7 @@ namespace LiftoffAutoLobby
             string sceneName = SceneManager.GetActiveScene().name;
             if (sceneName != lastSceneName)
             {
+                string previousSceneName = lastSceneName;
                 lastSceneName = sceneName;
                 sceneLoadTime = DateTime.Now;
                 lastInRoomTime = DateTime.MinValue;
@@ -615,6 +616,11 @@ namespace LiftoffAutoLobby
                 lastMenuStateDumpTime = DateTime.MinValue;
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Scene changed to: {sceneName}");
                 LogEvent("scene_change", ("scene", sceneName));
+                // Structured JSON file event (A3): from/to per the canonical schema. The very
+                // first transition has no meaningful prior scene, so "from" is omitted (null).
+                LogJsonEvent("scene_change",
+                    ("from", string.IsNullOrEmpty(previousSceneName) ? null : previousSceneName),
+                    ("to", sceneName));
 
                 // Reset room timer when loading into a flight level scene
                 if (sceneName != "MainMenu" && sceneName != "MultiplayerMenu" &&
@@ -1623,6 +1629,11 @@ namespace LiftoffAutoLobby
                     string failKey = $"{targetEnvironment}|{targetTrackName}|{targetGameMode}";
                     UnityEngine.Debug.LogError($"[AutoLobbyPlugin] RUNTIME FAILURE: race did not load {sinceFirstClick:F0}s after Start Game click for '{targetTrackName}' (Env: {targetEnvironment}, Mode: {targetGameMode}). Blacklisting for this session.");
                     sessionBlacklistedTracks.Add(failKey);
+                    // Structured JSON file event (A3): an autonomous plugin decision — a track that
+                    // failed to load at runtime is blacklisted for the rest of the session.
+                    LogJsonEvent("decision",
+                        ("kind", "track_blacklist"),
+                        ("detail", $"{targetEnvironment} - {targetTrackName} ({targetGameMode}) failed to load {sinceFirstClick:F0}s after Start Game"));
                     firstStartGameClickTime = DateTime.MinValue;
                     NavigateToMainMenu();
                     return;
@@ -2721,6 +2732,10 @@ namespace LiftoffAutoLobby
         // runtime this session (see sessionBlacklistedTracks) are never selected again until the
         // process restarts. Bounded by the rotation's own line count so a fully-blacklisted
         // rotation can't loop forever.
+        // Set inside GetNextTrackFromRotationOnce at the moment a line is selected; read by the
+        // wrapper below for the structured "rotation" file event's optional index field.
+        private static int lastRotationIndex = -1;
+
         private static string GetNextTrackFromRotation(out string environment, out string gameMode)
         {
             string trackName = "";
@@ -2737,6 +2752,19 @@ namespace LiftoffAutoLobby
                 if (!sessionBlacklistedTracks.Contains(key)) break;
 
                 UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Skipping session-blacklisted track '{trackName}' ({environment}, {gameMode}) in rotation.");
+            }
+
+            // Structured JSON file event (A3): the honest per-track rotation signal — the bot
+            // committing to load a specific next track (rotation_state.txt was just advanced).
+            // Emitted once per selection, after any blacklist skips, so it reflects the real
+            // chosen track. mode/index are optional; index is the rotation cursor.
+            if (!string.IsNullOrEmpty(trackName))
+            {
+                LogJsonEvent("rotation",
+                    ("track", trackName),
+                    ("env", environment),
+                    ("mode", string.IsNullOrEmpty(gameMode) ? null : gameMode),
+                    ("index", lastRotationIndex >= 0 ? (object)lastRotationIndex : null));
             }
 
             return trackName;
@@ -2796,6 +2824,7 @@ namespace LiftoffAutoLobby
 
                 File.WriteAllText(statePath, nextIndex.ToString());
 
+                lastRotationIndex = index; // captured for the structured "rotation" file event
                 string selectedLine = validTracks[index];
 
                 // Parse line: TrackName,EnvironmentName,GameModeName
@@ -3540,6 +3569,14 @@ namespace LiftoffAutoLobby
                 {
                     HandleMasterClientSwitched(__args[0]);
                 }
+                else if (methodName == "OnPlayerEnteredRoom" && __args != null && __args.Length >= 1)
+                {
+                    LogPlayerPresenceEvent("player_join", __args[0]);
+                }
+                else if (methodName == "OnPlayerLeftRoom" && __args != null && __args.Length >= 1)
+                {
+                    LogPlayerPresenceEvent("player_leave", __args[0]);
+                }
 
                 System.Collections.IList list = __instance as System.Collections.IList;
                 if (list == null) return true;
@@ -3784,6 +3821,9 @@ namespace LiftoffAutoLobby
         {
             isSubmittingSettings = false; // unstick RunTick's "waiting for popup to close" loop
             UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Create room failed ({errorCode}) {message}");
+            LogJsonEvent("error",
+                ("message", $"Create room failed ({errorCode}): {message}"),
+                ("context", "create_room_failed"));
             if (errorCode == ErrorCode.GameIdAlreadyExists)
             {
                 pendingPrivateRoomName = targetLobbyName;
@@ -3811,6 +3851,9 @@ namespace LiftoffAutoLobby
         {
             isSubmittingSettings = false;
             UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Join by name failed ({errorCode}) {message}");
+            LogJsonEvent("error",
+                ("message", $"Join by name failed ({errorCode}): {message}"),
+                ("context", "join_by_name_failed"));
             if (errorCode == ErrorCode.GameFull || errorCode == ErrorCode.GameClosed || errorCode == ErrorCode.GameDoesNotExist)
             {
                 FallBackToPublicRoom($"Room '{pendingPrivateRoomName}' couldn't be joined ({message}).");
@@ -4150,7 +4193,15 @@ namespace LiftoffAutoLobby
 
                     string trimmedMsg = message.Trim();
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Chat received from {userName} (ID: {userId}): {trimmedMsg}");
-                    
+
+                    // Structured JSON file event (A3): every rendered (non-replay) chat line.
+                    // command is a real JSON bool marking slash-command messages.
+                    LogJsonEvent("chat",
+                        ("player", userName),
+                        ("userId", userId),
+                        ("msg", trimmedMsg),
+                        ("command", trimmedMsg.StartsWith("/")));
+
                     if (trimmedMsg.StartsWith("/"))
                     {
                         if (IsDuplicateMessage(userName, trimmedMsg))
