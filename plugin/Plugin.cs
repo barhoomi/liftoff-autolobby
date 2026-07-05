@@ -55,6 +55,12 @@ namespace LiftoffAutoLobby
         private static bool isSubmittingSettings = false;
         private static string targetTrackName = "";
         private static string targetEnvironment = "";
+        // The track/environment actually loaded in the room right now. Captured only at the moment
+        // the settings popup submit succeeds (see CaptureLoadedTrack) — NOT read live from
+        // targetTrackName, which during a rotation already points at the NEXT track before it has
+        // loaded. Read by /info. Placeholders keep the first /info (before any rotation) non-blank.
+        private static string currentTrackName = "starting up";
+        private static string currentEnvironment = "";
         private static string targetGameMode = "";
         private static string targetLobbyName = "";
         private static bool isLeaving = false;
@@ -2275,7 +2281,8 @@ namespace LiftoffAutoLobby
                     popupSubmittedTime = DateTime.Now;
                     isSubmittingSettings = true;
                     activeBtn.onClick.Invoke();
-                    
+                    CaptureLoadedTrack();
+
                     // Reset room timer if we are in a room
                     GameObject gameRoomObj = GameObject.Find("GameRoom");
                     bool inRoom = (gameRoomObj != null && gameRoomObj.activeInHierarchy);
@@ -2306,6 +2313,7 @@ namespace LiftoffAutoLobby
                         popupSubmittedTime = DateTime.Now;
                         isSubmittingSettings = true;
                         updateBtn.onClick.Invoke();
+                        CaptureLoadedTrack();
                         roomCreatedTime = DateTime.Now; // Reset the rotation timer!
                         lastActivityTime = DateTime.UtcNow;
                         chatWarnedAboutNextRace = false;
@@ -2322,9 +2330,19 @@ namespace LiftoffAutoLobby
                         popupSubmittedTime = DateTime.Now;
                         isSubmittingSettings = true;
                         createBtn.onClick.Invoke();
+                        CaptureLoadedTrack();
                     }
                 }
             }
+        }
+
+        // Called at each settings-popup submit-success point (the same instant the track genuinely
+        // becomes the loaded one). Snapshots the just-submitted target as the CURRENT track for
+        // /info. (Track history is appended here too — see the /history slice.)
+        private static void CaptureLoadedTrack()
+        {
+            currentTrackName = targetTrackName;
+            currentEnvironment = targetEnvironment;
         }
 
         private static Type FindType(string fullName)
