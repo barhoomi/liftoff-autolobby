@@ -5,6 +5,11 @@
     {"environment": "The Drawing Board", "track": "*Honk*Flowting*", "mode": "Infinite Race"},
     {"environment": "The Drawing Board", "track": "*Honk*Fort Honk - Easy*", "mode": "Infinite Race"}
   ],
+  "soak_test": [
+    {"environment": "The Green", "track": "01 - Par For The Course", "mode": "Infinite Race"},
+    {"environment": "The Green", "track": "03 - Club House", "mode": "Infinite Race"},
+    {"environment": "The Green", "track": "04 - Flop Shot", "mode": "Infinite Race"}
+  ],
   "env_fix_test": [
     {"environment": "The Drawing Board", "track": "*", "mode": "Infinite Race"},
     {"environment": "The Green",         "track": "*", "mode": "Infinite Race"},
