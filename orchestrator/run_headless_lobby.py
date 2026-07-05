@@ -464,6 +464,20 @@ def main():
         with open(os.path.join(plugins_dir, "max_players.txt"), "w") as f:
             f.write(str(args.max_players))
 
+    # Structured-logging (A3): hand the plugin the SAME resolved log directory the
+    # orchestrator uses, via a state file (plain-text plugin<->orchestrator protocol).
+    # The plugin runs from the game install and has no notion of the repo root, so it
+    # must be TOLD the dir. resolve_log_dir is the single resolver (CLAUDE rule #4) —
+    # the plugin reads this value rather than re-deriving the directory a second way.
+    if _EVENT_LOG_AVAILABLE:
+        try:
+            resolved_log_dir = resolve_log_dir(config, project_dir)
+            with open(os.path.join(plugins_dir, "log_dir.txt"), "w") as f:
+                f.write(resolved_log_dir)
+        except Exception as e:
+            print(f"[Host] WARNING: Failed to write log_dir.txt: {e}")
+            logger.error(f"Failed to write log_dir.txt: {e}", context="log_dir_state")
+
     playlist_val = args.playlist if args.playlist else "custom"
     with open(os.path.join(plugins_dir, "playlist_name.txt"), "w") as f:
         f.write(playlist_val)
