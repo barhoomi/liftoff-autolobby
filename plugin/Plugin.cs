@@ -61,6 +61,10 @@ namespace LiftoffAutoLobby
         // loaded. Read by /info. Placeholders keep the first /info (before any rotation) non-blank.
         private static string currentTrackName = "starting up";
         private static string currentEnvironment = "";
+        // Most-recently-played tracks (newest last), "{env} - {track}" display names, capped at 5.
+        // Appended at each submit-success point alongside currentTrackName; read by /history.
+        private static readonly List<string> trackHistory = new List<string>();
+        private const int TrackHistoryMax = 5;
         private static string targetGameMode = "";
         private static string targetLobbyName = "";
         private static bool isLeaving = false;
@@ -2343,6 +2347,10 @@ namespace LiftoffAutoLobby
         {
             currentTrackName = targetTrackName;
             currentEnvironment = targetEnvironment;
+
+            trackHistory.Add($"{targetEnvironment} - {targetTrackName}");
+            while (trackHistory.Count > TrackHistoryMax)
+                trackHistory.RemoveAt(0);
         }
 
         private static Type FindType(string fullName)

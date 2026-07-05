@@ -33,6 +33,7 @@ namespace LiftoffAutoLobby
                 commands.Clear();
                 RegisterCommand(new HelpCommand());
                 RegisterCommand(new InfoCommand());
+                RegisterCommand(new HistoryCommand());
                 RegisterCommand(new SkipCommand());
                 RegisterCommand(new IntervalCommand());
                 RegisterCommand(new ExtendCommand());
