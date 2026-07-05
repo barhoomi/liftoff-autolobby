@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 
 namespace LiftoffAutoLobby
@@ -142,6 +143,46 @@ namespace LiftoffAutoLobby
             {
                 UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] LogJsonEvent write failed: {ex.Message}");
             }
+        }
+
+        // Best-effort reflection read of a Photon.Realtime.Player's NickName + UserId, for the
+        // player_join / player_leave events. Confirmed via decompile of PhotonRealtime.dll
+        // (Player.NickName : string, Player.UserId : string) per CLAUDE rule #1 — not guessed.
+        // Mirrors the reflection style already used in KickPlayer. Never throws.
+        private static void ReadPhotonPlayerInfo(object playerObj, out string nick, out string userId)
+        {
+            nick = null;
+            userId = null;
+            if (playerObj == null) return;
+            try
+            {
+                Type t = playerObj.GetType();
+                PropertyInfo nickProp = t.GetProperty("NickName") ?? t.GetProperty("Nickname");
+                if (nickProp != null) nick = nickProp.GetValue(playerObj, null) as string;
+                PropertyInfo userIdProp = t.GetProperty("UserId");
+                if (userIdProp != null) userId = userIdProp.GetValue(playerObj, null) as string;
+            }
+            catch { /* best-effort; leave whichever fields we couldn't read as null (omitted) */ }
+        }
+
+        // Emit a player_join / player_leave file event for a Photon Player arg from the
+        // callback-dispatch prefix. count (current room player count) is optional — omitted
+        // if the room can't be read. Reuses the existing TryGetRoomInfo reflection reader.
+        private static void LogPlayerPresenceEvent(string eventName, object playerObj)
+        {
+            string nick, userId;
+            ReadPhotonPlayerInfo(playerObj, out nick, out userId);
+
+            object count = null;
+            try
+            {
+                bool isVisible; string roomName; int maxPlayers, playerCount;
+                if (TryGetRoomInfo(out isVisible, out roomName, out maxPlayers, out playerCount))
+                    count = playerCount;
+            }
+            catch { /* count stays null -> omitted */ }
+
+            LogJsonEvent(eventName, ("player", nick), ("userId", userId), ("count", count));
         }
     }
 }
