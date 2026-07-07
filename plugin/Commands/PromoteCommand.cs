@@ -52,6 +52,8 @@ namespace LiftoffAutoLobby
 
                     var matches = new List<object>();
                     var matchNames = new List<string>();
+                    int targetActorId;
+                    bool isNumericId = int.TryParse(targetName, out targetActorId);
 
                     for (int i = 0; i < playerArray.Length; i++)
                     {
@@ -63,7 +65,24 @@ namespace LiftoffAutoLobby
 
                         string nick = (string)nickProp.GetValue(playerObj, null) ?? "";
                         
-                        if (nick.IndexOf(targetName, StringComparison.OrdinalIgnoreCase) >= 0)
+                        bool isMatch = false;
+                        if (isNumericId)
+                        {
+                            PropertyInfo actorProp = playerObj.GetType().GetProperty("ActorNumber");
+                            if (actorProp != null && (int)actorProp.GetValue(playerObj, null) == targetActorId)
+                            {
+                                isMatch = true;
+                            }
+                        }
+                        else
+                        {
+                            if (nick.IndexOf(targetName, StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                isMatch = true;
+                            }
+                        }
+
+                        if (isMatch)
                         {
                             PropertyInfo localProp = playerObj.GetType().GetProperty("IsLocal");
                             bool isLocal = false;

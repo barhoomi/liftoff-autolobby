@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using UnityEngine;
 
 namespace LiftoffAutoLobby
 {
@@ -17,11 +18,13 @@ namespace LiftoffAutoLobby
         private static readonly List<SearchResult> lastSearchResults = new List<SearchResult>();
 
         // Public command — anyone in the lobby may run it.
-        // Lists up to 5 tracks from the current playlist that match the keyword.
+        // Lists tracks from the current playlist, sorted alphabetically, paginated.
         private class TracksCommand : IChatCommand
         {
+            private const int PageSize = 5;
+
             public string Name => "/tracks";
-            public string Description => "List tracks matching keyword or next 5 upcoming.";
+            public string Description => "List tracks matching keyword or all tracks, paginated. Usage: /tracks [keyword] [page]";
             public bool IsAdminOnly => false;
 
             public bool CanExecute(string userId, bool democracyEnabled, bool roomOwnedByBot) => true;
@@ -33,7 +36,7 @@ namespace LiftoffAutoLobby
                     string tracksPath = Path.Combine(pluginPath, "tracks_to_rotate.txt");
                     if (!File.Exists(tracksPath))
                     {
-                        SendTaggedLines("TRACKS", activeTheme.infoTagColor, "No tracks available in the rotation list.");
+                        SendTaggedLines("TRACKS", activeTheme.infoTagColor, new string[] { "No tracks available in the rotation list." });
                         return;
                     }
 
@@ -62,70 +65,101 @@ namespace LiftoffAutoLobby
 
                     if (allTracks.Count == 0)
                     {
-                        SendTaggedLines("TRACKS", activeTheme.infoTagColor, "No valid tracks found in the playlist.");
+                        SendTaggedLines("TRACKS", activeTheme.infoTagColor, new string[] { "No valid tracks found in the playlist." });
                         return;
                     }
 
-                    string statePath = Path.Combine(pluginPath, "rotation_state.txt");
-                    int currentIndex = 0;
-                    if (File.Exists(statePath))
-                    {
-                        int.TryParse(File.ReadAllText(statePath).Trim(), out currentIndex);
-                    }
-                    if (currentIndex < 0 || currentIndex >= allTracks.Count)
-                    {
-                        currentIndex = 0;
-                    }
-
-                    var matches = new List<SearchResult>();
+                    // Parse arguments: extract optional page number from the end of the argument string
                     string keyword = argument.Trim();
+                    int page = 1;
 
+                    string[] argParts = keyword.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (argParts.Length > 1)
+                    {
+                        int parsedPage;
+                        if (int.TryParse(argParts[argParts.Length - 1], out parsedPage) && parsedPage > 0)
+                        {
+                            page = parsedPage;
+                            keyword = string.Join(" ", argParts, 0, argParts.Length - 1).Trim();
+                        }
+                    }
+                    else if (argParts.Length == 1)
+                    {
+                        int parsedPage;
+                        if (int.TryParse(argParts[0], out parsedPage) && parsedPage > 0)
+                        {
+                            page = parsedPage;
+                            keyword = "";
+                        }
+                    }
+
+                    // Find matches
+                    var matches = new List<SearchResult>();
                     if (string.IsNullOrEmpty(keyword))
                     {
-                        // Take next 5 upcoming tracks starting from currentIndex
-                        for (int i = 0; i < Math.Min(5, allTracks.Count); i++)
-                        {
-                            int targetIndex = (currentIndex + i) % allTracks.Count;
-                            matches.Add(allTracks[targetIndex]);
-                        }
+                        matches.AddRange(allTracks);
                     }
                     else
                     {
-                        // Search for keyword in TrackName or Environment, starting from currentIndex for closest matches
-                        for (int i = 0; i < allTracks.Count; i++)
+                        foreach (var track in allTracks)
                         {
-                            int targetIndex = (currentIndex + i) % allTracks.Count;
-                            SearchResult candidate = allTracks[targetIndex];
-                            if (candidate.TrackName.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                candidate.Environment.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
+                            if (track.TrackName.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                track.Environment.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
                             {
-                                matches.Add(candidate);
-                                if (matches.Count >= 5) break;
+                                matches.Add(track);
                             }
                         }
                     }
 
                     if (matches.Count == 0)
                     {
-                        SendTaggedLines("TRACKS", activeTheme.infoTagColor, $"No tracks found matching keyword: {FormatVariable(keyword)}");
+                        SendTaggedLines("TRACKS", activeTheme.infoTagColor, new string[] { $"No tracks found matching keyword: {FormatVariable(keyword)}" });
                         return;
                     }
 
-                    // Save search results in static memory for the subsequent /track command
-                    lastSearchResults.Clear();
-                    lastSearchResults.AddRange(matches);
-
-                    var partsList = new List<string>();
-                    for (int i = 0; i < matches.Count; i++)
+                    // Sort matches alphabetically: by Environment name first, then by TrackName
+                    matches.Sort((a, b) =>
                     {
-                        partsList.Add(FormatVariable($"{i + 1}.{matches[i].TrackName} ({matches[i].Environment})"));
+                        int envCompare = string.Compare(a.Environment, b.Environment, StringComparison.OrdinalIgnoreCase);
+                        if (envCompare != 0) return envCompare;
+                        return string.Compare(a.TrackName, b.TrackName, StringComparison.OrdinalIgnoreCase);
+                    });
+
+                    // Paginate
+                    int totalPages = Mathf.CeilToInt((float)matches.Count / PageSize);
+                    if (page < 1) page = 1;
+                    if (page > totalPages) page = totalPages;
+
+                    var pageItems = new List<SearchResult>();
+                    int startIndex = (page - 1) * PageSize;
+                    for (int i = startIndex; i < Math.Min(startIndex + PageSize, matches.Count); i++)
+                    {
+                        pageItems.Add(matches[i]);
                     }
 
-                    SendTaggedLines("TRACKS", activeTheme.infoTagColor, string.Join(" | ", partsList.ToArray()));
+                    // Save the page results in static memory for the subsequent /track command selection
+                    lastSearchResults.Clear();
+                    lastSearchResults.AddRange(pageItems);
+
+                    // Build multi-line response
+                    var linesList = new List<string>();
+                    string header = $"Matches (Page {page}/{totalPages})";
+                    if (!string.IsNullOrEmpty(keyword))
+                    {
+                        header += $" for keyword: {FormatVariable(keyword)}";
+                    }
+                    linesList.Add(header);
+
+                    for (int i = 0; i < pageItems.Count; i++)
+                    {
+                        linesList.Add($"{i + 1}. {FormatVariable(pageItems[i].TrackName)} ({pageItems[i].Environment})");
+                    }
+
+                    SendTaggedLines("TRACKS", activeTheme.infoTagColor, linesList.ToArray());
                 }
                 catch (Exception ex)
                 {
-                    SendTaggedLines("TRACKS", activeTheme.infoTagColor, $"Error searching tracks: {ex.Message}");
+                    SendTaggedLines("TRACKS", activeTheme.infoTagColor, new string[] { $"Error searching tracks: {ex.Message}" });
                     UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error in /tracks: {ex}");
                 }
             }
