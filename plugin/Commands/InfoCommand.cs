@@ -28,7 +28,8 @@ namespace LiftoffAutoLobby
                 double remaining = Math.Max(0, rotationInterval - elapsed);
 
                 var lines = new System.Collections.Generic.List<string>();
-                lines.Add($"Playlist: {FormatVariable($"{currentPlaylist}")} | Interval: {FormatVariable($"{rotationInterval:F0}s")} | Next in: {FormatVariable($"{remaining:F0}s")} | Current: {FormatVariable($"{currentEnvironment} - {currentTrackName}")}");
+                lines.Add($"Current: {FormatVariable($"{currentEnvironment} - {currentTrackName}")} | Next in: {FormatVariable($"{remaining:F0}s")}");
+                lines.Add($"Playlist: {FormatVariable($"{currentPlaylist}")} | Interval: {FormatVariable($"{rotationInterval:F0}s")}");
 
                 bool isVisible; string roomName; int maxPlayers; int playerCount;
                 if (TryGetRoomInfo(out isVisible, out roomName, out maxPlayers, out playerCount))

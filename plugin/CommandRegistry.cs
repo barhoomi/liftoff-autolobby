@@ -35,6 +35,10 @@ namespace LiftoffAutoLobby
                 RegisterCommand(new InfoCommand());
                 RegisterCommand(new HistoryCommand());
                 RegisterCommand(new SkipCommand());
+                RegisterCommand(new PrevCommand());
+                RegisterCommand(new TracksCommand());
+                RegisterCommand(new TrackCommand());
+                RegisterCommand(new PromoteCommand());
                 RegisterCommand(new IntervalCommand());
                 RegisterCommand(new ExtendCommand());
                 RegisterCommand(new ShuffleCommand());

@@ -3865,6 +3865,7 @@ namespace LiftoffAutoLobby
                 else if (!isLocal && wasOwned)
                 {
                     UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Master client switched away from this bot — room is no longer bot-owned.");
+                    QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Master client switched away from this bot. This bot no longer owns the room — settings/rotation control disabled.");
                 }
             }
             catch (Exception ex)
