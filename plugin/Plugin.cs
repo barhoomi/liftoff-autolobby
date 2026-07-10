@@ -3272,27 +3272,43 @@ namespace LiftoffAutoLobby
                     if (localPlayerProp == null) return false;
                     object localPlayerObj = localPlayerProp.GetValue(null);
 
-                    // Find the custom player wrapper instances
-                    object targetCustomPlayer = GetCustomPlayerForPhotonPlayer(targetPlayerObj, customPlayerType, targetViewComponent);
-                    object localCustomPlayer = GetCustomPlayerForPhotonPlayer(localPlayerObj, customPlayerType, targetViewComponent);
+                    // Construct fresh custom player wrapper instances. Decompiling the wrapper type (via
+                    // `ilspycmd -t`) confirmed it is a stateless wrapper: its only constructor is
+                    // `public <Wrapper>(Photon.Realtime.Player player)`, which just stores the reference,
+                    // and every property (ActorNumber, NickName, IsLocal, IsMasterClient, CustomProperties,
+                    // PlayerPlatformInfo -> IsModerator, etc.) is computed live from that stored reference on
+                    // each access via a `GetCustomProperty<T>(key)` helper reading `player.CustomProperties`.
+                    // There is no persistent registry of "live" wrapper instances anywhere reachable from the
+                    // Room Controller (confirmed by a full-assembly reflection scan for any static/instance
+                    // field or property that is this type, or a collection of it) -- the previous
+                    // GetCustomPlayerForPhotonPlayer/ScanCollectionForCustomPlayer/MatchPlayerObject reflection
+                    // scan was searching for something that doesn't exist, which is why it always returned
+                    // null. Constructing fresh via the public ctor is both correct and simpler: RPCKicked's
+                    // own authorization check reads `senderWrapper.IsMasterClient` / `.PlatformInfo.IsModerator`,
+                    // both computed live from the wrapped Photon.Realtime.Player, so a freshly-built wrapper
+                    // around PhotonNetwork.LocalPlayer authorizes exactly the same as any "found" instance would.
+                    object targetCustomPlayer = null;
+                    object localCustomPlayer = null;
+                    try
+                    {
+                        targetCustomPlayer = Activator.CreateInstance(customPlayerType, targetPlayerObj);
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Kick failed: could not construct target Player wrapper: {ex}");
+                    }
+                    try
+                    {
+                        localCustomPlayer = Activator.CreateInstance(customPlayerType, localPlayerObj);
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Kick failed: could not construct local (bot) Player wrapper: {ex}");
+                    }
 
                     if (targetCustomPlayer == null || localCustomPlayer == null)
                     {
-                        UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Kick failed: Could not find custom Player wrapper. targetCustomPlayer: {targetCustomPlayer != null}, localCustomPlayer: {localCustomPlayer != null}");
-                        
-                        // Dump room controller fields to help diagnostics
-                        foreach (FieldInfo field in targetViewComponent.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                        {
-                            try
-                            {
-                                object val = field.GetValue(targetViewComponent);
-                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] FIELD: {field.Name} (Type: {field.FieldType.FullName}) = {val}");
-                            }
-                            catch (Exception e)
-                            {
-                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] FIELD: {field.Name} (Type: {field.FieldType.FullName}) = Error: {e.Message}");
-                            }
-                        }
+                        UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Kick failed: could not construct custom Player wrapper(s). targetCustomPlayer: {targetCustomPlayer != null}, localCustomPlayer: {localCustomPlayer != null}");
                         return false;
                     }
 
@@ -3334,190 +3350,6 @@ namespace LiftoffAutoLobby
                 UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Exception in KickPlayer: {ex}");
             }
             return false;
-        }
-
-        private static object GetCustomPlayerForPhotonPlayer(object targetPhotonPlayer, Type customPlayerType, object manager)
-        {
-            if (targetPhotonPlayer == null || customPlayerType == null || manager == null) return null;
-
-            int targetActorNumber = ((Photon.Realtime.Player)targetPhotonPlayer).ActorNumber;
-
-            // 1. Scan static fields of the customPlayerType (for dictionaries or lists of players)
-            foreach (FieldInfo field in customPlayerType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
-            {
-                try
-                {
-                    object val = field.GetValue(null);
-                    object found = ScanCollectionForCustomPlayer(val, customPlayerType, targetActorNumber);
-                    if (found != null) return found;
-                }
-                catch {}
-            }
-
-            // 2. Scan static properties of the customPlayerType
-            foreach (PropertyInfo prop in customPlayerType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
-            {
-                try
-                {
-                    object val = prop.GetValue(null, null);
-                    object found = ScanCollectionForCustomPlayer(val, customPlayerType, targetActorNumber);
-                    if (found != null) return found;
-                }
-                catch {}
-            }
-
-            // 3. Scan instance fields of the manager
-            foreach (FieldInfo field in manager.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                try
-                {
-                    object val = field.GetValue(manager);
-                    object found = ScanCollectionForCustomPlayer(val, customPlayerType, targetActorNumber);
-                    if (found != null) return found;
-                }
-                catch {}
-            }
-
-            // 4. Scan instance properties of the manager
-            foreach (PropertyInfo prop in manager.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                try
-                {
-                    object val = prop.GetValue(manager, null);
-                    object found = ScanCollectionForCustomPlayer(val, customPlayerType, targetActorNumber);
-                    if (found != null) return found;
-                }
-                catch {}
-            }
-
-            return null;
-        }
-
-        private static object ScanCollectionForCustomPlayer(object val, Type customPlayerType, int targetActorNumber)
-        {
-            if (val == null) return null;
-
-            // Handle IDictionary (e.g. Dictionary<Key, customPlayer>)
-            if (val is System.Collections.IDictionary dict)
-            {
-                foreach (object item in dict.Values)
-                {
-                    object found = MatchPlayerObject(item, customPlayerType, targetActorNumber);
-                    if (found != null) return found;
-                }
-            }
-            // Handle Array
-            else if (val.GetType().IsArray)
-            {
-                Array arr = (Array)val;
-                foreach (object item in arr)
-                {
-                    object found = MatchPlayerObject(item, customPlayerType, targetActorNumber);
-                    if (found != null) return found;
-                }
-            }
-            // Handle IEnumerable
-            else if (val is System.Collections.IEnumerable enumerable)
-            {
-                foreach (object item in enumerable)
-                {
-                    object found = MatchPlayerObject(item, customPlayerType, targetActorNumber);
-                    if (found != null) return found;
-                }
-            }
-
-            return null;
-        }
-
-        private static object MatchPlayerObject(object item, Type customPlayerType, int targetActorNumber)
-        {
-            if (item == null) return null;
-
-            // If the item itself is customPlayerType (or inherits from it), check its Photon player
-            if (customPlayerType.IsAssignableFrom(item.GetType()))
-            {
-                Photon.Realtime.Player pp = GetPhotonPlayerFromObject(item);
-                if (pp != null && pp.ActorNumber == targetActorNumber)
-                {
-                    return item;
-                }
-            }
-            else
-            {
-                // If the item is a different wrapper class, it might contain a property/field of customPlayerType!
-                foreach (PropertyInfo prop in item.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                {
-                    if (customPlayerType.IsAssignableFrom(prop.PropertyType))
-                    {
-                        try
-                        {
-                            object subPlayer = prop.GetValue(item, null);
-                            if (subPlayer != null)
-                            {
-                                Photon.Realtime.Player pp = GetPhotonPlayerFromObject(subPlayer);
-                                if (pp != null && pp.ActorNumber == targetActorNumber)
-                                {
-                                    return subPlayer;
-                                }
-                            }
-                        }
-                        catch {}
-                    }
-                }
-
-                foreach (FieldInfo field in item.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                {
-                    if (customPlayerType.IsAssignableFrom(field.FieldType))
-                    {
-                        try
-                        {
-                            object subPlayer = field.GetValue(item);
-                            if (subPlayer != null)
-                            {
-                                Photon.Realtime.Player pp = GetPhotonPlayerFromObject(subPlayer);
-                                if (pp != null && pp.ActorNumber == targetActorNumber)
-                                {
-                                    return subPlayer;
-                                }
-                            }
-                        }
-                        catch {}
-                    }
-                }
-            }
-
-            return null;
-        }
-
-        private static Photon.Realtime.Player GetPhotonPlayerFromObject(object obj)
-        {
-            if (obj == null) return null;
-
-            foreach (PropertyInfo prop in obj.GetType().GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                if (prop.PropertyType == typeof(Photon.Realtime.Player))
-                {
-                    try
-                    {
-                        return (Photon.Realtime.Player)prop.GetValue(obj, null);
-                    }
-                    catch {}
-                }
-            }
-
-            foreach (FieldInfo field in obj.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-            {
-                if (field.FieldType == typeof(Photon.Realtime.Player))
-                {
-                    try
-                    {
-                        return (Photon.Realtime.Player)field.GetValue(obj);
-                    }
-                    catch {}
-                }
-            }
-
-            return null;
         }
 
         private static void CancelMaintenance()
