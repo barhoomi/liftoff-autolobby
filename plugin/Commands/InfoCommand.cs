@@ -10,7 +10,7 @@ namespace LiftoffAutoLobby
         private class InfoCommand : IChatCommand
         {
             public string Name => "/info";
-            public string Description => "Show current playlist, rotation timer, next track and room info.";
+            public string Description => "Show current playlist, rotation timer, current track and room info.";
             public bool IsAdminOnly => false;
 
             public bool CanExecute(string userId, bool democracyEnabled, bool roomOwnedByBot) => true;
@@ -27,21 +27,19 @@ namespace LiftoffAutoLobby
                     ? (DateTime.Now - roomCreatedTime).TotalSeconds : 0;
                 double remaining = Math.Max(0, rotationInterval - elapsed);
 
-                string nextEnv, nextMode;
-                int trackIdx;
-                string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
-
-                string response = $"{FormatTag("INFO", activeTheme.infoTagColor)} Playlist: {FormatVariable($"{currentPlaylist}")} | Interval: {FormatVariable($"{rotationInterval:F0}s")} | Next in: {FormatVariable($"{remaining:F0}s")} | Next: {FormatVariable($"{nextEnv} - {nextTrackName}")} ";
-                SendChatMessage(response);
+                var lines = new System.Collections.Generic.List<string>();
+                lines.Add($"Current: {FormatVariable($"{currentEnvironment} - {currentTrackName}")} | Next in: {FormatVariable($"{remaining:F0}s")}");
+                lines.Add($"Playlist: {FormatVariable($"{currentPlaylist}")} | Interval: {FormatVariable($"{rotationInterval:F0}s")}");
 
                 bool isVisible; string roomName; int maxPlayers; int playerCount;
                 if (TryGetRoomInfo(out isVisible, out roomName, out maxPlayers, out playerCount))
                 {
                     string visibility = isVisible ? "public" : "private";
                     string ownership = roomOwnedByBot ? "bot-owned" : $"<color={activeTheme.alertTagColor}>NOT bot-owned — settings/rotation unavailable</color>";
-                    string roomInfo = $"{FormatTag("INFO", activeTheme.infoTagColor)} Room: {FormatVariable($"{roomName}")} | Visibility: {FormatVariable($"{visibility}")} | Players: {FormatVariable($"{playerCount}/{maxPlayers}")} | {ownership}";
-                    SendChatMessage(roomInfo);
+                    lines.Add($"Room: {FormatVariable($"{roomName}")} | Visibility: {FormatVariable($"{visibility}")} | Players: {FormatVariable($"{playerCount}/{maxPlayers}")} | {ownership}");
                 }
+
+                SendTaggedLines("INFO", activeTheme.infoTagColor, lines.ToArray());
             }
         }
     }

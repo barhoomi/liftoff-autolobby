@@ -33,7 +33,13 @@ namespace LiftoffAutoLobby
                 commands.Clear();
                 RegisterCommand(new HelpCommand());
                 RegisterCommand(new InfoCommand());
+                RegisterCommand(new HistoryCommand());
                 RegisterCommand(new SkipCommand());
+                RegisterCommand(new PrevCommand());
+                RegisterCommand(new TracksCommand());
+                RegisterCommand(new TrackCommand());
+                RegisterCommand(new PromoteCommand());
+                RegisterCommand(new PlayersCommand());
                 RegisterCommand(new IntervalCommand());
                 RegisterCommand(new ExtendCommand());
                 RegisterCommand(new ShuffleCommand());

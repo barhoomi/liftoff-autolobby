@@ -37,6 +37,8 @@ namespace LiftoffAutoLobby
             public string variableValueColor = "#00FF88";
             public string highlightTextColor = "#00FFFF";
             public string defaultTextColor = "#FFFFFF";
+            // Dim/muted color for the multi-line continuation marker (↳). See FormatContinuation.
+            public string mutedTextColor = "#888888";
         }
 
         private static ChatTheme activeTheme = new ChatTheme();
@@ -53,6 +55,16 @@ namespace LiftoffAutoLobby
         private static bool isSubmittingSettings = false;
         private static string targetTrackName = "";
         private static string targetEnvironment = "";
+        // The track/environment actually loaded in the room right now. Captured only at the moment
+        // the settings popup submit succeeds (see CaptureLoadedTrack) — NOT read live from
+        // targetTrackName, which during a rotation already points at the NEXT track before it has
+        // loaded. Read by /info. Placeholders keep the first /info (before any rotation) non-blank.
+        private static string currentTrackName = "starting up";
+        private static string currentEnvironment = "";
+        // Most-recently-played tracks (newest last), "{env} - {track}" display names, capped at 5.
+        // Appended at each submit-success point alongside currentTrackName; read by /history.
+        private static readonly List<string> trackHistory = new List<string>();
+        private const int TrackHistoryMax = 5;
         private static string targetGameMode = "";
         private static string targetLobbyName = "";
         private static bool isLeaving = false;
@@ -273,6 +285,7 @@ namespace LiftoffAutoLobby
                 parsed.variableValueColor = ValidateColor(parsed.variableValueColor, defaults.variableValueColor);
                 parsed.highlightTextColor = ValidateColor(parsed.highlightTextColor, defaults.highlightTextColor);
                 parsed.defaultTextColor = ValidateColor(parsed.defaultTextColor, defaults.defaultTextColor);
+                parsed.mutedTextColor = ValidateColor(parsed.mutedTextColor, defaults.mutedTextColor);
 
                 activeTheme = parsed;
                 UnityEngine.Debug.Log("[AutoLobbyPlugin] Loaded chat theme from chat_theme.json.");
@@ -311,6 +324,14 @@ namespace LiftoffAutoLobby
         private static string FormatHighlight(string text)
         {
             return $"<b><color={activeTheme.highlightTextColor}>{text}</color></b>";
+        }
+
+        // Continuation marker for multi-line bot messages: the tag ([INFO]/[ADMIN]/…) appears
+        // only on line 1; each subsequent line gets this dim ↳ marker instead of repeating the
+        // tag. Emits a fully balanced tag block so SplitMessage's tag tracking stays correct.
+        private static string FormatContinuation()
+        {
+            return $"<color={activeTheme.mutedTextColor}>  ↳</color> ";
         }
 
         private static void LoadUseLiftoffPro()
@@ -2264,7 +2285,8 @@ namespace LiftoffAutoLobby
                     popupSubmittedTime = DateTime.Now;
                     isSubmittingSettings = true;
                     activeBtn.onClick.Invoke();
-                    
+                    CaptureLoadedTrack();
+
                     // Reset room timer if we are in a room
                     GameObject gameRoomObj = GameObject.Find("GameRoom");
                     bool inRoom = (gameRoomObj != null && gameRoomObj.activeInHierarchy);
@@ -2295,6 +2317,7 @@ namespace LiftoffAutoLobby
                         popupSubmittedTime = DateTime.Now;
                         isSubmittingSettings = true;
                         updateBtn.onClick.Invoke();
+                        CaptureLoadedTrack();
                         roomCreatedTime = DateTime.Now; // Reset the rotation timer!
                         lastActivityTime = DateTime.UtcNow;
                         chatWarnedAboutNextRace = false;
@@ -2311,9 +2334,23 @@ namespace LiftoffAutoLobby
                         popupSubmittedTime = DateTime.Now;
                         isSubmittingSettings = true;
                         createBtn.onClick.Invoke();
+                        CaptureLoadedTrack();
                     }
                 }
             }
+        }
+
+        // Called at each settings-popup submit-success point (the same instant the track genuinely
+        // becomes the loaded one). Snapshots the just-submitted target as the CURRENT track for
+        // /info. (Track history is appended here too — see the /history slice.)
+        private static void CaptureLoadedTrack()
+        {
+            currentTrackName = targetTrackName;
+            currentEnvironment = targetEnvironment;
+
+            trackHistory.Add($"{targetEnvironment} - {targetTrackName}");
+            while (trackHistory.Count > TrackHistoryMax)
+                trackHistory.RemoveAt(0);
         }
 
         private static Type FindType(string fullName)
@@ -2536,6 +2573,29 @@ namespace LiftoffAutoLobby
                 result.Add(currentString);
             }
             return result;
+        }
+
+        // Sends a logically-single bot message that spans multiple chat lines: the tag block
+        // ([INFO]/[ADMIN]/…) appears only on the first line; every later line is prefixed with the
+        // dim ↳ continuation marker. Each line is routed through SendChatMessage individually so
+        // per-line SplitMessage safety is preserved. Null/empty lines are skipped gracefully.
+        private static void SendTaggedLines(string tagText, string tagColor, params string[] lines)
+        {
+            if (lines == null) return;
+            bool firstEmitted = false;
+            foreach (string line in lines)
+            {
+                if (string.IsNullOrEmpty(line)) continue;
+                if (!firstEmitted)
+                {
+                    SendChatMessage($"{FormatTag(tagText, tagColor)} {line}");
+                    firstEmitted = true;
+                }
+                else
+                {
+                    SendChatMessage($"{FormatContinuation()}{line}");
+                }
+            }
         }
 
         private static void SendChatMessage(string message)
@@ -3122,6 +3182,8 @@ namespace LiftoffAutoLobby
 
                 var matches = new List<object>();
                 var matchNames = new List<string>();
+                int targetActorId;
+                bool isNumericId = int.TryParse(targetName, out targetActorId);
 
                 for (int i = 0; i < playerArray.Length; i++)
                 {
@@ -3133,7 +3195,24 @@ namespace LiftoffAutoLobby
 
                     string nick = (string)nickProp.GetValue(playerObj, null) ?? "";
                     
-                    if (nick.IndexOf(targetName, StringComparison.OrdinalIgnoreCase) >= 0)
+                    bool isMatch = false;
+                    if (isNumericId)
+                    {
+                        PropertyInfo actorProp = playerObj.GetType().GetProperty("ActorNumber");
+                        if (actorProp != null && (int)actorProp.GetValue(playerObj, null) == targetActorId)
+                        {
+                            isMatch = true;
+                        }
+                    }
+                    else
+                    {
+                        if (nick.IndexOf(targetName, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            isMatch = true;
+                        }
+                    }
+
+                    if (isMatch)
                     {
                         PropertyInfo localProp = playerObj.GetType().GetProperty("IsLocal");
                         bool isLocal = false;
@@ -3151,21 +3230,114 @@ namespace LiftoffAutoLobby
                 }
                 if (matches.Count == 1)
                 {
-                    // PhotonNetwork.CloseConnection() is a silent no-op unless this flag is set —
-                    // it's off by default and the game never turns it on itself.
-                    FieldInfo enableCloseField = networkType.GetField("EnableCloseConnection", BindingFlags.Public | BindingFlags.Static);
-                    if (enableCloseField != null) enableCloseField.SetValue(null, true);
+                    object targetPlayerObj = matches[0];
+                    matchedName = matchNames[0];
 
-                    MethodInfo closeMethod = networkType.GetMethod("CloseConnection", BindingFlags.Public | BindingFlags.Static, null, new[] { matches[0].GetType() }, null);
-                    if (closeMethod != null)
+                    // Find the Room Controller component containing the RPCKicked method
+                    UnityEngine.Component targetViewComponent = null;
+                    Type customPlayerType = null;
+                    UnityEngine.Component[] allComponents = UnityEngine.Object.FindObjectsOfType<UnityEngine.Component>();
+                    foreach (var comp in allComponents)
                     {
-                        object result = closeMethod.Invoke(null, new[] { matches[0] });
-                        if (result is bool success && success)
+                        if (comp == null) continue;
+                        MethodInfo method = comp.GetType().GetMethod("RPCKicked", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (method != null)
                         {
-                            matchedName = matchNames[0];
-                            return true;
+                            ParameterInfo[] pars = method.GetParameters();
+                            if (pars.Length >= 2)
+                            {
+                                customPlayerType = pars[0].ParameterType;
+                                targetViewComponent = comp;
+                                break;
+                            }
                         }
                     }
+
+                    if (targetViewComponent == null || customPlayerType == null)
+                    {
+                        UnityEngine.Debug.LogError("[AutoLobbyPlugin] Kick failed: Could not find Room Controller with RPCKicked method.");
+                        return false;
+                    }
+
+                    // Find the PhotonView on the Room Controller GameObject
+                    UnityEngine.Component targetView = targetViewComponent.GetComponent("Photon.Pun.PhotonView") ?? targetViewComponent.GetComponent("PhotonView");
+                    if (targetView == null)
+                    {
+                        UnityEngine.Debug.LogError("[AutoLobbyPlugin] Kick failed: Could not find PhotonView on Room Controller.");
+                        return false;
+                    }
+
+                    // Get local player
+                    PropertyInfo localPlayerProp = networkType.GetProperty("LocalPlayer", BindingFlags.Public | BindingFlags.Static);
+                    if (localPlayerProp == null) return false;
+                    object localPlayerObj = localPlayerProp.GetValue(null);
+
+                    // Construct fresh custom player wrapper instances. Decompiling the wrapper type (via
+                    // `ilspycmd -t`) confirmed it is a stateless wrapper: its only constructor is
+                    // `public <Wrapper>(Photon.Realtime.Player player)`, which just stores the reference,
+                    // and every property (ActorNumber, NickName, IsLocal, IsMasterClient, CustomProperties,
+                    // PlayerPlatformInfo -> IsModerator, etc.) is computed live from that stored reference on
+                    // each access via a `GetCustomProperty<T>(key)` helper reading `player.CustomProperties`.
+                    // There is no persistent registry of "live" wrapper instances anywhere reachable from the
+                    // Room Controller (confirmed by a full-assembly reflection scan for any static/instance
+                    // field or property that is this type, or a collection of it) -- the previous
+                    // GetCustomPlayerForPhotonPlayer/ScanCollectionForCustomPlayer/MatchPlayerObject reflection
+                    // scan was searching for something that doesn't exist, which is why it always returned
+                    // null. Constructing fresh via the public ctor is both correct and simpler: RPCKicked's
+                    // own authorization check reads `senderWrapper.IsMasterClient` / `.PlatformInfo.IsModerator`,
+                    // both computed live from the wrapped Photon.Realtime.Player, so a freshly-built wrapper
+                    // around PhotonNetwork.LocalPlayer authorizes exactly the same as any "found" instance would.
+                    object targetCustomPlayer = null;
+                    object localCustomPlayer = null;
+                    try
+                    {
+                        targetCustomPlayer = Activator.CreateInstance(customPlayerType, targetPlayerObj);
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Kick failed: could not construct target Player wrapper: {ex}");
+                    }
+                    try
+                    {
+                        localCustomPlayer = Activator.CreateInstance(customPlayerType, localPlayerObj);
+                    }
+                    catch (Exception ex)
+                    {
+                        UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Kick failed: could not construct local (bot) Player wrapper: {ex}");
+                    }
+
+                    if (targetCustomPlayer == null || localCustomPlayer == null)
+                    {
+                        UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Kick failed: could not construct custom Player wrapper(s). targetCustomPlayer: {targetCustomPlayer != null}, localCustomPlayer: {localCustomPlayer != null}");
+                        return false;
+                    }
+
+                    // Call targetView.RpcSecure("RPCKicked", RpcTarget.All, true, targetCustomPlayer, localCustomPlayer)
+                    Type rpcTargetType = Type.GetType("Photon.Pun.RpcTarget, PhotonUnityNetworking") ?? Type.GetType("RpcTarget, Assembly-CSharp");
+                    if (rpcTargetType == null) return false;
+                    object rpcTargetAll = Enum.ToObject(rpcTargetType, 0); // 0 corresponds to RpcTarget.All
+
+                    MethodInfo rpcSecureMethod = targetView.GetType().GetMethod("RpcSecure", 
+                        BindingFlags.Public | BindingFlags.Instance, 
+                        null, 
+                        new[] { typeof(string), rpcTargetType, typeof(bool), typeof(object[]) }, 
+                        null);
+
+                    if (rpcSecureMethod == null)
+                    {
+                        UnityEngine.Debug.LogError("[AutoLobbyPlugin] Kick failed: RpcSecure method not found on PhotonView.");
+                        return false;
+                    }
+
+                    object[] rpcParams = new object[] {
+                        "RPCKicked",
+                        rpcTargetAll,
+                        true, // encrypt
+                        new object[] { targetCustomPlayer, localCustomPlayer }
+                    };
+
+                    rpcSecureMethod.Invoke(targetView, rpcParams);
+                    return true;
                 }
                 else
                 {
@@ -3805,6 +3977,7 @@ namespace LiftoffAutoLobby
                 else if (!isLocal && wasOwned)
                 {
                     UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Master client switched away from this bot — room is no longer bot-owned.");
+                    QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Master client switched away from this bot. This bot no longer owns the room — settings/rotation control disabled.");
                 }
             }
             catch (Exception ex)
