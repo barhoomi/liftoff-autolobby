@@ -23,19 +23,23 @@ BP_URL="https://github.com/BepInEx/BepInEx/releases/download/v5.4.22/$BP_ZIP"
 
 if [ ! -f "/tmp/$BP_ZIP" ]; then
     echo "[Installer] Downloading BepInEx Unix..."
-    curl -L "$BP_URL" -o "/tmp/$BP_ZIP"
+    curl -fL "$BP_URL" -o "/tmp/$BP_ZIP"
 fi
 
 echo "[Installer] Extracting BepInEx to game folder..."
 unzip -o "/tmp/$BP_ZIP" -d "$LIFTOFF_DIR"
 
-# 2. Download UnityExplorer for BepInEx 5 Mono v4.9.0
+# 2. Download UnityExplorer for BepInEx 5 Mono 4.9.0
+# Note: GitHub's release tag for this repo is "4.9.0" (no "v" prefix) -- unlike BepInEx's
+# own tags above. Using "v4.9.0" here silently 404s; curl without -f then happily writes
+# GitHub's 9-byte "Not Found" response body to the .zip path as if it had succeeded, and
+# the failure only surfaces later, confusingly, as an unzip error.
 UE_ZIP="UnityExplorer.BepInEx5.Mono.zip"
-UE_URL="https://github.com/sinai-dev/UnityExplorer/releases/download/v4.9.0/$UE_ZIP"
+UE_URL="https://github.com/sinai-dev/UnityExplorer/releases/download/4.9.0/$UE_ZIP"
 
 if [ ! -f "/tmp/$UE_ZIP" ]; then
     echo "[Installer] Downloading UnityExplorer..."
-    curl -L "$UE_URL" -o "/tmp/$UE_ZIP"
+    curl -fL "$UE_URL" -o "/tmp/$UE_ZIP"
 fi
 
 echo "[Installer] Extracting UnityExplorer to game folder..."
