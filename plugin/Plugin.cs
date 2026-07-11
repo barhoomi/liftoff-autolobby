@@ -3636,11 +3636,96 @@ namespace LiftoffAutoLobby
                 {
                     UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Photon callbacks patching failed: {ex.Message}");
                 }
+
+                // Patch the multiplayer waiting-room panel's OnEnable to neutralize Liftoff's
+                // real inactivity-kick watchdog. Decompile findings (docs/features/doing/
+                // inactivity-kick-prevention.md, "Root Cause Found" section): the waiting-room
+                // panel runs a coroutine that counts down from `hostInactivityMinutes * 60`
+                // seconds and ONLY resets that countdown when a private Rewired-input singleton
+                // reports GetAnyButtonDown() == true on the local player — i.e. a real physical
+                // input edge event. It never reads chat sends (SendUserMessage/RPCs) at all, so
+                // the plugin's Pro Tip broadcasts (HandleKeepAlive) cannot reset it — the bot has
+                // no real input device, so GetAnyButtonDown() is always false for it and the
+                // countdown reaches zero, triggering the kick/scene-reload path.
+                // The countdown coroutine only reads hostInactivityMinutes once, at the moment it
+                // starts (inside OnEnable, synchronously, since Unity runs a coroutine up to its
+                // first `yield` in the same call that starts it) — so overwriting the field is
+                // only effective if done via a Prefix that runs before the original OnEnable body.
+                // No chat-message- or RPC-based reset path exists in the decompiled coroutine, so
+                // there's no non-input "authoritative call" analogous to RPCKicked for /kick;
+                // this reflection-set of a private serialized field (not input simulation) is the
+                // legitimate fix given what's actually in the game code.
+                try
+                {
+                    Type waitingRoomPanelType = asm.GetTypes().FirstOrDefault(t =>
+                        t.GetFields(BindingFlags.NonPublic | BindingFlags.Instance)
+                         .Any(f => f.Name == "hostInactivityMinutes" && f.FieldType == typeof(int)));
+
+                    if (waitingRoomPanelType != null)
+                    {
+                        MethodInfo onEnableMethod = waitingRoomPanelType.GetMethod("OnEnable", BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (onEnableMethod != null)
+                        {
+                            var harmony = new HarmonyLib.Harmony("com.lugus.liftoff.autolobby.inactivitywatchdog");
+                            var prefixMethod = typeof(AutoLobbyPlugin).GetMethod("InactivityWatchdogPrefix", BindingFlags.NonPublic | BindingFlags.Static);
+                            if (prefixMethod != null)
+                            {
+                                harmony.Patch(onEnableMethod, prefix: new HarmonyLib.HarmonyMethod(prefixMethod));
+                                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Inactivity watchdog patch applied to {waitingRoomPanelType.FullName}::OnEnable.");
+                            }
+                            else
+                            {
+                                UnityEngine.Debug.LogError("[AutoLobbyPlugin] InactivityWatchdogPrefix method not found.");
+                            }
+                        }
+                        else
+                        {
+                            UnityEngine.Debug.LogError("[AutoLobbyPlugin] Waiting room panel found but its OnEnable method could not be located.");
+                        }
+                    }
+                    else
+                    {
+                        UnityEngine.Debug.LogError("[AutoLobbyPlugin] Could not find waiting room panel type (searched for a field named 'hostInactivityMinutes'). Inactivity-kick prevention will NOT work this session.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Inactivity watchdog patching failed: {ex.Message}");
+                }
             }
             catch (Exception ex)
             {
                 UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Harmony patching failed: {ex}");
             }
+        }
+
+        // Effectively-infinite override for the waiting room panel's private
+        // `hostInactivityMinutes` field (24 hours — comfortably longer than any bot session
+        // between restarts). See the long comment above where this is patched in for why a
+        // field override, not a fake input event, is the correct fix here.
+        private const int InactivityWatchdogOverrideMinutes = 1440;
+
+        private static bool InactivityWatchdogPrefix(object __instance)
+        {
+            try
+            {
+                FieldInfo field = __instance.GetType().GetField("hostInactivityMinutes", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field != null)
+                {
+                    field.SetValue(__instance, InactivityWatchdogOverrideMinutes);
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Overrode hostInactivityMinutes to {InactivityWatchdogOverrideMinutes} before OnEnable starts the AFK countdown coroutine (bot has no real input device to satisfy the real watchdog).");
+                }
+                else
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] hostInactivityMinutes field not found on waiting room panel instance; AFK watchdog NOT overridden this activation.");
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error overriding hostInactivityMinutes: {ex}");
+            }
+            return true; // Let the original OnEnable run; it reads the field synchronously
+                         // when it starts the AFK coroutine, so it will pick up our override.
         }
 
         private static bool ValidationPrefix(object __instance, object[] __args, ref bool __result)
