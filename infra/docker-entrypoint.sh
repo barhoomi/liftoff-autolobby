@@ -14,6 +14,13 @@
 # `exec` into the orchestrator so it becomes the container's foreground process.
 set -euo pipefail
 
+# The `steamcmd` and `steam-installer` apt packages install their binaries under
+# /usr/games (Debian convention for games). That directory is only on PATH for
+# interactive login shells (via /etc/profile) -- not for this script's exec context,
+# nor for `docker run --entrypoint steamcmd ...`. Add it explicitly so the bare
+# `steamcmd` (below) and `steam` (later, for the graphical client) invocations resolve.
+export PATH="/usr/games:$PATH"
+
 log()   { echo "[entrypoint] $*"; }
 err()   { echo "[entrypoint] ERROR: $*" >&2; }
 fatal() { err "$*"; exit 1; }
@@ -115,21 +122,22 @@ with open(path, "w") as f:
     json.dump(data, f, indent=4)
 PYEOF
 
-# ---------- Steam auth cache check (fail loud, never hang on a credential prompt) -------
-LOGINUSERS_CANDIDATES=(
-    "$STEAM_DIR/.steam/steam/config/loginusers.vdf"
-    "$STEAM_DIR/.local/share/Steam/config/loginusers.vdf"
-)
-have_cached_login=0
-for f in "${LOGINUSERS_CANDIDATES[@]}"; do
-    [[ -f "$f" ]] && have_cached_login=1 && break
-done
-if [[ "$have_cached_login" -eq 0 ]]; then
+# ---------- steamcmd install/update ----------
+# No separate "is a login cached?" pre-check: an earlier version of this script looked for
+# loginusers.vdf under $STEAM_DIR/.steam/... or $STEAM_DIR/.local/share/Steam/..., but this
+# Debian steamcmd package never writes that file at all -- its login state lives in
+# $STEAM_DIR/Steam/config/config.vdf (loginusers.vdf is written by the *graphical* Steam
+# client, which hasn't run yet at this point in the script). Caught live: the pre-check
+# always reported "no cached login" even right after a successful prime. Rather than chase
+# the right path/format for a second, redundant check, treat the real `steamcmd +login`
+# call below as the single source of truth for whether credentials are cached (AGENTS.md
+# rule 4) -- it already runs under `timeout` with `+@NoPromptForPassword 1` (so a missing/
+# expired login fails fast instead of hanging on a prompt with no TTY attached) and already
+# classifies the failure below.
+print_priming_instructions() {
     cat >&2 <<EOF
 
 ================================================================================
-FATAL: No cached Steam login found under $STEAM_DIR.
-
 Liftoff is a paid game -- steamcmd/Steam cannot authenticate anonymously. A
 human must prime the credential cache ONCE, interactively (Steam Guard code
 entry included), against this exact volume before the container can run
@@ -138,25 +146,20 @@ unattended:
     docker run -it --rm \\
         -v <same steam volume>:/steam \\
         -u botuser -e HOME=/steam \\
-        --entrypoint steamcmd \\
+        --entrypoint /usr/games/steamcmd \\
         <this image> \\
         +force_install_dir $LIFTOFF_INSTALL_DIR +login $STEAM_ACCOUNT +quit
 
 Enter the password and Steam Guard code when prompted, then 'quit'. This only
 needs to be done once (or again after the token expires/is revoked) --
-subsequent container starts reuse the cached session under
-$STEAM_DIR/.steam/... (shared by steamcmd and the full graphical Steam client
-started later in this script; both need it).
-
-Exiting now rather than hanging on a credential prompt with no TTY attached.
+subsequent container starts reuse the cached session under $STEAM_DIR/Steam/...
+(shared by steamcmd and the full graphical Steam client started later in this
+script; both need it).
 ================================================================================
 
 EOF
-    exit 1
-fi
-log "Cached Steam login found under $STEAM_DIR."
+}
 
-# ---------- steamcmd install/update ----------
 log "Running steamcmd install/update for app $LIFTOFF_APP_ID -> $LIFTOFF_INSTALL_DIR (timeout ${STEAMCMD_TIMEOUT}s)..."
 set +e
 STEAMCMD_OUT="$(timeout "$STEAMCMD_TIMEOUT" steamcmd \
@@ -170,9 +173,11 @@ set -e
 echo "$STEAMCMD_OUT" | tail -n 60
 
 if [[ $STEAMCMD_STATUS -eq 124 ]]; then
+    print_priming_instructions
     fatal "steamcmd timed out after ${STEAMCMD_TIMEOUT}s -- almost certainly stuck on an interactive prompt (expired/invalid cached token, a new-device Steam Guard re-check, or a rate limit). Re-prime credentials as shown above. Not retrying automatically -- fix this before restarting the container."
 elif [[ $STEAMCMD_STATUS -ne 0 ]]; then
     if echo "$STEAMCMD_OUT" | grep -qiE "Invalid Password|Login Failure|Two-factor|Steam Guard|Access Denied|InvalidSignature|Rate Limit"; then
+        print_priming_instructions
         fatal "steamcmd login failed -- the cached Steam token has expired, was revoked, or needs re-verification (see steamcmd output above). Re-prime credentials as shown above. Not retrying automatically."
     fi
     fatal "steamcmd exited with status $STEAMCMD_STATUS (see output above). Not retrying automatically."

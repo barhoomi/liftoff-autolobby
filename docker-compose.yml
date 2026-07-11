@@ -8,8 +8,9 @@
 #   docker compose up
 #
 # One-time credential priming (see docs/features/doing/docker-container.md):
-#   docker compose run --rm -it -u botuser -e HOME=/steam --entrypoint steamcmd bot \
+#   docker compose run --rm -it -u botuser -e HOME=/steam --entrypoint /usr/games/steamcmd bot \
 #       +force_install_dir /steam/Liftoff +login <STEAM_ACCOUNT> +quit
+#   (full path needed: /usr/games isn't on PATH outside an interactive login shell)
 services:
   bot:
     build: .
