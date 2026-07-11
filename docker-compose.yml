@@ -1,0 +1,36 @@
+# Convenience wrapper around `docker build` / `docker run` for local operation. Not part
+# of the feature spec's acceptance criteria (which targets plain `docker run --env-file`),
+# but the volumes/env plumbing is identical either way -- use whichever you prefer.
+#
+# Usage:
+#   cp .env.example .env   # fill in STEAM_ACCOUNT etc.
+#   docker compose build
+#   docker compose up
+#
+# One-time credential priming (see docs/features/doing/docker-container.md):
+#   docker compose run --rm -it -u botuser -e HOME=/steam --entrypoint steamcmd bot \
+#       +force_install_dir /steam/Liftoff +login <STEAM_ACCOUNT> +quit
+services:
+  bot:
+    build: .
+    image: procedural-fpv-bot:local
+    env_file:
+      - .env
+    volumes:
+      - steam_data:/steam
+      - bot_logs:/logs
+      - bot_config:/config
+    # Xvfb/Steam/Liftoff need real shared memory, not Docker's tiny 64MB default.
+    shm_size: "1gb"
+    # Deliberately NOT "unless-stopped"/"always": an expired/invalid Steam token is a
+    # *fatal, human-actionable* condition (see docker-entrypoint.sh's auth-cache check and
+    # steamcmd-failure handling) -- auto-restarting on top of that would turn one loud,
+    # clear error into a silent crash loop, which the feature spec explicitly calls out to
+    # avoid. Once credentials are primed and steady-state operation is verified, operators
+    # may reasonably switch this to `on-failure:3` or similar.
+    restart: "no"
+
+volumes:
+  steam_data:
+  bot_logs:
+  bot_config:
