@@ -297,18 +297,34 @@ fi
 log "Starting graphical Steam client (silent, under Xvfb + dbus)..."
 dbus-run-session -- steam -silent &
 
+# Found live (2026-07-12): checking only that a steamwebhelper/steam process EXISTS is not
+# the right readiness signal. steamwebhelper spawns within seconds of `steam -silent`
+# starting, but on a first-ever cold boot Steam still has real first-run work left to do
+# (its own client self-update, config generation, and -- critically -- creating the
+# ~/.steam/{root,steam,sdk32,sdk64} symlink chain the game's Steamworks.NET wrapper resolves
+# steamclient.so through). Declaring "ready" before that finishes let the game launch race
+# ahead and fail with `SteamAPI_Init(): Failed to load module '.../sdk64/steamclient.so'`
+# (permanently stuck on SplashScreen -- the same failure MODE as the documented
+# steamid=0 black-screen bug, but a different CAUSE: the symlink/file didn't exist yet,
+# not "not signed in"). Wait for the actual file the game needs to load instead of a process
+# existence check. This can legitimately take a while on a first cold boot (observed
+# well over the old 120s budget in this environment) -- configurable via STEAM_READY_TIMEOUT.
+STEAM_READY_TIMEOUT="${STEAM_READY_TIMEOUT:-600}"
+STEAMCLIENT_SO="$STEAM_DIR/.steam/sdk64/steamclient.so"
 STEAM_READY=0
-for i in $(seq 1 60); do
-    if pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1; then
+SECONDS_WAITED=0
+while [[ "$SECONDS_WAITED" -lt "$STEAM_READY_TIMEOUT" ]]; do
+    if [[ -e "$STEAMCLIENT_SO" ]] && pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1; then
         STEAM_READY=1
         break
     fi
-    sleep 2
+    sleep 5
+    SECONDS_WAITED=$((SECONDS_WAITED + 5))
 done
 if [[ "$STEAM_READY" -ne 1 ]]; then
-    fatal "Steam client did not come up within 120s. Check for an expired/invalid cached session (see the auth-cache error above) or a Steam Guard re-verification prompt blocking on the (nonexistent) display."
+    fatal "Steam client did not become ready within ${STEAM_READY_TIMEOUT}s ($STEAMCLIENT_SO never appeared, or the Steam process exited). Check for an expired/invalid cached session (see the auth-cache error above) or a Steam Guard re-verification prompt blocking on the (nonexistent) display -- or increase STEAM_READY_TIMEOUT if this is just a slow first cold boot."
 fi
-log "Steam client is running."
+log "Steam readiness confirmed: $STEAMCLIENT_SO exists after ${SECONDS_WAITED}s."
 
 # ---------- hand off to the orchestrator ----------
 SHUFFLE_FLAG=""; [[ "${SHUFFLE,,}" == "true" ]] && SHUFFLE_FLAG="--shuffle"
