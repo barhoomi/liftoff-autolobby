@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         steam-installer \
         xvfb \
         x11-utils \
+        x11vnc \
         dbus-x11 \
         libgl1 libglu1-mesa \
         lib32gcc-s1 lib32stdc++6 \
@@ -73,6 +74,12 @@ VOLUME ["/steam", "/logs", "/config"]
 # Placeholder for the future dashboard mentioned in the feature spec; nothing listens here
 # yet -- see docs/features/todo (or backlog) for that work.
 EXPOSE 8080
+
+# x11vnc on the Xvfb display -- required ONCE per /steam volume for the graphical Steam
+# client's interactive login (steamcmd's cached token is machine-scoped and cannot log the
+# graphical client in; see docker-entrypoint.sh), and useful any time for watching the
+# game render. docker-compose.yml binds it to 127.0.0.1 on the host only.
+EXPOSE 5900
 
 ENV STEAM_DIR=/steam \
     LOG_DIR=/logs \

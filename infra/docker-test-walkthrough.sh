@@ -110,11 +110,21 @@ echo "This starts steamcmd's game install/update, BepInEx install, the plugin bu
 echo "the graphical Steam client under Xvfb, and finally the orchestrator — in that order."
 echo "First run downloads the full game, so this can take a while depending on bandwidth."
 echo
+echo "ONE MORE one-time manual step happens during this stage: the graphical Steam"
+echo "client keeps its OWN login (steamcmd's cached token can't log it in). On the"
+echo "first boot of a fresh steam_data volume the entrypoint pauses, prints a banner,"
+echo "and waits for you to:"
+echo "  - connect a VNC viewer to localhost:5900  (e.g. 'vncviewer localhost:5900',"
+echo "    or Remmina/TigerVNC — anything that speaks VNC)"
+echo "  - log in to Steam in that window (password + Steam Guard, keep 'Remember me')"
+echo "The container then continues on its own, and future starts skip this entirely."
+echo
 echo "Watch the logs for these milestones, in order:"
 echo "  1. steamcmd +app_update 410340 completing (no timeout/auth-failure message)"
 echo "  2. BepInEx install succeeding"
 echo "  3. dotnet build succeeding against the real install"
-echo "  4. Steam client reaching a ready state under Xvfb"
+echo "  4. Steam client ready: logged in (loginusers.vdf) + steamclient.so present"
+echo "     (first boot: do the VNC login described above when the banner appears)"
 echo "  5. Game launching with SteamAPI_Init succeeding (NOT a steamid=0 black-screen)"
 echo "  6. The orchestrator/plugin reaching a working lobby state"
 echo

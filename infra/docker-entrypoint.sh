@@ -287,6 +287,15 @@ if ! kill -0 "$XVFB_PID" 2>/dev/null; then
     fatal "Xvfb failed to start on display $DISPLAY_NUM."
 fi
 
+# ---------- x11vnc (one-time interactive Steam login + observation) ----------
+# No password (-nopw) is acceptable ONLY because docker-compose.yml binds the host side to
+# 127.0.0.1 -- see docs/features/backlog/docker-steam-sandbox-hardening.md for the broader
+# hardening pass.
+log "Starting x11vnc on $DISPLAY_NUM (host: connect a VNC viewer to localhost:5900)..."
+if ! x11vnc -display "$DISPLAY_NUM" -forever -shared -nopw -quiet -bg -o /tmp/x11vnc.log; then
+    err "x11vnc failed to start (see /tmp/x11vnc.log) -- continuing, but the display won't be observable and a first-time Steam login cannot be performed."
+fi
+
 # ---------- graphical Steam client ----------
 # The game binary calls SteamAPI_Init, which talks to a *running, logged-in Steam client*
 # process over a local IPC pipe -- steamcmd (above) is a separate, short-lived content
@@ -294,37 +303,111 @@ fi
 # (run_bot.sh starts `dbus-run-session /usr/games/steam`, not steamcmd, before launching
 # the game) and the documented "steamid=0 -> SteamAPI_Init False" black-screen failure
 # mode when Steam isn't signed in. See the feature doc's "Spec conflict" section.
-log "Starting graphical Steam client (silent, under Xvfb + dbus)..."
-dbus-run-session -- steam -silent &
+# Steam's Linux compat layer (Pressure Vessel/bubblewrap) needs container privileges Docker
+# doesn't grant by default -- see docker-compose.yml's cap_add/security_opt comments for the
+# escalating bwrap failures found live 2026-07-12 (namespace creation -> mount-slave
+# propagation -> pivot_root). STEAM_RUNTIME=0 was tried as a way to skip the sandbox
+# entirely but made things worse: steam.sh's own steam-runtime-check-requirements script
+# runs regardless of that variable, and on failure prints an interactive "Press enter to
+# continue:" prompt that hangs forever with no TTY attached (worse than the errors-but-
+# continues behavior without it). Reverted -- fixing this via docker-compose.yml's
+# cap_add/security_opt instead.
+#
+# LOGIN STATE (found live 2026-07-12): the graphical client's login is SEPARATE from
+# steamcmd's. The steamcmd prime caches a token under $STEAM_DIR/Steam/config/config.vdf,
+# but that token is machine-scoped (JWT aud:["machine"] + an encrypted ConnectCache blob)
+# and the graphical client cannot use it -- it keeps its own refresh token, recorded in
+# $STEAM_DIR/.steam/debian-installation/config/loginusers.vdf after a successful UI login.
+# Without that, the client runs logged OUT (every steamwebhelper carries -steamid=0, the
+# connection log shows [U:1:0]) and the game's SteamAPI_Init() returns False forever even
+# though IsSteamRunning()=True and steamclient.so loads fine. So: a human must log in
+# through the client's own UI once, via the x11vnc session started above; the client's
+# token then persists in the /steam volume and later boots auto-login silently.
+STEAM_CLIENT_ROOT="$STEAM_DIR/.steam/debian-installation"
+LOGINUSERS_VDF="$STEAM_CLIENT_ROOT/config/loginusers.vdf"
+client_logged_in() {
+    [[ -f "$LOGINUSERS_VDF" ]] && grep -q '"AccountName"' "$LOGINUSERS_VDF"
+}
 
-# Found live (2026-07-12): checking only that a steamwebhelper/steam process EXISTS is not
-# the right readiness signal. steamwebhelper spawns within seconds of `steam -silent`
-# starting, but on a first-ever cold boot Steam still has real first-run work left to do
-# (its own client self-update, config generation, and -- critically -- creating the
-# ~/.steam/{root,steam,sdk32,sdk64} symlink chain the game's Steamworks.NET wrapper resolves
-# steamclient.so through). Declaring "ready" before that finishes let the game launch race
-# ahead and fail with `SteamAPI_Init(): Failed to load module '.../sdk64/steamclient.so'`
-# (permanently stuck on SplashScreen -- the same failure MODE as the documented
-# steamid=0 black-screen bug, but a different CAUSE: the symlink/file didn't exist yet,
-# not "not signed in"). Wait for the actual file the game needs to load instead of a process
-# existence check. This can legitimately take a while on a first cold boot (observed
-# well over the old 120s budget in this environment) -- configurable via STEAM_READY_TIMEOUT.
+if client_logged_in; then
+    log "Graphical Steam client has a cached login ($LOGINUSERS_VDF) -- starting silent."
+    STEAM_LOGIN_PENDING=0
+    dbus-run-session -- steam -silent &
+else
+    STEAM_LOGIN_PENDING=1
+    cat >&2 <<EOF
+
+================================================================================
+The graphical Steam client in this /steam volume has never been logged in.
+(The steamcmd credential prime is NOT enough -- its token is machine-scoped and
+the graphical client cannot use it.) ONE-TIME manual step:
+
+    1. On the host, connect a VNC viewer to  localhost:5900
+       (e.g.  vncviewer localhost:5900  , or Remmina -> VNC).
+    2. Log in to Steam as '$STEAM_ACCOUNT' in the window that appears
+       (password + Steam Guard). LEAVE "Remember me" ENABLED so the token
+       is cached.
+    3. That's it -- this script waits (default 30 min; STEAM_LOGIN_TIMEOUT to
+       change) and continues automatically once the login lands. Future
+       container starts skip this step (the token persists in the volume).
+================================================================================
+
+EOF
+    log "Starting graphical Steam client WITH visible login window (no -silent)..."
+    dbus-run-session -- steam &
+fi
+
+# Readiness = ALL of: (a) the steamclient.so the game will dlopen exists (on a first-ever
+# cold boot Steam's self-update/first-run setup takes minutes before the
+# ~/.steam/{sdk32,sdk64} symlink chain exists -- a process-existence check alone raced this
+# and the game died with "Failed to load module '.../sdk64/steamclient.so'"), (b) a Steam
+# process is alive, and (c) the client is LOGGED IN (loginusers.vdf has an account) -- a
+# running-but-logged-out client loads steamclient.so fine yet SteamAPI_Init() still returns
+# False (steamid=0), stuck on SplashScreen forever. All three found live 2026-07-12 as
+# three distinct failures with the same visible symptom.
 STEAM_READY_TIMEOUT="${STEAM_READY_TIMEOUT:-600}"
+STEAM_LOGIN_TIMEOUT="${STEAM_LOGIN_TIMEOUT:-1800}"
+# When a human still has to VNC in and type a password, give them the longer budget.
+WAIT_BUDGET="$STEAM_READY_TIMEOUT"
+[[ "$STEAM_LOGIN_PENDING" -eq 1 ]] && WAIT_BUDGET="$STEAM_LOGIN_TIMEOUT"
 STEAMCLIENT_SO="$STEAM_DIR/.steam/sdk64/steamclient.so"
 STEAM_READY=0
 SECONDS_WAITED=0
-while [[ "$SECONDS_WAITED" -lt "$STEAM_READY_TIMEOUT" ]]; do
-    if [[ -e "$STEAMCLIENT_SO" ]] && pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1; then
+while [[ "$SECONDS_WAITED" -lt "$WAIT_BUDGET" ]]; do
+    if [[ -e "$STEAMCLIENT_SO" ]] && pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1 && client_logged_in; then
         STEAM_READY=1
         break
+    fi
+    if [[ "$STEAM_LOGIN_PENDING" -eq 1 && $((SECONDS_WAITED % 60)) -eq 0 && "$SECONDS_WAITED" -gt 0 ]]; then
+        log "Still waiting for the one-time Steam login via VNC (localhost:5900)... ${SECONDS_WAITED}s/${WAIT_BUDGET}s"
     fi
     sleep 5
     SECONDS_WAITED=$((SECONDS_WAITED + 5))
 done
 if [[ "$STEAM_READY" -ne 1 ]]; then
-    fatal "Steam client did not become ready within ${STEAM_READY_TIMEOUT}s ($STEAMCLIENT_SO never appeared, or the Steam process exited). Check for an expired/invalid cached session (see the auth-cache error above) or a Steam Guard re-verification prompt blocking on the (nonexistent) display -- or increase STEAM_READY_TIMEOUT if this is just a slow first cold boot."
+    if [[ "$STEAM_LOGIN_PENDING" -eq 1 ]]; then
+        fatal "No Steam login landed within ${WAIT_BUDGET}s. Connect a VNC viewer to localhost:5900 and log in as '$STEAM_ACCOUNT' (see the banner above), then restart the container -- or raise STEAM_LOGIN_TIMEOUT if you just need more time."
+    fi
+    fatal "Steam client did not become ready within ${WAIT_BUDGET}s ($STEAMCLIENT_SO missing, Steam process gone, or the cached login vanished from $LOGINUSERS_VDF). Check for an expired/revoked session -- log in again via VNC (localhost:5900) if so -- or increase STEAM_READY_TIMEOUT if this is just a slow cold boot."
 fi
-log "Steam readiness confirmed: $STEAMCLIENT_SO exists after ${SECONDS_WAITED}s."
+log "Steam readiness confirmed after ${SECONDS_WAITED}s: steamclient.so present, client process alive, login recorded in loginusers.vdf."
+# Logged in just now via the UI? Give the client a moment to finish post-login init
+# (friends/IPC services settle) before the game tries SteamAPI_Init against it.
+[[ "$STEAM_LOGIN_PENDING" -eq 1 ]] && { log "Fresh interactive login detected -- settling 15s before game launch."; sleep 15; }
+
+# ---------- AppID identification for direct launch ----------
+# The game is launched directly (run_bepinex.sh), not through the Steam client UI, and the
+# steamcmd-managed install lives outside the client's own steamapps library -- so
+# SteamAPI_Init cannot resolve which app is calling and fails even with a live, logged-in
+# Steam client (found live 2026-07-12: IsSteamRunning()=True, steamclient.so loads OK, yet
+# Init() returns False; the host setup never hits this because there the game IS installed
+# in the client's own library). Standard Steamworks fix for direct launches: provide the
+# AppID via the SteamAppId env var (inherited by the game process; cwd-independent) plus a
+# steam_appid.txt next to the binary as a fallback for anyone launching it by hand.
+export SteamAppId="$LIFTOFF_APP_ID"
+export SteamGameId="$LIFTOFF_APP_ID"
+echo "$LIFTOFF_APP_ID" > "$LIFTOFF_INSTALL_DIR/steam_appid.txt"
+log "Set SteamAppId=$LIFTOFF_APP_ID and wrote steam_appid.txt for direct game launch."
 
 # ---------- hand off to the orchestrator ----------
 SHUFFLE_FLAG=""; [[ "${SHUFFLE,,}" == "true" ]] && SHUFFLE_FLAG="--shuffle"
