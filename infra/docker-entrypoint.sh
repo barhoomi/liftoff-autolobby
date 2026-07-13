@@ -325,11 +325,36 @@ fi
 # token then persists in the /steam volume and later boots auto-login silently.
 STEAM_CLIENT_ROOT="$STEAM_DIR/.steam/debian-installation"
 LOGINUSERS_VDF="$STEAM_CLIENT_ROOT/config/loginusers.vdf"
-client_logged_in() {
+CONNECTION_LOG="$STEAM_CLIENT_ROOT/logs/connection_log.txt"
+
+# Does the volume hold a cached client login to even attempt? (loginusers.vdf with an
+# account.) This decides silent auto-login vs. a visible login window -- it is NOT proof
+# the login still works: the token can be revoked server-side and this file stays behind.
+client_has_cached_login() {
     [[ -f "$LOGINUSERS_VDF" ]] && grep -q '"AccountName"' "$LOGINUSERS_VDF"
 }
 
-if client_logged_in; then
+# Is the client ACTUALLY authenticated to Steam right now? A running steamwebhelper carries
+# -steamid=<N>; N==0 means logged OUT (bug eight), N>0 means a live authenticated session.
+# This is the signal the readiness gate must key on -- loginusers.vdf existence fooled the
+# gate on 2026-07-13 when a steamcmd password re-prime revoked the client's separate token
+# ("Access Denied", see below) yet left the file behind, so the gate passed on a dead token
+# and raced the game into a permanent SplashScreen SteamAPI_Init failure.
+client_authenticated() {
+    pgrep -af -- '-steamid=' 2>/dev/null | grep -qE -- '-steamid=[1-9][0-9]*'
+}
+
+# Did the client's cached-token auto-login get REJECTED server-side (revoked, not expired)?
+# Signature: "Access Denied" / "Do not reconnect" in the connection log -- the client gives
+# up and will not self-recover. Distinct from a slow cold boot (still logging in). Tail-only
+# so a stale denial from a much-earlier boot doesn't dominate; used to pick the right fatal
+# message, and (silent path only) to fail fast instead of burning the whole timeout.
+client_auth_revoked() {
+    [[ -f "$CONNECTION_LOG" ]] && tail -n 40 "$CONNECTION_LOG" 2>/dev/null \
+        | grep -qE 'Access Denied|Do not reconnect'
+}
+
+if client_has_cached_login; then
     log "Graphical Steam client has a cached login ($LOGINUSERS_VDF) -- starting silent."
     STEAM_LOGIN_PENDING=0
     dbus-run-session -- steam -silent &
@@ -361,10 +386,15 @@ fi
 # cold boot Steam's self-update/first-run setup takes minutes before the
 # ~/.steam/{sdk32,sdk64} symlink chain exists -- a process-existence check alone raced this
 # and the game died with "Failed to load module '.../sdk64/steamclient.so'"), (b) a Steam
-# process is alive, and (c) the client is LOGGED IN (loginusers.vdf has an account) -- a
-# running-but-logged-out client loads steamclient.so fine yet SteamAPI_Init() still returns
-# False (steamid=0), stuck on SplashScreen forever. All three found live 2026-07-12 as
-# three distinct failures with the same visible symptom.
+# process is alive, and (c) the client is ACTUALLY AUTHENTICATED this session
+# (client_authenticated: steamwebhelper -steamid != 0). A running-but-logged-out client
+# loads steamclient.so fine yet SteamAPI_Init() still returns False (steamid=0), stuck on
+# SplashScreen forever. Condition (c) originally checked only loginusers.vdf existence, but
+# that persists across a revoked token: on 2026-07-13 a steamcmd re-prime revoked the
+# client's session token server-side, the file stayed, the gate passed on a dead login, and
+# the game black-screened -- so (c) now requires a live non-zero steamid, not just the file.
+# Each gate condition here was added after a boot that satisfied all prior ones yet still
+# wasn't truly ready (bug four: process alive; bug eight: file present; this: really logged in).
 STEAM_READY_TIMEOUT="${STEAM_READY_TIMEOUT:-600}"
 STEAM_LOGIN_TIMEOUT="${STEAM_LOGIN_TIMEOUT:-1800}"
 # When a human still has to VNC in and type a password, give them the longer budget.
@@ -374,8 +404,15 @@ STEAMCLIENT_SO="$STEAM_DIR/.steam/sdk64/steamclient.so"
 STEAM_READY=0
 SECONDS_WAITED=0
 while [[ "$SECONDS_WAITED" -lt "$WAIT_BUDGET" ]]; do
-    if [[ -e "$STEAMCLIENT_SO" ]] && pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1 && client_logged_in; then
+    if [[ -e "$STEAMCLIENT_SO" ]] && pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1 && client_authenticated; then
         STEAM_READY=1
+        break
+    fi
+    # Silent auto-login path only: if the cached token was rejected server-side it will not
+    # self-recover ("Do not reconnect") -- fail fast rather than burn the whole timeout.
+    # Never on the human-login path, where a stale denial could pre-empt a login being typed.
+    if [[ "$STEAM_LOGIN_PENDING" -eq 0 ]] && ! client_authenticated && client_auth_revoked; then
+        log "Cached Steam client token was rejected server-side (Access Denied) -- aborting the readiness wait early; it will not self-recover."
         break
     fi
     if [[ "$STEAM_LOGIN_PENDING" -eq 1 && $((SECONDS_WAITED % 60)) -eq 0 && "$SECONDS_WAITED" -gt 0 ]]; then
@@ -388,9 +425,12 @@ if [[ "$STEAM_READY" -ne 1 ]]; then
     if [[ "$STEAM_LOGIN_PENDING" -eq 1 ]]; then
         fatal "No Steam login landed within ${WAIT_BUDGET}s. Connect a VNC viewer to localhost:5900 and log in as '$STEAM_ACCOUNT' (see the banner above), then restart the container -- or raise STEAM_LOGIN_TIMEOUT if you just need more time."
     fi
-    fatal "Steam client did not become ready within ${WAIT_BUDGET}s ($STEAMCLIENT_SO missing, Steam process gone, or the cached login vanished from $LOGINUSERS_VDF). Check for an expired/revoked session -- log in again via VNC (localhost:5900) if so -- or increase STEAM_READY_TIMEOUT if this is just a slow cold boot."
+    if client_auth_revoked && ! client_authenticated; then
+        fatal "Graphical Steam client auto-login was REJECTED server-side ('Access Denied' in $CONNECTION_LOG): the cached client session token was REVOKED (this is NOT a time-expiry -- the JWT can still be years from expiring). This typically happens after a steamcmd password re-prime, which rotates the account credential and invalidates the graphical client's SEPARATE session token. The client will not self-recover. Remediation: connect a VNC viewer to localhost:5900, log in to Steam as '$STEAM_ACCOUNT' (password + Steam Guard) with 'Remember me' ENABLED, then restart the container so a fresh game process runs SteamAPI_Init against the now-logged-in client."
+    fi
+    fatal "Steam client did not become ready within ${WAIT_BUDGET}s ($STEAMCLIENT_SO missing, Steam process gone, or the client never authenticated this session -- steamwebhelper still -steamid=0). If the cached token was revoked, log in again via VNC (localhost:5900) with 'Remember me' on; otherwise increase STEAM_READY_TIMEOUT if this is just a slow cold boot."
 fi
-log "Steam readiness confirmed after ${SECONDS_WAITED}s: steamclient.so present, client process alive, login recorded in loginusers.vdf."
+log "Steam readiness confirmed after ${SECONDS_WAITED}s: steamclient.so present, client process alive, client authenticated (steamwebhelper -steamid != 0)."
 # Logged in just now via the UI? Give the client a moment to finish post-login init
 # (friends/IPC services settle) before the game tries SteamAPI_Init against it.
 [[ "$STEAM_LOGIN_PENDING" -eq 1 ]] && { log "Fresh interactive login detected -- settling 15s before game launch."; sleep 15; }
