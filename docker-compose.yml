@@ -11,6 +11,13 @@
 #   docker compose run --rm -it -u botuser -e HOME=/steam --entrypoint /usr/games/steamcmd bot \
 #       +force_install_dir /steam/Liftoff +login <STEAM_ACCOUNT> +quit
 #   (full path needed: /usr/games isn't on PATH outside an interactive login shell)
+#
+# Admin chat commands (docs/features/doing/container-seed-admin-ids.md): set ADMIN_IDS in
+# .env (simplest -- see .env.example), OR mount your own admin_ids.txt into the bot_config
+# volume at /config/admin_ids.txt (uncomment a bind mount below, or `docker compose cp`
+# it into the volume once); ADMIN_IDS takes precedence when both are present. Leaving both
+# unset is not an error -- it reproduces the plugin's existing fail-closed default (no
+# admins) until you configure one of them.
 services:
   bot:
     build: .
@@ -21,6 +28,10 @@ services:
       - steam_data:/steam
       - bot_logs:/logs
       - bot_config:/config
+      # Optional alternative to the ADMIN_IDS env var (see .env.example and
+      # docs/features/doing/container-seed-admin-ids.md): bind-mount a local admin_ids.txt
+      # (one Photon user ID per line, '#' comments allowed) instead of using the env var.
+      # - ./admin_ids.txt:/config/admin_ids.txt:ro
     # Xvfb/Steam/Liftoff need real shared memory, not Docker's tiny 64MB default.
     shm_size: "1gb"
     # x11vnc on the container's Xvfb display. Needed ONCE per fresh /steam volume: the

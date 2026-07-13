@@ -223,6 +223,48 @@ if [[ -f "$PROJECT_DIR/bot_nickname.txt" ]]; then
     cp "$PROJECT_DIR/bot_nickname.txt" "$LIFTOFF_INSTALL_DIR/BepInEx/plugins/bot_nickname.txt"
 fi
 
+# ---------- admin IDs (server-mode chat command authorization) ----------
+# LoadAdminIds() in Plugin.cs (plugin/Plugin.cs:212) reads BepInEx/plugins/admin_ids.txt --
+# one Photon user ID per line, blank lines and '#'-prefixed comment lines ignored -- and
+# treats a missing/empty file as "no admins configured" (a deliberate fail-closed default,
+# not a bug: see plugin/Plugin.cs:232's IsAdmin()). This container never wrote that file at
+# all, so every admin-only chat command (/interval, /kick, ...) silently no-oped for every
+# user, including the operator -- see docs/features/doing/container-seed-admin-ids.md.
+#
+# Two operator-facing mechanisms, tried in this precedence order (same env-over-mounted-file
+# shape as resolve_log_dir()'s env-over-config chain, docs/features/done/structured-logging.md):
+#   1. ADMIN_IDS env var -- comma and/or newline separated Photon user IDs. .env-friendly,
+#      matches how the rest of this script's config arrives via docker-compose.yml's
+#      env_file: .env.
+#   2. A file mounted at $CONFIG_DIR/admin_ids.txt (e.g. bind-mount your own admin_ids.txt to
+#      /config/admin_ids.txt:ro) -- copied through verbatim so the host's comment header /
+#      one-per-line format (see the feature doc's evidence section) works unchanged.
+# Regenerated every boot (idempotent overwrite, matching the Pro-credentials sync below) so
+# this script is the single source of truth for the destination file (AGENTS.md rule 4) --
+# no stale admin list can survive an operator changing/clearing the config. An empty/unset
+# ADMIN_IDS with no mounted file is NOT an error: it reproduces today's fail-closed default
+# (no admin_ids.txt -> no admins) and is logged loudly so this doesn't require docker exec
+# spelunking to notice again.
+ADMIN_IDS_DEST="$LIFTOFF_INSTALL_DIR/BepInEx/plugins/admin_ids.txt"
+if [[ -n "${ADMIN_IDS:-}" ]]; then
+    : > "$ADMIN_IDS_DEST"
+    ADMIN_ID_COUNT=0
+    while IFS= read -r id; do
+        id="$(echo -n "$id" | tr -d '[:space:]')"
+        [[ -z "$id" ]] && continue
+        echo "$id" >> "$ADMIN_IDS_DEST"
+        ADMIN_ID_COUNT=$((ADMIN_ID_COUNT + 1))
+    done < <(echo "$ADMIN_IDS" | tr ',' '\n')
+    log "Seeded $ADMIN_ID_COUNT admin ID(s) into admin_ids.txt from \$ADMIN_IDS."
+elif [[ -f "$CONFIG_DIR/admin_ids.txt" ]]; then
+    cp "$CONFIG_DIR/admin_ids.txt" "$ADMIN_IDS_DEST"
+    MOUNTED_COUNT="$(grep -vcE '^[[:space:]]*(#|$)' "$CONFIG_DIR/admin_ids.txt" || true)"
+    log "Seeded admin_ids.txt from mounted $CONFIG_DIR/admin_ids.txt ($MOUNTED_COUNT admin ID(s))."
+else
+    rm -f "$ADMIN_IDS_DEST"
+    log "WARNING: no ADMIN_IDS env var set and no $CONFIG_DIR/admin_ids.txt mounted -- admin_ids.txt NOT written. Fail-closed: admin-only chat commands (/interval, /kick, ...) will no-op for everyone, including the operator, until one is configured. Set ADMIN_IDS in .env (comma-separated Photon user IDs) or mount a file at $CONFIG_DIR/admin_ids.txt."
+fi
+
 # ---------- build the plugin against THIS install's Managed DLLs ----------
 # LiftoffPath is overridable via an MSBuild global property (-p:) without any csproj
 # change -- confirmed by testing that a bogus override changes which Managed DLL paths
