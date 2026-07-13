@@ -172,17 +172,43 @@ STEAMCMD_STATUS=$?
 set -e
 echo "$STEAMCMD_OUT" | tail -n 60
 
+# Degraded-mode boot (see docker-container.md "Eleventh incident"): the steamcmd token and
+# the graphical client's token live in separate stores that MUTUALLY INVALIDATE each other
+# -- re-priming one revokes the other, so sequential manual priming can never get both
+# valid at once. steamcmd's token is only needed to install/update the game; the game
+# itself only needs the graphical client's token (checked much later, at the readiness
+# gate) for SteamAPI_Init. So a dead steamcmd token should not be fatal when a usable
+# install already exists -- fail loud, skip the update check for this boot, and continue.
+# Still hard-fail with no install: there is nothing to run in that case.
+usable_install_present() {
+    [[ -x "$LIFTOFF_INSTALL_DIR/Liftoff.x86_64" ]]
+}
+
 if [[ $STEAMCMD_STATUS -eq 124 ]]; then
-    print_priming_instructions
-    fatal "steamcmd timed out after ${STEAMCMD_TIMEOUT}s -- almost certainly stuck on an interactive prompt (expired/invalid cached token, a new-device Steam Guard re-check, or a rate limit). Re-prime credentials as shown above. Not retrying automatically -- fix this before restarting the container."
+    if usable_install_present; then
+        log "WARNING: DEGRADED BOOT -- steamcmd timed out after ${STEAMCMD_TIMEOUT}s (likely stuck on an interactive prompt: expired/invalid cached token, a new-device Steam Guard re-check, or a rate limit); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Re-prime steamcmd credentials soon -- see the priming instructions below -- so this boot doesn't run a version-drifted game client indefinitely."
+        print_priming_instructions
+    else
+        print_priming_instructions
+        fatal "steamcmd timed out after ${STEAMCMD_TIMEOUT}s -- almost certainly stuck on an interactive prompt (expired/invalid cached token, a new-device Steam Guard re-check, or a rate limit), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Re-prime credentials as shown above. Not retrying automatically -- fix this before restarting the container."
+    fi
 elif [[ $STEAMCMD_STATUS -ne 0 ]]; then
     if echo "$STEAMCMD_OUT" | grep -qiE "Invalid Password|Login Failure|Two-factor|Steam Guard|Access Denied|InvalidSignature|Rate Limit"; then
-        print_priming_instructions
-        fatal "steamcmd login failed -- the cached Steam token has expired, was revoked, or needs re-verification (see steamcmd output above). Re-prime credentials as shown above. Not retrying automatically."
+        if usable_install_present; then
+            log "WARNING: DEGRADED BOOT -- steamcmd auth failed (cached token expired, revoked, or needs re-verification; see steamcmd output above); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Re-prime steamcmd credentials soon -- see the priming instructions below -- so this boot doesn't run a version-drifted game client indefinitely."
+            print_priming_instructions
+        else
+            print_priming_instructions
+            fatal "steamcmd login failed -- the cached Steam token has expired, was revoked, or needs re-verification (see steamcmd output above), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Re-prime credentials as shown above. Not retrying automatically."
+        fi
+    elif usable_install_present; then
+        log "WARNING: DEGRADED BOOT -- steamcmd exited with status $STEAMCMD_STATUS (see output above); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Investigate the steamcmd failure soon so this boot doesn't run a version-drifted game client indefinitely."
+    else
+        fatal "steamcmd exited with status $STEAMCMD_STATUS (see output above), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Not retrying automatically."
     fi
-    fatal "steamcmd exited with status $STEAMCMD_STATUS (see output above). Not retrying automatically."
+else
+    log "steamcmd install/update complete."
 fi
-log "steamcmd install/update complete."
 
 # ---------- BepInEx ----------
 if [[ ! -d "$LIFTOFF_INSTALL_DIR/BepInEx/core" ]]; then
