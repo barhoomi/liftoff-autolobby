@@ -127,6 +127,14 @@ namespace LiftoffAutoLobby
         private static HashSet<string> adminIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static bool skipRequested = false;
         private static bool shuffleMode = false;
+
+        // Democracy mode (democracy-skip.md): when enabled, /skip becomes a public majority
+        // vote instead of admin-only. skipVotes holds the unique Photon User IDs of players
+        // who have voted to skip the current track; cleared on new track load, scene change,
+        // and room create/enter (see CaptureLoadedTrack, the scene-change block in
+        // OnWillRenderCanvases/Update, and PhotonContainerPrefix's OnCreatedRoom/OnJoinedRoom).
+        private static bool democracyEnabled = false;
+        private static HashSet<string> skipVotes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static System.Random rng = new System.Random();
         private static bool maintenanceActive = false;
         private static DateTime maintenanceTime = DateTime.MaxValue;
@@ -178,6 +186,10 @@ namespace LiftoffAutoLobby
                 // Load initial shuffle mode
                 shuffleMode = GetShuffleMode();
                 Logger.LogInfo($"[AutoLobbyPlugin] Loaded initial shuffleMode: {shuffleMode}");
+
+                // Load initial democracy mode (democracy-skip.md)
+                democracyEnabled = GetDemocracyMode();
+                Logger.LogInfo($"[AutoLobbyPlugin] Loaded initial democracyEnabled: {democracyEnabled}");
 
                 // Register all chat commands with the command registry (replaces the old
                 // hardcoded HandleChatCommand switch).
@@ -635,6 +647,8 @@ namespace LiftoffAutoLobby
                 lastInRoomTime = DateTime.MinValue;
                 sceneObjectsDumped = false;
                 lastMenuStateDumpTime = DateTime.MinValue;
+                // democracy-skip.md: any scene change invalidates in-flight skip votes.
+                skipVotes.Clear();
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Scene changed to: {sceneName}");
                 LogEvent("scene_change", ("scene", sceneName));
                 // Structured JSON file event (A3): from/to per the canonical schema. The very
@@ -1614,6 +1628,11 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            // democracy-skip.md: prune skip votes from players who left the room, then
+            // re-evaluate the majority (a departure can lower the required threshold enough
+            // for the remaining votes to now win). No-ops when democracy mode is off.
+            SkipCommand.CheckDisconnectedVoters();
+
             double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
             ProcessClientScript(elapsed);
 
@@ -2351,6 +2370,10 @@ namespace LiftoffAutoLobby
             trackHistory.Add($"{targetEnvironment} - {targetTrackName}");
             while (trackHistory.Count > TrackHistoryMax)
                 trackHistory.RemoveAt(0);
+
+            // democracy-skip.md: a new track just loaded — stale skip votes from the
+            // previous track must not carry over.
+            skipVotes.Clear();
         }
 
         private static Type FindType(string fullName)
@@ -3104,6 +3127,23 @@ namespace LiftoffAutoLobby
             return false; // Default: false
         }
 
+        // democracy-skip.md: whether /skip is a public majority vote (true) or admin-only
+        // (false). Mirrors GetShuffleMode()'s file-read pattern exactly.
+        private static bool GetDemocracyMode()
+        {
+            try
+            {
+                string democracyModePath = Path.Combine(pluginPath, "democracy_mode.txt");
+                if (File.Exists(democracyModePath))
+                {
+                    string content = File.ReadAllText(democracyModePath).Trim();
+                    return content.Equals("true", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch {}
+            return false; // Default: democracy off, /skip stays admin-only
+        }
+
         private static string GetOverrideGameMode()
         {
             try
@@ -3802,6 +3842,8 @@ namespace LiftoffAutoLobby
                 else if (methodName == "OnCreatedRoom")
                 {
                     roomOwnedByBot = true;
+                    // democracy-skip.md: a freshly created room starts with no skip votes.
+                    skipVotes.Clear();
                     if (pendingPrivateRoomRename)
                     {
                         UnityEngine.Debug.Log("[AutoLobbyPlugin] Private room rename: new room created successfully.");
@@ -3816,6 +3858,8 @@ namespace LiftoffAutoLobby
                 {
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Joined an existing room by name instead of creating one — bot does not own this room.");
                     roomOwnedByBot = false;
+                    // democracy-skip.md: entering a (different) room starts with no skip votes.
+                    skipVotes.Clear();
                     QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} A room named '{FormatVariable($"{pendingPrivateRoomName}")}' already existed — joined it instead of creating a new one. <color={activeTheme.alertTagColor}><i>This bot is not the room owner and cannot control settings/rotation here.</i></color> Current host: please transfer host to this bot from the player list so it can control settings/rotation, or use /private with a different name to have the bot create its own room instead.");
                     pendingPrivateRoomRename = false;
                     pendingPrivateRoomRenameStartTime = DateTime.MinValue;

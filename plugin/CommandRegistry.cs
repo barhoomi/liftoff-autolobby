@@ -51,6 +51,7 @@ namespace LiftoffAutoLobby
                 RegisterCommand(new PublicCommand());
                 RegisterCommand(new MaxPlayersCommand());
                 RegisterCommand(new ReloadThemeCommand());
+                RegisterCommand(new DemocracyCommand());
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] CommandRegistry initialized with {commands.Count} command(s).");
             }
 
@@ -86,10 +87,24 @@ namespace LiftoffAutoLobby
                         return;
                     }
 
-                    // Everything else is admin-only. Silently ignore non-admins to prevent probing.
+                    // Everything else is admin-only by default. Non-admins are silently
+                    // ignored to prevent probing, UNLESS the command's own CanExecute opts
+                    // them in under the current democracy state (e.g. /skip becomes a public
+                    // vote when democracy mode is on — see democracy-skip.md). This is the
+                    // only place a non-admin's CanExecute is consulted; every other
+                    // admin-only command's CanExecute still gates on IsAdmin(userId)
+                    // internally, so this is a no-op for them (identical to the old
+                    // silently-ignored behavior).
                     if (!IsAdmin(userId))
                     {
-                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Ignoring command '{cmd}' from non-admin {userName} ({userId})");
+                        if (command != null && command.CanExecute(userId, democracyEnabled, roomOwnedByBot))
+                        {
+                            command.Execute(userName, userId, arg);
+                        }
+                        else
+                        {
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Ignoring command '{cmd}' from non-admin {userName} ({userId})");
+                        }
                         return;
                     }
 
@@ -105,8 +120,7 @@ namespace LiftoffAutoLobby
                     // Single permission gate. The user is already a confirmed admin here, so a
                     // CanExecute failure means the command's room-ownership requirement is unmet;
                     // reproduce the old pre-switch "this bot does not own the room" refusal.
-                    // (democracyEnabled is false today — democracy-skip will wire it in Phase 3.)
-                    if (!command.CanExecute(userId, /* democracyEnabled */ false, roomOwnedByBot))
+                    if (!command.CanExecute(userId, democracyEnabled, roomOwnedByBot))
                     {
                         SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} <color={activeTheme.alertTagColor}>'{cmd}' cannot be executed — this bot does not own the room.</color> Transfer host to the bot from the player list, or use /private <name> to have it create/join a different room.");
                         UnityEngine.Debug.Log($"[AutoLobbyPlugin] Refusing '{cmd}' from {userName} — bot does not own the room.");

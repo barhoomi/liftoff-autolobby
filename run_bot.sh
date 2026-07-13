@@ -9,6 +9,7 @@
 #   --interval SECONDS   Track rotation interval (default: 90)
 #   --shuffle            Randomize playlist order
 #   --public             Make the lobby public
+#   --democracy          Enable democracy mode (public /skip majority voting)
 #   --headless           Use Xvfb virtual display instead of GUI
 #   --gui                Force GUI mode (override config files)
 #   --no-build           Skip build/sync step (faster restart)
@@ -22,6 +23,7 @@ PLAYLIST="all_official_races"
 INTERVAL=90
 SHUFFLE=0
 PUBLIC=0
+DEMOCRACY=0
 HEADLESS=0
 BUILD=1
 WIDTH=640
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --interval)  INTERVAL="$2"; shift 2 ;;
         --shuffle)   SHUFFLE=1; shift ;;
         --public)    PUBLIC=1; shift ;;
+        --democracy) DEMOCRACY=1; shift ;;
         --headless)  HEADLESS=1; shift ;;
         --gui)       HEADLESS=0; shift ;;
         --no-build)  BUILD=0; shift ;;
@@ -84,6 +87,7 @@ echo "  Playlist:  $PLAYLIST"
 echo "  Interval:  ${INTERVAL}s"
 [[ $SHUFFLE -eq 1 ]]  && echo "  Shuffle:   yes"
 [[ $PUBLIC -eq 1 ]]   && echo "  Public:    yes"
+[[ $DEMOCRACY -eq 1 ]] && echo "  Democracy: yes"
 [[ $HEADLESS -eq 1 ]] && echo "  Display:   headless (Xvfb)" || echo "  Display:   GUI (:0)"
 echo "  Resolution: ${WIDTH}x${HEIGHT}"
 echo ""
@@ -103,6 +107,9 @@ SHUFFLE_FLAG=""
 PUBLIC_FLAG=""
 [[ $PUBLIC -eq 1 ]] && PUBLIC_FLAG="--public"
 
+DEMOCRACY_FLAG=""
+[[ $DEMOCRACY -eq 1 ]] && DEMOCRACY_FLAG="--democracy"
+
 sudo -u fpv_bot -H env "$DISPLAY_ENV" XDG_RUNTIME_DIR=/run/user/1003 bash -c "
     cd '$BOT_PROJECT' &&
     python3 orchestrator/run_headless_lobby.py \
@@ -110,5 +117,5 @@ sudo -u fpv_bot -H env "$DISPLAY_ENV" XDG_RUNTIME_DIR=/run/user/1003 bash -c "
         --interval '$INTERVAL' \
         --width '$WIDTH' \
         --height '$HEIGHT' \
-        $GUI_FLAG $SHUFFLE_FLAG $PUBLIC_FLAG
+        $GUI_FLAG $SHUFFLE_FLAG $PUBLIC_FLAG $DEMOCRACY_FLAG
 "
