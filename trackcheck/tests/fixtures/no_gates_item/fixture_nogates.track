@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Track xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <gameVersion>1.6.17</gameVersion>
+  <localID>
+    <str>fixture_nogates</str>
+    <version>1</version>
+    <type>TRACK</type>
+  </localID>
+  <managedID>
+    <str>215642242</str>
+    <version>1</version>
+    <type>TRACK</type>
+  </managedID>
+  <name>Fixture No Gates Track</name>
+  <description>Procedurally generated map by Antigravity</description>
+  <dependencies />
+  <environment>TheDrawingBoard</environment>
+  <blueprints>
+    <TrackBlueprint xsi:type="TrackBlueprintFlag">
+      <itemID>SpawnPointSingle01</itemID>
+      <instanceID>1</instanceID>
+      <position>
+        <x>32.155859</x>
+        <y>0.100000</y>
+        <z>-7.992001</z>
+      </position>
+      <rotation>
+        <x>0.000000</x>
+        <y>358.376804</y>
+        <z>0.000000</z>
+      </rotation>
+      <purpose>Functional</purpose>
+    </TrackBlueprint>
+  </blueprints>
+  <lastTrackItemID>1</lastTrackItemID>
+  <hideDefaultSpawnpoint>false</hideDefaultSpawnpoint>
+</Track>

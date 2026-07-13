@@ -1,0 +1,22 @@
+{
+  "The Drawing Board": {
+    "official": {
+      "01 - The Biggest Yet": []
+    },
+    "workshop": {
+      "[Honk] Backtrack": ["Honk Backtrack Race"],
+      "[Honk] Canyon Race v3 3 Laps": []
+    },
+    "local": {
+      "My Local Test Track": []
+    }
+  },
+  "The Green": {
+    "official": {
+      "01 - Par For The Course": [],
+      "03 - Club House": []
+    },
+    "workshop": {},
+    "local": {}
+  }
+}

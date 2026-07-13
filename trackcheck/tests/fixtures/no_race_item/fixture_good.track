@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Track xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <gameVersion>1.6.17</gameVersion>
+  <localID>
+    <str>fixture_good</str>
+    <version>1</version>
+    <type>TRACK</type>
+  </localID>
+  <managedID>
+    <str>156224985</str>
+    <version>1</version>
+    <type>TRACK</type>
+  </managedID>
+  <name>Fixture Good Track</name>
+  <description>Procedurally generated map by Antigravity</description>
+  <dependencies />
+  <environment>TheDrawingBoard</environment>
+  <blueprints>
+    <TrackBlueprint xsi:type="TrackBlueprintFlag">
+      <itemID>SpawnPointSingle01</itemID>
+      <instanceID>1</instanceID>
+      <position>
+        <x>32.155859</x>
+        <y>0.100000</y>
+        <z>-7.992001</z>
+      </position>
+      <rotation>
+        <x>0.000000</x>
+        <y>358.376804</y>
+        <z>0.000000</z>
+      </rotation>
+      <purpose>Functional</purpose>
+    </TrackBlueprint>
+    <TrackBlueprint xsi:type="TrackBlueprintFlag">
+      <itemID>OctagonGate200x200cmGeneric01</itemID>
+      <instanceID>2</instanceID>
+      <position>
+        <x>31.929384</x>
+        <y>6.289115</y>
+        <z>0.000000</z>
+      </position>
+      <rotation>
+        <x>1.983003</x>
+        <y>358.376804</y>
+        <z>0.000000</z>
+      </rotation>
+      <purpose>Functional</purpose>
+    </TrackBlueprint>
+    <TrackBlueprint xsi:type="TrackBlueprintFlag">
+      <itemID>OctagonGate200x200cmGeneric01</itemID>
+      <instanceID>3</instanceID>
+      <position>
+        <x>4.042109</x>
+        <y>8.270393</y>
+        <z>23.660860</z>
+      </position>
+      <rotation>
+        <x>2.392108</x>
+        <y>298.393306</y>
+        <z>0.000000</z>
+      </rotation>
+      <purpose>Functional</purpose>
+    </TrackBlueprint>
+    <TrackBlueprint xsi:type="TrackBlueprintFlag">
+      <itemID>OctagonGate200x200cmGeneric01</itemID>
+      <instanceID>4</instanceID>
+      <position>
+        <x>-28.763786</x>
+        <y>8.361739</y>
+        <z>17.687327</z>
+      </position>
+      <rotation>
+        <x>-4.114715</x>
+        <y>220.472242</y>
+        <z>0.000000</z>
+      </rotation>
+      <purpose>Functional</purpose>
+    </TrackBlueprint>
+    <TrackBlueprint xsi:type="TrackBlueprintFlag">
+      <itemID>OctagonGate200x200cmGeneric01</itemID>
+      <instanceID>5</instanceID>
+      <position>
+        <x>-27.955172</x>
+        <y>8.182208</y>
+        <z>-14.523793</z>
+      </position>
+      <rotation>
+        <x>5.055292</x>
+        <y>131.503393</y>
+        <z>0.000000</z>
+      </rotation>
+      <purpose>Functional</purpose>
+    </TrackBlueprint>
+    <TrackBlueprint xsi:type="TrackBlueprintFlag">
+      <itemID>OctagonGate200x200cmGeneric01</itemID>
+      <instanceID>6</instanceID>
+      <position>
+        <x>5.636097</x>
+        <y>9.403953</y>
+        <z>-24.293511</z>
+      </position>
+      <rotation>
+        <x>-6.492832</x>
+        <y>73.324107</y>
+        <z>0.000000</z>
+      </rotation>
+      <purpose>Functional</purpose>
+    </TrackBlueprint>
+  </blueprints>
+  <lastTrackItemID>6</lastTrackItemID>
+  <hideDefaultSpawnpoint>false</hideDefaultSpawnpoint>
+</Track>
