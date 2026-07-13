@@ -1,4 +1,15 @@
 {
+  "invntn_skills": [
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 1*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 2*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 3*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 4*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 5*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 6*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 7*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 8*", "mode": "Infinite Race"},
+    {"environment": "The Drawing Board", "track": "*[invntn_]*Part 9*", "mode": "Infinite Race"}
+  ],
   "honk_test": [
     {"environment": "The Drawing Board", "track": "*Honk*Backtrack*", "mode": "Infinite Race"},
     {"environment": "The Drawing Board", "track": "*Honk*Canyon*", "mode": "Infinite Race"},
