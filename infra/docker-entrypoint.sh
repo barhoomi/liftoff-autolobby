@@ -360,14 +360,35 @@ client_has_cached_login() {
     [[ -f "$LOGINUSERS_VDF" ]] && grep -q '"AccountName"' "$LOGINUSERS_VDF"
 }
 
-# Is the client ACTUALLY authenticated to Steam right now? A running steamwebhelper carries
-# -steamid=<N>; N==0 means logged OUT (bug eight), N>0 means a live authenticated session.
-# This is the signal the readiness gate must key on -- loginusers.vdf existence fooled the
-# gate on 2026-07-13 when a steamcmd password re-prime revoked the client's separate token
-# ("Access Denied", see below) yet left the file behind, so the gate passed on a dead token
-# and raced the game into a permanent SplashScreen SteamAPI_Init failure.
+# Is the client ACTUALLY authenticated to Steam right now? Two independent positive signals;
+# EITHER is sufficient. loginusers.vdf existence alone is NOT proof -- it fooled the gate on
+# 2026-07-13 when a steamcmd password re-prime revoked the client's separate token
+# ("Access Denied", see below) yet left the file behind, racing the game into a permanent
+# SplashScreen SteamAPI_Init failure.
+#
+# Signal 1 -- a running steamwebhelper carries -steamid=<N>, N>0 (N==0 == logged OUT, bug
+#   eight). Fires on the human-login UI path.
+# Signal 2 (authoritative for the -silent auto-login path) -- the connection log's MOST
+#   RECENT client logon completed 'OK' for a NON-ZERO steamid and was not subsequently
+#   rejected. On the silent path the steamwebhelper is spawned during the connecting phase
+#   and keeps -steamid=0 for the WHOLE session even after a fully successful 'OK' logon, so
+#   signal 1 alone false-negatives and fatal-times-out a perfectly valid login. Found live
+#   2026-07-13 (twelfth incident): connection_log showed a JWT logon 'OK' as [U:1:722984222]
+#   at 12:12:03, yet every steamwebhelper stayed -steamid=0 for the full 600s readiness
+#   budget, and the gate (which only had signal 1 at the time) killed a server-side-valid
+#   login. The CM-level 'OK' logon -- not the CEF UI webhelper's cmdline -- is what actually
+#   reflects the login the game's SteamAPI_Init depends on. Take the last of {OK-logon,
+#   Access-Denied, Do-not-reconnect} in the recent tail; authenticated iff that last one is
+#   the OK logon (revoked -> Access Denied is last -> FALSE; logged-out anonymous -> no
+#   OK-for-non-zero line -> FALSE).
 client_authenticated() {
-    pgrep -af -- '-steamid=' 2>/dev/null | grep -qE -- '-steamid=[1-9][0-9]*'
+    if pgrep -af -- '-steamid=' 2>/dev/null | grep -qE -- '-steamid=[1-9][0-9]*'; then
+        return 0
+    fi
+    [[ -f "$CONNECTION_LOG" ]] || return 1
+    tail -n 40 "$CONNECTION_LOG" 2>/dev/null \
+        | grep -E "RecvMsgClientLogOnResponse\(\) : \[U:1:[1-9][0-9]*\] 'OK'|Access Denied|Do not reconnect" \
+        | tail -n 1 | grep -q "'OK'"
 }
 
 # Did the client's cached-token auto-login get REJECTED server-side (revoked, not expired)?
@@ -456,7 +477,7 @@ if [[ "$STEAM_READY" -ne 1 ]]; then
     fi
     fatal "Steam client did not become ready within ${WAIT_BUDGET}s ($STEAMCLIENT_SO missing, Steam process gone, or the client never authenticated this session -- steamwebhelper still -steamid=0). If the cached token was revoked, log in again via VNC (localhost:5900) with 'Remember me' on; otherwise increase STEAM_READY_TIMEOUT if this is just a slow cold boot."
 fi
-log "Steam readiness confirmed after ${SECONDS_WAITED}s: steamclient.so present, client process alive, client authenticated (steamwebhelper -steamid != 0)."
+log "Steam readiness confirmed after ${SECONDS_WAITED}s: steamclient.so present, client process alive, client authenticated (steamwebhelper -steamid != 0, or a CM 'OK' logon for a non-zero steamid in the connection log)."
 # Logged in just now via the UI? Give the client a moment to finish post-login init
 # (friends/IPC services settle) before the game tries SteamAPI_Init against it.
 [[ "$STEAM_LOGIN_PENDING" -eq 1 ]] && { log "Fresh interactive login detected -- settling 15s before game launch."; sleep 15; }
