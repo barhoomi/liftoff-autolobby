@@ -1,0 +1,21 @@
+{
+  "typo_track": [
+    {"environment": "The Green", "track": "01 - Par For Teh Course", "mode": "Infinite Race"}
+  ],
+  "typo_environment": [
+    {"environment": "Neverland", "track": "*", "mode": "Infinite Race"}
+  ],
+  "unknown_mode": [
+    {"environment": "The Green", "track": "01 - Par For The Course", "mode": "Deathmatch"}
+  ],
+  "duplicate_entry": [
+    "01 - Par For The Course",
+    "01 - Par For The Course"
+  ],
+  "empty_resolution": [
+    {"environment": "Atlantis", "track": "*", "mode": "Infinite Race"}
+  ],
+  "clean_control": [
+    "01 - Par For The Course"
+  ]
+}

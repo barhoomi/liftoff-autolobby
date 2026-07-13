@@ -1,56 +1,26 @@
 import os
+import sys
 import glob
 import json
-import xml.etree.ElementTree as ET
 import getpass
 import re
 
-# Normalization map for Liftoff environment names
-ENV_MAPPING = {
-    "TheDrawingBoard": "The Drawing Board",
-    "The Drawing Board": "The Drawing Board",
-    "TheDrawingBoardCyber": "The Drawing Board",
-    "TheGreen": "The Green",
-    "The Green": "The Green",
-    "Hannover": "Hannover",
-    "Hall26": "Hall 26",
-    "Hall 26": "Hall 26",
-    "AutumnFields": "Autumn Fields",
-    "Autumn Fields": "Autumn Fields",
-    "BandoCity": "Bando City",
-    "Bando City": "Bando City",
-    "HangarC03": "Hangar C03",
-    "Hangar C03": "Hangar C03",
-    "LiftoffArena": "Liftoff Arena",
-    "Liftoff Arena": "Liftoff Arena",
-    "PineValley": "Pine Valley",
-    "Pine Valley": "Pine Valley",
-    "StrawBale": "Straw Bale",
-    "Straw Bale": "Straw Bale",
-    "MinusTwo": "Minus Two",
-    "Minus Two": "Minus Two",
-    "DubaiLegends": "Dubai Legends",
-    "Dubai Legends": "Dubai Legends",
-    "ParisDroneFestival": "Paris Drone Festival",
-    "Paris Drone Festival": "Paris Drone Festival",
-    "ThePit": "The Pit",
-    "The Pit": "The Pit",
-    "BardwellsYard": "Bardwell's Yard",
-    "Bardwell's Yard": "Bardwell's Yard",
-    "RussianWoodpecker": "The Woodpecker",
-    "Russian Woodpecker": "The Woodpecker",
-    "TheWoodpecker": "The Woodpecker",
-    "The Woodpecker": "The Woodpecker",
-    "ShortCircuit": "Short Circuit",
-    "Short Circuit": "Short Circuit",
-    "Surtur": "Surtur",
-    "Permafrost": "Permafrost",
-    "Rustline": "Rustline",
-    "MarinaBay": "Marina Bay",
-    "Marina Bay": "Marina Bay",
-    "AzureDistrict": "Azure District",
-    "MelonPanPark": "Melon Pan Park"
-}
+# trackcheck/ lives at the repo root (two levels up from this file); it's not on
+# sys.path by default when this script is run as `python3 orchestrator/gather_tracks.py`
+# (Python only puts the script's own directory on sys.path). Bootstrap the repo root
+# so `import trackcheck` resolves regardless of caller cwd -- same pattern as the
+# config_path lookup in gather_tracks_and_races() below.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+# The robust XML parser (encoding fallback, declaration stripping, localID/name/
+# environment, race TRACK dependency) now lives in trackcheck/parser.py -- one
+# implementation shared with the Layer 1/2/3 validation library (see
+# docs/features/doing/track-validation-quality-gate.md). Re-exported at module level
+# so `from gather_tracks import normalize_env` (used by orchestrator/tests/test_gather_tracks.py)
+# keeps working unchanged.
+from trackcheck.parser import ENV_MAPPING, normalize_env, parse_xml_robust, parse_track_file, parse_race_file  # noqa: F401
 
 OFFICIAL_TRACK_MAPPING = {
     "default": "01 - The Biggest Yet",
@@ -58,75 +28,11 @@ OFFICIAL_TRACK_MAPPING = {
     "dronehub1": "03 - Cone Off"
 }
 
-def normalize_env(env):
-    if not env:
-        return "Unknown"
-    normalized = ENV_MAPPING.get(env)
-    if normalized:
-        return normalized
-    # Fallback formatting: CamelCase to space-separated words
-    spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', env)
-    return spaced
-
 def is_tutorial(name):
     if not name:
         return False
     ln = name.lower()
     return ln.startswith("tutorial") or ln.startswith("learning")
-
-def parse_xml_robust(filepath):
-    with open(filepath, 'rb') as f:
-        content_bytes = f.read()
-    try:
-        content = content_bytes.decode('utf-8')
-    except UnicodeDecodeError:
-        content = content_bytes.decode('utf-16', errors='ignore')
-    # Strip XML declaration's encoding parameter to avoid strict ElementTree parsing exceptions
-    content = re.sub(r'<\?xml[^>]*encoding\s*=\s*["\'][^"\']*["\'][^>]*\?>', '<?xml version="1.0"?>', content, flags=re.IGNORECASE)
-    return ET.fromstring(content)
-
-def parse_track_file(filepath):
-    try:
-        root = parse_xml_robust(filepath)
-        
-        name_elem = root.find('name')
-        name = name_elem.text.strip() if name_elem is not None and name_elem.text else None
-        
-        env_elem = root.find('environment')
-        env = env_elem.text.strip() if env_elem is not None and env_elem.text else None
-        
-        local_id = None
-        local_id_elem = root.find('.//localID/str')
-        if local_id_elem is not None and local_id_elem.text:
-            local_id = local_id_elem.text.strip()
-        else:
-            local_id_elem = root.find('.//localID')
-            if local_id_elem is not None and local_id_elem.text:
-                local_id = local_id_elem.text.strip()
-                
-        return local_id, name, env
-    except Exception:
-        return None
-
-def parse_race_file(filepath):
-    try:
-        root = parse_xml_robust(filepath)
-        
-        name_elem = root.find('name')
-        name = name_elem.text.strip() if name_elem is not None and name_elem.text else None
-        
-        track_dep = None
-        for dep in root.findall('.//dependency'):
-            dep_type = dep.find('type')
-            if dep_type is not None and dep_type.text == 'TRACK':
-                dep_str = dep.find('str')
-                if dep_str is not None and dep_str.text:
-                    track_dep = dep_str.text.strip()
-                    break
-                    
-        return name, track_dep
-    except Exception:
-        return None
 
 def gather_tracks_and_races():
     current_user = getpass.getuser()

@@ -1,0 +1,9 @@
+{
+  "honk_sample": [
+    {"environment": "The Drawing Board", "track": "*Honk*", "mode": "Infinite Race"},
+    "01 - Par For The Course"
+  ],
+  "green_only": [
+    {"environment": "The Green", "track": "*", "mode": "Infinite Race"}
+  ]
+}
