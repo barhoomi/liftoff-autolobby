@@ -58,6 +58,7 @@ def gather_tracks_and_races():
     config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lobby_config.json")
     game_tracks_dir = None
     game_races_dir = None
+    game_dir = None
     if os.path.exists(config_path):
         try:
             with open(config_path, "r") as f:
@@ -127,7 +128,19 @@ def gather_tracks_and_races():
         races[tid] = sorted(list(set(races[tid])))
 
     # 2. Merge with UI dump if available, otherwise fallback to old behavior
-    ui_dump_path = os.path.expanduser("~/.steam/debian-installation/steamapps/common/Liftoff/BepInEx/plugins/ui_tracks_dump.json")
+    #
+    # Derive from `game_dir` (already resolved above from lobby_config.json's liftoff_path,
+    # with home-directory auto-correction) rather than hardcoding the Debian .deb Steam
+    # package's `~/.steam/debian-installation/...` layout a second time. That hardcode was a
+    # second, independent path guess for the same install lobby_config.json already told us
+    # about (AGENTS.md rule 4: single source of truth) -- it silently found nothing whenever
+    # the install lived anywhere else (e.g. a containerized/steamcmd `force_install_dir`
+    # layout, see docs/features/doing/docker-container.md). Fall back to the old guess only
+    # when liftoff_path didn't resolve at all, to preserve old-host behavior.
+    if game_dir:
+        ui_dump_path = os.path.join(game_dir, "BepInEx", "plugins", "ui_tracks_dump.json")
+    else:
+        ui_dump_path = os.path.expanduser("~/.steam/debian-installation/steamapps/common/Liftoff/BepInEx/plugins/ui_tracks_dump.json")
     ui_dump_data = None
     if os.path.exists(ui_dump_path):
         try:

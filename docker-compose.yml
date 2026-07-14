@@ -1,0 +1,72 @@
+# Convenience wrapper around `docker build` / `docker run` for local operation. Not part
+# of the feature spec's acceptance criteria (which targets plain `docker run --env-file`),
+# but the volumes/env plumbing is identical either way -- use whichever you prefer.
+#
+# Usage:
+#   cp .env.example .env   # fill in STEAM_ACCOUNT etc.
+#   docker compose build
+#   docker compose up
+#
+# One-time credential priming (see docs/features/doing/docker-container.md):
+#   docker compose run --rm -it -u botuser -e HOME=/steam --entrypoint /usr/games/steamcmd bot \
+#       +force_install_dir /steam/Liftoff +login <STEAM_ACCOUNT> +quit
+#   (full path needed: /usr/games isn't on PATH outside an interactive login shell)
+#
+# Admin chat commands (docs/features/doing/container-seed-admin-ids.md): set ADMIN_IDS in
+# .env (simplest -- see .env.example), OR mount your own admin_ids.txt into the bot_config
+# volume at /config/admin_ids.txt (uncomment a bind mount below, or `docker compose cp`
+# it into the volume once); ADMIN_IDS takes precedence when both are present. Leaving both
+# unset is not an error -- it reproduces the plugin's existing fail-closed default (no
+# admins) until you configure one of them.
+services:
+  bot:
+    build: .
+    image: procedural-fpv-bot:local
+    env_file:
+      - .env
+    volumes:
+      - steam_data:/steam
+      - bot_logs:/logs
+      - bot_config:/config
+      # Optional alternative to the ADMIN_IDS env var (see .env.example and
+      # docs/features/doing/container-seed-admin-ids.md): bind-mount a local admin_ids.txt
+      # (one Photon user ID per line, '#' comments allowed) instead of using the env var.
+      # - ./admin_ids.txt:/config/admin_ids.txt:ro
+    # Xvfb/Steam/Liftoff need real shared memory, not Docker's tiny 64MB default.
+    shm_size: "1gb"
+    # x11vnc on the container's Xvfb display. Needed ONCE per fresh /steam volume: the
+    # graphical Steam client keeps its own login state (loginusers.vdf) and steamcmd's
+    # primed token cannot log it in (it's machine-scoped -- JWT aud:["machine"]), so a
+    # human must log in through the client's UI one time via VNC; the client's token then
+    # persists in the volume. Also handy for watching the game render. Host-side bind is
+    # 127.0.0.1 only (x11vnc runs -nopw; do not expose this beyond localhost).
+    ports:
+      - "127.0.0.1:5900:5900"
+    # TEMPORARY, not hardened -- see docs/features/backlog/docker-steam-sandbox-hardening.md.
+    # Steam's Linux compat layer (Pressure Vessel) needs to create unprivileged user
+    # namespaces (via bubblewrap/bwrap) to start its sandboxed runtime. Found live
+    # 2026-07-12: this needed THREE escalating relaxations to get past three distinct
+    # bwrap failures in sequence (namespace creation -> mount-slave propagation ->
+    # pivot_root); SYS_ADMIN alone and SYS_ADMIN+apparmor=unconfined each got one step
+    # further but not all the way. STEAM_RUNTIME=0 (skip the sandbox entirely) was tried
+    # and made things worse (hangs on an interactive prompt with no TTY). Landed on the
+    # full combination below as the first thing that actually got Steam's sandbox running
+    # end-to-end. This is broader than ideal for a long-lived deployment -- revisit once
+    # steady-state operation is confirmed, per the backlog doc.
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
+    # Deliberately NOT "unless-stopped"/"always": an expired/invalid Steam token is a
+    # *fatal, human-actionable* condition (see docker-entrypoint.sh's auth-cache check and
+    # steamcmd-failure handling) -- auto-restarting on top of that would turn one loud,
+    # clear error into a silent crash loop, which the feature spec explicitly calls out to
+    # avoid. Once credentials are primed and steady-state operation is verified, operators
+    # may reasonably switch this to `on-failure:3` or similar.
+    restart: "no"
+
+volumes:
+  steam_data:
+  bot_logs:
+  bot_config:

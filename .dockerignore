@@ -1,0 +1,33 @@
+# Keep the docker build context small and avoid ever shipping host-specific artifacts,
+# git history, or (critically) the .claude/worktrees tree -- which contains full nested
+# checkouts of this same repo and would otherwise balloon/recurse the build context.
+.git
+.claude/
+.agents/
+
+# Python virtualenvs / caches
+venv/
+**/venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# .NET build output (compiled at container runtime instead, against the mounted /steam
+# game install -- see infra/docker-entrypoint.sh)
+plugin/bin/
+plugin/obj/
+
+# Host-generated logs / debug dumps that sometimes land at repo root on the dev machine
+*.log
+logs/
+bot_bepinex_log.txt
+bot_player_log.txt
+bot_files_list.txt
+bot_project_files.txt
+bot_launch_sh.txt
+backups/
+
+# Misc
+.DS_Store
+workshop_staging/
+dashboard/node_modules/
