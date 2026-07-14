@@ -107,3 +107,8 @@ generator/staging/
 
 # Docker container local config (copy of .env.example, filled in per-machine)
 .env
+
+# Runtime secrets — NEVER commit (loaded at runtime from the plugins dir / host)
+liftoff_pro_username.txt
+liftoff_pro_password.txt
+Credentials.xml
