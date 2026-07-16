@@ -184,6 +184,23 @@ namespace LiftoffAutoLobby
             return false; // Default: false
         }
 
+        // democracy-skip.md: whether /skip is a public majority vote (true) or admin-only
+        // (false). Mirrors GetShuffleMode()'s file-read pattern exactly.
+        private static bool GetDemocracyMode()
+        {
+            try
+            {
+                string democracyModePath = Path.Combine(pluginPath, "democracy_mode.txt");
+                if (File.Exists(democracyModePath))
+                {
+                    string content = File.ReadAllText(democracyModePath).Trim();
+                    return content.Equals("true", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch {}
+            return false; // Default: democracy off, /skip stays admin-only
+        }
+
         private static string GetOverrideGameMode()
         {
             try

@@ -402,6 +402,7 @@ def main():
     parser.add_argument("--public", action="store_true", help="Make the lobby public instead of private.")
     parser.add_argument("--max-players", type=int, default=None, help="Max players allowed in the room (applied once the room is created).")
     parser.add_argument("--auto-start", action="store_true", help="Automatically start the race after players join, instead of staying in the lobby.")
+    parser.add_argument("--democracy", action="store_true", help="Enable democracy mode for track skipping.")
     parser.add_argument("--width", type=int, default=640, help="Game window width (default: 640).")
     parser.add_argument("--height", type=int, default=480, help="Game window height (default: 480).")
     parser.add_argument("--log-file", type=str, default=None, help="Redirect Unity's Player.log to this path via -logFile, instead of the shared default location. Used to isolate concurrent instances' logs (see docs/features/doing/automated-testing.md).")
@@ -449,6 +450,7 @@ def main():
     print(f"  Lobby Name:  {lobby_name}")
     print(f"  Interval:    {args.interval}s")
     print(f"  Auto-start:  {args.auto_start}")
+    print(f"  Democracy:   {args.democracy}")
 
     with open(os.path.join(plugins_dir, "lobby_name.txt"), "w") as f:
         f.write(lobby_name)
@@ -460,6 +462,8 @@ def main():
         f.write("true" if args.auto_start else "false")
     with open(os.path.join(plugins_dir, "shuffle_mode.txt"), "w") as f:
         f.write("true" if args.shuffle else "false")
+    with open(os.path.join(plugins_dir, "democracy_mode.txt"), "w") as f:
+        f.write("true" if args.democracy else "false")
     if args.max_players is not None:
         with open(os.path.join(plugins_dir, "max_players.txt"), "w") as f:
             f.write(str(args.max_players))

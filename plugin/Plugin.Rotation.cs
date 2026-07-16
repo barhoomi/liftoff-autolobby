@@ -39,6 +39,10 @@ namespace LiftoffAutoLobby
             trackHistory.Add($"{targetEnvironment} - {targetTrackName}");
             while (trackHistory.Count > TrackHistoryMax)
                 trackHistory.RemoveAt(0);
+
+            // democracy-skip.md: a new track just loaded — stale skip votes from the
+            // previous track must not carry over.
+            skipVotes.Clear();
         }
 
         private static string PeekNextTrackName(out string environment, out string gameMode, out int trackIndex)

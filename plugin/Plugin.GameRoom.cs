@@ -85,6 +85,11 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            // democracy-skip.md: prune skip votes from players who left the room, then
+            // re-evaluate the majority (a departure can lower the required threshold enough
+            // for the remaining votes to now win). No-ops when democracy mode is off.
+            SkipCommand.CheckDisconnectedVoters();
+
             double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
             ProcessClientScript(elapsed);
 

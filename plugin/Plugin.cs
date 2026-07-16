@@ -92,6 +92,14 @@ namespace LiftoffAutoLobby
         private static HashSet<string> adminIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static bool skipRequested = false;
         private static bool shuffleMode = false;
+
+        // Democracy mode (democracy-skip.md): when enabled, /skip becomes a public majority
+        // vote instead of admin-only. skipVotes holds the unique Photon User IDs of players
+        // who have voted to skip the current track; cleared on new track load, scene change,
+        // and room create/enter (see CaptureLoadedTrack, the scene-change block in
+        // OnWillRenderCanvases/Update, and PhotonContainerPrefix's OnCreatedRoom/OnJoinedRoom).
+        private static bool democracyEnabled = false;
+        private static HashSet<string> skipVotes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static System.Random rng = new System.Random();
         private static bool maintenanceActive = false;
         private static DateTime maintenanceTime = DateTime.MaxValue;
@@ -137,6 +145,10 @@ namespace LiftoffAutoLobby
                 // Load initial shuffle mode
                 shuffleMode = GetShuffleMode();
                 Logger.LogInfo($"[AutoLobbyPlugin] Loaded initial shuffleMode: {shuffleMode}");
+
+                // Load initial democracy mode (democracy-skip.md)
+                democracyEnabled = GetDemocracyMode();
+                Logger.LogInfo($"[AutoLobbyPlugin] Loaded initial democracyEnabled: {democracyEnabled}");
 
                 // Register all chat commands with the command registry (replaces the old
                 // hardcoded HandleChatCommand switch).
@@ -332,6 +344,8 @@ namespace LiftoffAutoLobby
                 lastInRoomTime = DateTime.MinValue;
                 sceneObjectsDumped = false;
                 lastMenuStateDumpTime = DateTime.MinValue;
+                // democracy-skip.md: any scene change invalidates in-flight skip votes.
+                skipVotes.Clear();
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Scene changed to: {sceneName}");
                 LogEvent("scene_change", ("scene", sceneName));
                 // Structured JSON file event (A3): from/to per the canonical schema. The very

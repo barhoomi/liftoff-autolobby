@@ -364,6 +364,8 @@ namespace LiftoffAutoLobby
                 else if (methodName == "OnCreatedRoom")
                 {
                     roomOwnedByBot = true;
+                    // democracy-skip.md: a freshly created room starts with no skip votes.
+                    skipVotes.Clear();
                     if (pendingPrivateRoomRename)
                     {
                         UnityEngine.Debug.Log("[AutoLobbyPlugin] Private room rename: new room created successfully.");
@@ -378,6 +380,8 @@ namespace LiftoffAutoLobby
                 {
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Joined an existing room by name instead of creating one — bot does not own this room.");
                     roomOwnedByBot = false;
+                    // democracy-skip.md: entering a (different) room starts with no skip votes.
+                    skipVotes.Clear();
                     QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} A room named '{FormatVariable($"{pendingPrivateRoomName}")}' already existed — joined it instead of creating a new one. <color={activeTheme.alertTagColor}><i>This bot is not the room owner and cannot control settings/rotation here.</i></color> Current host: please transfer host to this bot from the player list so it can control settings/rotation, or use /private with a different name to have the bot create its own room instead.");
                     pendingPrivateRoomRename = false;
                     pendingPrivateRoomRenameStartTime = DateTime.MinValue;
