@@ -67,6 +67,36 @@ services:
     restart: "no"
 
 volumes:
+  # Pinned to the human-primed volumes from the 2026-07-15 verified session (external, so
+  # they are used AS-IS and never re-created under a project-name prefix). Declaring these
+  # external is what prevents the "fresh project-name volume" trap that crashed the previous
+  # boot: compose derives its project name from the worktree dir name
+  # (integration-decomp-democracy), and without these pins it silently created BRAND-NEW
+  # empty integration-decomp-democracy_* volumes -- steamcmd then exited 5 ("No cached
+  # credentials and @NoPromptForPassword is set") because the fresh /steam had no login and
+  # no install to fall back on.
+  #
+  # steam_data holds BOTH the ~22.5G Liftoff install AND the two Steam login tokens
+  # (steamcmd's config.vdf + the graphical client's loginusers.vdf). Re-priming it requires
+  # an interactive Steam Guard login over VNC -- it is IRREPLACEABLE without a human. NEVER
+  # delete it, never `docker volume prune`, never `compose down -v`.
   steam_data:
-  bot_logs:
+    external: true
+    name: agent-af473f774bb75bf19_steam_data
+  # bot_config is ALSO pinned to the primed volume, not project-local: it holds the seeded
+  # master_tracks_list.json (90 official tracks). That file ships in NEITHER the repo nor the
+  # image (it's gitignored / generated at runtime), so the entrypoint's seed-if-missing logic
+  # cannot re-create it -- a fresh /config would resolve the playlist to 0 tracks and skip
+  # room creation entirely (the fresh-install track-discovery deadlock). lobby_config.json /
+  # playlists.json in here are compatible with this branch and are not overwritten (the
+  # entrypoint only rewrites lobby_config.json's liftoff_path/display in place each boot).
   bot_config:
+    external: true
+    name: agent-af473f774bb75bf19_bot_config
+  # bot_logs pinned external too, for full fidelity to the verified-session artifact (append-
+  # only per-day JSONL; no re-creation risk). Player.log lives under the steam volume
+  # ($HOME/.config/unity3d/...), not here -- this volume only holds the orchestrator's
+  # structured JSONL.
+  bot_logs:
+    external: true
+    name: agent-af473f774bb75bf19_bot_logs
