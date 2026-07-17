@@ -104,6 +104,8 @@ bot_*.txt
 generator/workshop_config.json
 generator/workshop_build.vdf
 generator/staging/
+generator/workshop_staging/
+generator/.steamcmd_home/
 
 # Docker container local config (copy of .env.example, filled in per-machine)
 .env
