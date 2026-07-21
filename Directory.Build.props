@@ -1,0 +1,17 @@
+<Project>
+
+  <!--
+    Single source of truth for the plugin's version (build-release-pipeline.md, R1 item 3).
+    Consumed by:
+      - plugin/LiftoffAutoLobby.csproj (GeneratePluginVersion target -> [BepInPlugin] attribute
+        and the /version chat command, via the generated LiftoffAutoLobby.PluginVersion.Number
+        constant)
+      - .github/workflows/release.yml (zip file names, GitHub Release tag cross-check)
+    Bump this when cutting a release. CI's release workflow additionally asserts this value
+    matches the pushed `vX.Y.Z` git tag so the two never drift apart.
+  -->
+  <PropertyGroup>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+</Project>
