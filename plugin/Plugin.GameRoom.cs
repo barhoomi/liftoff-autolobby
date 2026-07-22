@@ -68,6 +68,13 @@ namespace LiftoffAutoLobby
                 chatWarnedAboutNextRace = false;
                 firstStartGameClickTime = DateTime.MinValue;
 
+                // player-onboarding-ux.md work item 2: one short greeting per room entry (this
+                // block only runs on a genuine new-room transition -- see roomCreatedTime's other
+                // writers across the plugin -- never on a per-track/per-player basis), so anyone
+                // in the room learns the plugin is present and how to find its commands without
+                // having to ask. Same tag idiom as the "Up next"/self-disable SYSTEM messages.
+                SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} LiftoffAutoLobby {FormatVariable(PluginVersion.Number)} is active here — type {FormatHighlight("/help")} for commands.");
+
                 // Apply a persisted max-players override (survives bot restarts), if one is configured.
                 string maxPlayersPath = Path.Combine(pluginPath, "max_players.txt");
                 if (File.Exists(maxPlayersPath))
