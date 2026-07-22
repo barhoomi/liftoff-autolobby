@@ -59,7 +59,10 @@ namespace LiftoffAutoLobby
 
                 if (!File.Exists(tracksPath))
                 {
-                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] tracksPath does not exist.");
+                    // Same actionable wording as GetNextTrackFromRotationOnce's identical check
+                    // below (player-onboarding-ux.md work item 4) -- this is the "up next" peek,
+                    // reached on the same missing-file condition.
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] tracks_to_rotate.txt not found at '{tracksPath}'. Create it there -- one line per track, format: TrackName, Environment, GameMode.");
                     return "";
                 }
 
@@ -204,7 +207,12 @@ namespace LiftoffAutoLobby
 
                 if (!File.Exists(tracksPath))
                 {
-                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] tracks_to_rotate.txt not found. Using default values.");
+                    // player-onboarding-ux.md work item 4: the old message ("Using default
+                    // values.") named no defaults and no path -- actionable only to someone who
+                    // already knows the file convention. Say exactly what file, where, and what a
+                    // line looks like; "The Drawing Board"/"Classic Race" (this method's own
+                    // fallback out-params) really is what gets used next, so that much stays true.
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] tracks_to_rotate.txt not found at '{tracksPath}'. Falling back to 'The Drawing Board' / Classic Race until you create it -- one line per track, format: TrackName, Environment, GameMode (see track_mode_availability.txt in the same folder for names copied straight from this install).");
                     return "";
                 }
 
