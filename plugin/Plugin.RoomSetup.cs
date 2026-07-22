@@ -17,14 +17,18 @@ using HarmonyLib;
 
 namespace LiftoffAutoLobby
 {
-    // MODE: server-only — excluded/disabled in client mode, see
-    // docs/features/backlog/dual-mode-plugin-server-and-client.md
-    // Room creation and recovery: ConfigureAndCreateRoom (the settings-popup submit
-    //     flow), popup element accessors, the track x game-mode availability dump
-    //     machinery, private-room rename, and the create/join-by-name failure and
-    //     fallback flows.
-    //     † /private <name> currently reuses this create/join flow, so client mode may
-    //     need a slice of this file eventually -- see the dual-mode doc's open question.
+    // MODE: mixed — split along the create/update seam by plugin-mode-split.md (R3).
+    //   SHARED: ApplyRoomSettingsPopup(popup, allowCreate) — selects the target
+    //     environment/game-mode/track in the settings popup and submits it. This is how a
+    //     track change lands during rotation, via the Update button, and CLIENT MODE NEEDS IT
+    //     (allowCreate:false so it only ever Updates, never creates/hijacks a room).
+    //   SERVER-ONLY: ConfigureAndCreateRoom (the orchestrator track x game-mode availability
+    //     dump + the Create-Game host path), private-room rename, and the create/join-by-name
+    //     failure/fallback flows. These automate hosting a NEW room and must never run in a
+    //     player's game.
+    //   The popup element accessors are shared plumbing used by both.
+    //   (The previous "MODE: server-only" header was wrong — following it would have shipped a
+    //   client build that cannot rotate. See the feature doc's finding §3.1.)
     public partial class AutoLobbyPlugin
     {
 
@@ -303,6 +307,21 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            // The Environment x GameMode availability dump above feeds the orchestrator and is
+            // server-only. Everything below is the SHARED apply-and-submit path; allowCreate:true
+            // reproduces the original create-or-update behavior exactly (server mode).
+            ApplyRoomSettingsPopup(popup, allowCreate: true);
+        }
+
+        // Shared "apply settings to the current room" path (plugin-mode-split.md, R3). Selects the
+        // target environment / game mode / track in the settings popup and submits it. Used by
+        // rotation in BOTH roles: server via ConfigureAndCreateRoom (allowCreate:true), and client
+        // once rotation is engaged (allowCreate:false, R4). allowCreate gates the ONE server-only
+        // action — clicking Create Game to host a NEW room. With allowCreate:false only the Update
+        // button (applying settings to the room you are already in) is ever clicked, so it can
+        // never create or hijack a room the player is hosting.
+        private static void ApplyRoomSettingsPopup(PopupQuickPlayMultiplayerSetup popup, bool allowCreate)
+        {
             if (string.IsNullOrEmpty(targetTrackName))
             {
                 UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] targetTrackName is empty, canceling popup.");
@@ -363,7 +382,9 @@ namespace LiftoffAutoLobby
             // the GameMode and Content dropdown options (cascading filters), so GameMode must
             // be (re)verified AFTER Environment, not before, or a valid choice can be silently
             // invalidated and never reapplied.
-            contentSettings = GetPopupContentSettings(popup);
+            // (Declared here — the availability dump's own contentSettings lives in
+            // ConfigureAndCreateRoom now that the method is split.)
+            ContentSettingsPanel contentSettings = GetPopupContentSettings(popup);
             if (contentSettings != null)
             {
                 // Set Environment
@@ -525,7 +546,10 @@ namespace LiftoffAutoLobby
             bool settingsValid = roomSettings != null && roomSettings.GameSettingsValid() &&
                                   contentSettings != null && contentSettings.GameSettingsValid();
 
-            if (activeBtn != null && activeBtn.gameObject.activeInHierarchy)
+            // The game's own "active button" is Create when hosting a new room and Update when in
+            // one. It is server-only (gated by allowCreate): a client rotation must never risk
+            // clicking Create, so it skips straight to the explicit in-room Update path below.
+            if (allowCreate && activeBtn != null && activeBtn.gameObject.activeInHierarchy)
             {
                 if (activeBtn.interactable || settingsValid)
                 {
@@ -557,12 +581,13 @@ namespace LiftoffAutoLobby
 
                 if (inRoom)
                 {
-                    // We are in a room, we want to update settings
+                    // We are in a room, we want to update settings. SHARED — this is the Update
+                    // button both server rotation and client rotation use to apply a track change.
                     Button updateBtn = GetPopupUpdateButton(popup);
                     if (updateBtn != null && updateBtn.gameObject.activeInHierarchy && updateBtn.interactable)
                     {
                         UnityEngine.Debug.Log("[AutoLobbyPlugin] Fallback: Clicking Update Game settings button inside lobby.");
-    
+
                         popupSubmittedTime = DateTime.Now;
                         isSubmittingSettings = true;
                         updateBtn.onClick.Invoke();
@@ -572,14 +597,16 @@ namespace LiftoffAutoLobby
                         chatWarnedAboutNextRace = false;
                     }
                 }
-                else
+                else if (allowCreate)
                 {
-                    // We are not in a room, we want to create a new room
+                    // We are not in a room, we want to create a new room. SERVER-ONLY: hosting a
+                    // new room is not something a client build ever does. (With allowCreate:false
+                    // and no room, nothing is clicked — the player has to be in a room they host.)
                     Button createBtn = GetPopupCreateButton(popup);
                     if (createBtn != null && createBtn.gameObject.activeInHierarchy && createBtn.interactable)
                     {
                         UnityEngine.Debug.Log("[AutoLobbyPlugin] Fallback: Clicking Create Game button to host new room.");
-    
+
                         popupSubmittedTime = DateTime.Now;
                         isSubmittingSettings = true;
                         createBtn.onClick.Invoke();
