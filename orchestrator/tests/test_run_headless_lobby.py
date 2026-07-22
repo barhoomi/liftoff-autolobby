@@ -162,6 +162,82 @@ class TestRoundRobinShuffleByEnvironment:
         assert first == second
 
 
+def _write_fixture_catalog(tmp_path, tracks_per_env=3):
+    """A minimal, self-contained playlists.json + master_tracks_list.json pair, so
+    resolve_and_write_playlist() can be exercised in full isolation without depending on
+    the real repo's playlists.json/master_tracks_list.json (the latter is gitignored and
+    only exists on a machine that has run gather_tracks.py against a live game install --
+    see AGENTS.md -- so it is routinely ABSENT in a fresh checkout or CI, and
+    resolve_and_write_playlist() sys.exit(1)s outright when it's missing, which would
+    otherwise abort the whole pytest run)."""
+    playlists_path = tmp_path / "playlists.json"
+    master_list_path = tmp_path / "master_tracks_list.json"
+    playlists_path.write_text(json.dumps({
+        "demo": [
+            {"environment": "Bando City", "track": "*", "mode": "Race"},
+            {"environment": "The Green", "track": "*", "mode": "Race"},
+        ],
+        "all_official_races": [{"environment": "*", "track": "*", "mode": "Race"}],
+    }))
+    master_list_path.write_text(json.dumps({
+        "Bando City": {"official": [f"BC Track {i}" for i in range(tracks_per_env)]},
+        "The Green": {"official": [f"Green Track {i}" for i in range(tracks_per_env)]},
+    }))
+    return str(playlists_path), str(master_list_path)
+
+
+class TestResolveAndWritePlaylistDefinitionOrder:
+    """bug-shuffle-toggle-and-tracks-incompatibility.md, Option 2: tracks_to_rotate.txt
+    must always be written in playlist DEFINITION order now -- shuffling moved entirely
+    into the plugin (Plugin.Rotation.cs). shuffle_enabled no longer reorders the written
+    file; it only affects whether a stale plugin-owned shuffle deal gets invalidated."""
+
+    def test_shuffle_enabled_does_not_reorder_the_written_file(self, tmp_path):
+        playlists_path, master_list_path = _write_fixture_catalog(tmp_path)
+        out_unshuffled = tmp_path / "unshuffled" / "tracks_to_rotate.txt"
+        out_unshuffled.parent.mkdir()
+        out_shuffled = tmp_path / "shuffled" / "tracks_to_rotate.txt"
+        out_shuffled.parent.mkdir()
+
+        rhl.resolve_and_write_playlist("demo", False, str(out_unshuffled),
+                                        playlists_path=playlists_path, master_list_path=master_list_path)
+        rhl.resolve_and_write_playlist("demo", True, str(out_shuffled),
+                                        playlists_path=playlists_path, master_list_path=master_list_path)
+
+        assert out_unshuffled.read_text() == out_shuffled.read_text()
+        # Sanity: the fixture actually resolved real tracks, not an empty/fallback file.
+        assert "BC Track 0" in out_unshuffled.read_text()
+
+    def test_clears_a_stale_plugin_owned_shuffle_order_file(self, tmp_path):
+        playlists_path, master_list_path = _write_fixture_catalog(tmp_path)
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+        output_file = plugins_dir / "tracks_to_rotate.txt"
+        shuffle_order_file = plugins_dir / "shuffle_order.txt"
+        shuffle_order_file.write_text("# signature:deadbeef\n0\n1\n2\n")
+        state_file = plugins_dir / "rotation_state.txt"
+        state_file.write_text("5")
+
+        rhl.resolve_and_write_playlist("demo", True, str(output_file),
+                                        playlists_path=playlists_path, master_list_path=master_list_path)
+
+        assert not shuffle_order_file.exists()
+        assert state_file.read_text() == "0"
+
+    def test_no_shuffle_order_file_present_is_a_silent_noop(self, tmp_path):
+        # Must not error just because there was nothing to clear (e.g. the very first
+        # launch, or shuffle has never been turned on for this install).
+        playlists_path, master_list_path = _write_fixture_catalog(tmp_path)
+        output_file = tmp_path / "plugins" / "tracks_to_rotate.txt"
+        output_file.parent.mkdir()
+
+        rhl.resolve_and_write_playlist("demo", False, str(output_file),
+                                        playlists_path=playlists_path, master_list_path=master_list_path)
+
+        assert output_file.exists()
+        assert not (output_file.parent / "shuffle_order.txt").exists()
+
+
 class TestLoadTrackModeAvailability:
     def test_missing_file_returns_none(self, tmp_path):
         assert load_track_mode_availability(str(tmp_path)) is None
