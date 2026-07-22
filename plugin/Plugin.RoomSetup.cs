@@ -129,6 +129,55 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // Plain-text companion to WriteTrackModeAvailabilityDump: the exact same data, formatted
+        // as ready-to-paste tracks_to_rotate.txt lines ("TrackName, Environment, GameMode")
+        // grouped under '#'-prefixed environment/mode headers. player-onboarding-ux.md work item
+        // 3 -- the JSON dump is ground truth for the Python orchestrator (public-release-v1
+        // finding #3), but a player copying track names by hand needs output already in the
+        // destination file's own format, not a JSON dict, so authoring is copy-paste with no
+        // transcription errors. Every non-data line here starts with '#', the same comment
+        // convention tracks_to_rotate.txt itself uses (see GetNextTrackFromRotationOnce /
+        // PeekNextTrackName in Plugin.Rotation.cs), so a player can paste individual lines OR the
+        // whole file into tracks_to_rotate.txt without breaking parsing either way.
+        private static void WriteTrackNamesCompanion(Dictionary<string, Dictionary<string, List<string>>> data)
+        {
+            string outPath = Path.Combine(pluginPath, "track_mode_availability.txt");
+            try
+            {
+                List<string> lines = new List<string>();
+                lines.Add("# LiftoffAutoLobby -- tracks this install owns (regenerated every launch).");
+                lines.Add("# Copy any line(s) below as-is into tracks_to_rotate.txt to add them to rotation.");
+                lines.Add("# Format: TrackName, Environment, GameMode");
+                lines.Add("# (Raw per-environment/mode data: track_mode_availability.json)");
+
+                int totalLines = 0;
+                foreach (var envEntry in data)
+                {
+                    var nonEmptyModes = envEntry.Value.Where(m => m.Value != null && m.Value.Count > 0).ToList();
+                    if (nonEmptyModes.Count == 0) continue;
+
+                    lines.Add("");
+                    lines.Add($"# --- {envEntry.Key} ---");
+                    foreach (var modeEntry in nonEmptyModes)
+                    {
+                        lines.Add($"# {modeEntry.Key}");
+                        foreach (var track in modeEntry.Value)
+                        {
+                            lines.Add($"{track}, {envEntry.Key}, {modeEntry.Key}");
+                            totalLines++;
+                        }
+                    }
+                }
+
+                File.WriteAllLines(outPath, lines.ToArray());
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Track names companion ({totalLines} ready-to-paste lines) saved to: {outPath}");
+            }
+            catch (Exception dumpEx)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write track names companion: {dumpEx}");
+            }
+        }
+
         // Top-level environment keys are always written at exactly 2-space indent by
         // WriteTrackModeAvailabilityDump (mode keys nest one level deeper, at 4 spaces), so a
         // plain indent-width scan is enough to recover them without a JSON parser dependency.
@@ -298,6 +347,7 @@ namespace LiftoffAutoLobby
                         {
                             WriteLegacyUiTracksDump(dumpedTrackModeMap);
                             WriteTrackModeAvailabilityDump(dumpedTrackModeMap);
+                            WriteTrackNamesCompanion(dumpedTrackModeMap);
                             isDumpingTrackModes = false;
                             trackModeDumpDoneThisSession = true;
                             UnityEngine.Debug.Log("[AutoLobbyPlugin] Track/mode availability dump complete.");
