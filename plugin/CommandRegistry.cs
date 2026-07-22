@@ -53,6 +53,10 @@ namespace LiftoffAutoLobby
                 RegisterCommand(new MaxPlayersCommand());
                 RegisterCommand(new ReloadThemeCommand());
                 RegisterCommand(new DemocracyCommand());
+                RegisterCommand(new StartCommand());
+                RegisterCommand(new StopCommand());
+                RegisterCommand(new PauseCommand());
+                RegisterCommand(new ResumeCommand());
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] CommandRegistry initialized with {commands.Count} command(s).");
             }
 
