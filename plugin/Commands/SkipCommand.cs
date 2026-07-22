@@ -24,6 +24,20 @@ namespace LiftoffAutoLobby
 
             public void Execute(string userName, string userId, string argument)
             {
+                // player-onboarding-ux.md work item 5: don't claim "Skipping to next track" (or
+                // register a vote toward one) when there is no active rotation timer to skip --
+                // e.g. client mode before rotation has been engaged (client-lifecycle-commands
+                // .md, R4). skipRequested would just sit as a stale flag with nothing consuming
+                // it (HandleGameRoom, Plugin.GameRoom.cs, is unreachable from the client tick
+                // until then), which is the same "claims success, does nothing" shape AGENTS.md
+                // rule 2 (the /kick no-op bug) warns against. Same signal ExtendCommand already
+                // uses for the identical situation ("No active rotation timer.").
+                if (roomCreatedTime == DateTime.MinValue || roomCreatedTime == DateTime.MaxValue)
+                {
+                    SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} No active rotation timer to skip.");
+                    return;
+                }
+
                 if (IsAdmin(userId))
                 {
                     skipRequested = true;
