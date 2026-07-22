@@ -32,6 +32,10 @@ namespace LiftoffAutoLobby
         // PhotonNetwork accessors below, which are also called per-tick rather than once.
         private static void ApplyBotNicknameIfNeeded()
         {
+            // DANGER gate (plugin-mode-split.md): never rename a real player. Client mode must
+            // never touch PhotonNetwork.NickName. (botNickname is also never loaded in client
+            // mode, so this is belt-and-suspenders.)
+            if (IsClientMode) return;
             if (nicknameApplied || string.IsNullOrEmpty(botNickname)) return;
             try
             {
@@ -52,6 +56,37 @@ namespace LiftoffAutoLobby
             {
                 UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to apply bot nickname: {ex.Message}");
             }
+        }
+
+        // Reflects PhotonNetwork.LocalPlayer.UserId — the same value space as the chat user ids
+        // delivered to ChatMessagePatch — so client-mode admin resolution (IsLocalPlayer) can
+        // compare like-for-like. Cached once non-empty; empty until Photon has assigned a local
+        // player (i.e. once connected/in a room).
+        private static string cachedLocalPhotonUserId = "";
+        private static string GetLocalPhotonUserId()
+        {
+            if (!string.IsNullOrEmpty(cachedLocalPhotonUserId)) return cachedLocalPhotonUserId;
+            try
+            {
+                Type type = Type.GetType("Photon.Pun.PhotonNetwork, PhotonUnityNetworking") ??
+                            Type.GetType("PhotonNetwork, Assembly-CSharp");
+                if (type != null)
+                {
+                    PropertyInfo localPlayerProp = type.GetProperty("LocalPlayer", BindingFlags.Public | BindingFlags.Static);
+                    object localPlayer = localPlayerProp?.GetValue(null);
+                    if (localPlayer != null)
+                    {
+                        PropertyInfo userIdProp = localPlayer.GetType().GetProperty("UserId", BindingFlags.Public | BindingFlags.Instance);
+                        string uid = userIdProp?.GetValue(localPlayer) as string;
+                        if (!string.IsNullOrEmpty(uid)) cachedLocalPhotonUserId = uid;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] GetLocalPhotonUserId failed: {ex.Message}");
+            }
+            return cachedLocalPhotonUserId;
         }
 
         private static void LogPhotonAuthDiagnostics()

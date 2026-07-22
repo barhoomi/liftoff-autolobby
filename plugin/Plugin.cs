@@ -110,6 +110,17 @@ namespace LiftoffAutoLobby
         private static bool maintenanceWarning30sSent = false;
         private static bool maintenanceWarning10sSent = false;
 
+        // Client-mode engagement + failure containment (plugin-mode-split.md, R3).
+        // clientRotationEngaged: false at rest; client-lifecycle-commands.md (R4) flips it via
+        //   /start so the shared rotation loop begins driving a room the player already hosts.
+        //   At R3 it is never set, so client mode does nothing until invoked.
+        // clientHardDisabled: latched after repeated uncaught tick failures in client mode, so a
+        //   broken plugin degrades to "does nothing" instead of thrashing the player's game.
+        private static bool clientRotationEngaged = false;
+        private static bool clientHardDisabled = false;
+        private static int consecutiveTickFailures = 0;
+        private const int ClientTickFailureLimit = 15;
+
         // Room visibility / max players / rename-via-recreate flow
         private static bool pendingPrivateRoomRename = false;   // true while a /private <name> request is in flight
         private static DateTime pendingPrivateRoomRenameStartTime = DateTime.MinValue; // global watchdog: aborts the whole rename if it never reaches a create/join attempt at all (e.g. an unrelated sign-in screen derails navigation before ConfigureAndCreateRoom ever runs)
@@ -137,13 +148,33 @@ namespace LiftoffAutoLobby
             try
             {
                 pluginPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BepInEx", "plugins");
+                // Startup diagnostic (windows-compatibility.md R2): the single most load-bearing
+                // path assumption in the plugin — surfaced explicitly so the Windows verification
+                // pass can confirm it resolved to the right place.
+                Logger.LogInfo($"[AutoLobbyPlugin] pluginPath resolved to: {pluginPath}");
+
+                // Resolve role (server|client) and pick the single settings source BEFORE any
+                // reader runs (plugin-mode-split.md). Config is the BaseUnityPlugin ConfigFile.
+                InitializeRoleAndSettings(Config);
 
                 LoadThemeConfig();
-                LoadAdminIds();
-                LoadUseLiftoffPro();
-                LoadBotNickname();
-                LoadLiftoffProCredentials();
-                LoadClientScript();
+
+                // Server-automation-only config: admin list, Liftoff Pro sign-in toggle/nickname/
+                // credentials, and the scenario-harness client script. Client mode never runs the
+                // menu automation that reads these, and its admin is the local player — so it does
+                // not touch these orchestrator files at all (one source per role, no merge).
+                if (IsServerMode)
+                {
+                    LoadAdminIds();
+                    LoadUseLiftoffPro();
+                    LoadBotNickname();
+                    LoadLiftoffProCredentials();
+                    LoadClientScript();
+                }
+                else
+                {
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Client mode: admin = local player; skipping orchestrator config files (admin_ids/use_liftoff_pro/bot_nickname/credentials/client_script).");
+                }
 
                 // Load initial shuffle mode
                 shuffleMode = GetShuffleMode();
@@ -213,11 +244,12 @@ namespace LiftoffAutoLobby
                 lastTickTime = DateTime.Now;
 
                 RunTick();
+                consecutiveTickFailures = 0; // reached on any normal completion (incl. early returns)
             }
             catch (Exception ex)
             {
                 // Catch all to ensure we never crash Unity's canvas rendering loop
-                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error in OnWillRenderCanvases: {ex}");
+                NoteTickFailure(ex, "OnWillRenderCanvases");
             }
         }
 
@@ -231,17 +263,20 @@ namespace LiftoffAutoLobby
                 lastTickTime = DateTime.Now;
 
                 RunTick();
+                consecutiveTickFailures = 0; // reached on any normal completion (incl. early returns)
             }
             catch (Exception ex)
             {
-                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error in Update: {ex}");
+                NoteTickFailure(ex, "Update");
             }
         }
 
-        private static void RunTick()
+        // Server-only maintenance tick: external-trigger detection + scheduled-shutdown warnings
+        // and the final Application.Quit(). Extracted verbatim from RunTick so it can be gated to
+        // server mode without touching its logic. Returns true when the game is quitting (the
+        // caller must then stop the rest of the tick), matching the original `return`.
+        private static bool RunServerMaintenanceTick()
         {
-            ApplyBotNicknameIfNeeded();
-
             // 1. Check for external/internal maintenance mode
             try
             {
@@ -282,7 +317,7 @@ namespace LiftoffAutoLobby
                     SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Going down for maintenance.");
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Maintenance time reached. Exiting game.");
                     Application.Quit();
-                    return; // Prevent running other tick logic
+                    return true; // Prevent running other tick logic
                 }
                 else
                 {
@@ -304,6 +339,22 @@ namespace LiftoffAutoLobby
                     }
                 }
             }
+            return false;
+        }
+
+        private static void RunTick()
+        {
+            // Failure containment (plugin-mode-split.md): if client mode has hit repeated
+            // uncaught tick errors it self-disables for the session rather than thrashing the
+            // player's game. Server mode never sets this flag (it has a watchdog).
+            if (clientHardDisabled) return;
+
+            ApplyBotNicknameIfNeeded();
+
+            // Maintenance mode is server-only: a player's game must never be closed from under
+            // them (DANGER gate). The whole block — external trigger, warnings, and the final
+            // Application.Quit() — runs only in server mode.
+            if (IsServerMode && RunServerMaintenanceTick()) return;
 
             if (!steamStatusLogged)
             {
@@ -321,6 +372,9 @@ namespace LiftoffAutoLobby
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Steam Persona Name: {personaName}");
                             ulong steamId = (ulong)Steamworks.SteamUser.GetSteamID();
                             UnityEngine.Debug.Log($"[AutoLobbyPlugin] Steam ID: {steamId}");
+                            // Captured for client-mode admin resolution (IsLocalPlayer): in client
+                            // mode the installing player — this Steam account — is implicitly admin.
+                            if (steamId != 0) localSteamId = steamId.ToString();
                         }
                         else
                         {
@@ -374,6 +428,22 @@ namespace LiftoffAutoLobby
             {
                 double elapsed = roomCreatedTime != DateTime.MinValue ? (DateTime.Now - roomCreatedTime).TotalSeconds : 0;
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Tick running. Scene: {sceneName}, Room timer elapsed: {elapsed:F1}s / {GetRotationInterval()}s");
+            }
+
+            // ── Client-mode gate (plugin-mode-split.md, R3) ────────────────────────────────
+            // Everything below this point is autonomous UI automation that only ever runs in
+            // server mode: the private-room rename recovery net, popup dismissal, the settings-
+            // popup create/update flow (ConfigureAndCreateRoom), and the MainMenu / MultiplayerMenu
+            // / FlightLevel scene handlers. Client mode must never automate menus, sign in, create
+            // rooms, or exit a flight level the player is in — it sits idle in the player's game
+            // until the player engages rotation via a lifecycle command (client-lifecycle-commands
+            // .md, R4). The shared HandleGameRoom / HandleFlightLevel / settings-Update path is
+            // driven from HandleClientTick once engaged. This single branch is what gates the whole
+            // server-only tail; in server mode IsClientMode is always false, so it is inert.
+            if (IsClientMode)
+            {
+                HandleClientTick(sceneName);
+                return;
             }
 
             // Global safety net: the join-by-name flow's own internal timeouts (15s hard cap,
@@ -503,6 +573,42 @@ namespace LiftoffAutoLobby
             {
                 popupWasOpen = false;
                 HandleFlightLevel();
+            }
+        }
+
+        // Client-mode tick (plugin-mode-split.md, R3). Reached only via the IsClientMode branch
+        // in RunTick, so none of the server automation (menus, sign-in, room creation, maintenance
+        // quit, nickname) can run. At R3 this is intentionally inert — the plugin does nothing in
+        // the player's game until the player engages rotation with a lifecycle command
+        // (client-lifecycle-commands.md, R4 flips clientRotationEngaged via /start). Only once
+        // engaged does it drive the SHARED rotation loop (HandleGameRoom / HandleFlightLevel / the
+        // settings-popup Update path) in a room the player already hosts. It must NEVER click a
+        // button the player did not ask for while idle.
+        private static void HandleClientTick(string sceneName)
+        {
+            if (!clientRotationEngaged) return;
+            // (R4) engaged client rotation is wired here — reusing the shared in-room handlers.
+        }
+
+        // Failure containment for client mode (plugin-mode-split.md). On a player's machine there
+        // is no watchdog, so a plugin that throws every tick is worse than one that does nothing:
+        // after repeated consecutive failures, latch off for the session and say so once. Server
+        // mode is unaffected — it keeps ticking exactly as before (its watchdog handles recovery),
+        // so this changes nothing for the server role.
+        private static void NoteTickFailure(Exception ex, string where)
+        {
+            UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error in {where}: {ex}");
+            if (!IsClientMode) return;
+            consecutiveTickFailures++;
+            if (!clientHardDisabled && consecutiveTickFailures >= ClientTickFailureLimit)
+            {
+                clientHardDisabled = true;
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Client mode: {consecutiveTickFailures} consecutive tick failures — self-disabling for this session to protect the player's game.");
+                try
+                {
+                    SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} The auto-lobby plugin hit repeated errors and has disabled itself for this session.");
+                }
+                catch { /* best-effort; never throw from the failure path */ }
             }
         }
 

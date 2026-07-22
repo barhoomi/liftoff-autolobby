@@ -80,6 +80,11 @@ namespace LiftoffAutoLobby
 
         private static void HandleMainMenu()
         {
+            // Gate (plugin-mode-split.md): no menu automation / auto sign-in in client mode. The
+            // RunTick client branch already prevents reaching this; this guard is defense-in-depth
+            // so the method is safe against any future caller.
+            if (IsClientMode) return;
+
             // Reset rotation state
             roomCreatedTime = DateTime.MinValue;
             isLeaving = false;
@@ -276,6 +281,11 @@ namespace LiftoffAutoLobby
 
         private static void HandleMultiplayerMenu()
         {
+            // Gate (plugin-mode-split.md): no auto room creation, join-by-name, or sign-in
+            // automation in client mode — the player drives their own menus. The RunTick client
+            // branch already prevents reaching this; this guard is defense-in-depth.
+            if (IsClientMode) return;
+
             // Known long-standing Liftoff quirk, confirmed live 2026-07-02 (affects both Pro
             // and anonymous sign-in): once "An authentication request is still pending. Cannot
             // connect." fires, every further click on this same MultiplayerMenu instance keeps
