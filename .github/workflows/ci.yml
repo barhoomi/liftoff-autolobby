@@ -1,0 +1,62 @@
+name: CI
+
+# Push/PR gate (build-release-pipeline.md R1 item 4): catches the "works on dev-user's
+# machine" class of breakage that was previously invisible. Two independent jobs so a
+# Python-only PR isn't blocked on the plugin DLL restore, and vice versa.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  plugin-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "7.0.x"
+
+      # Same private-source restore as release.yml -- see that workflow and this feature
+      # doc's "Operator runbook" for what has to exist before this step (and therefore
+      # this whole job) can pass.
+      - name: Restore game reference DLLs (private source)
+        env:
+          LIFTOFF_DLLS_URL: ${{ secrets.LIFTOFF_DLLS_URL }}
+          LIFTOFF_DLLS_TOKEN: ${{ secrets.LIFTOFF_DLLS_TOKEN }}
+        run: |
+          if [ -z "$LIFTOFF_DLLS_URL" ]; then
+            echo "::error::LIFTOFF_DLLS_URL secret is not set -- see 'Operator runbook' in docs/features/doing/build-release-pipeline.md."
+            exit 1
+          fi
+          mkdir -p plugin/libs
+          curl -sSL -H "Authorization: token ${LIFTOFF_DLLS_TOKEN}" "$LIFTOFF_DLLS_URL" -o /tmp/liftoff-libs.zip
+          unzip -oq /tmp/liftoff-libs.zip -d plugin/libs
+
+      - name: dotnet build (0 warnings required)
+        run: |
+          dotnet build plugin/ -c Debug /warnaserror
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create venv + install deps
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install -q --upgrade pip
+          if [ -f requirements.txt ]; then venv/bin/pip install -q -r requirements.txt; fi
+          # No repo requirements.txt exists yet (gap found while writing this workflow --
+          # see feature doc). numpy/pytest are the only third-party imports found by
+          # grepping generator/, orchestrator/, trackcheck/ for non-stdlib imports.
+          venv/bin/pip install -q pytest numpy
+
+      - name: bash run_tests.sh
+        run: bash run_tests.sh
