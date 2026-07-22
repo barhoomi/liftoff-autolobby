@@ -110,16 +110,19 @@ namespace LiftoffAutoLobby
         private static bool maintenanceWarning30sSent = false;
         private static bool maintenanceWarning10sSent = false;
 
-        // Client-mode engagement + failure containment (plugin-mode-split.md, R3).
-        // clientRotationEngaged: false at rest; client-lifecycle-commands.md (R4) flips it via
-        //   /start so the shared rotation loop begins driving a room the player already hosts.
-        //   At R3 it is never set, so client mode does nothing until invoked.
+        // Client-mode failure containment (plugin-mode-split.md, R3).
         // clientHardDisabled: latched after repeated uncaught tick failures in client mode, so a
         //   broken plugin degrades to "does nothing" instead of thrashing the player's game.
-        private static bool clientRotationEngaged = false;
         private static bool clientHardDisabled = false;
         private static int consecutiveTickFailures = 0;
         private const int ClientTickFailureLimit = 15;
+
+        // /start /stop /pause /resume (client-lifecycle-commands.md, R4). Engaged/paused state
+        // lives behind ISettingsSource (IsRotationEngaged/IsRotationPaused, Plugin.Config.cs) —
+        // no in-memory shadow copy. This is the only local state the feature needs: last-tick
+        // marker for MaintainRotationPauseFreeze() below, which freezes roomCreatedTime without
+        // editing Plugin.GameRoom.cs.
+        private static DateTime rotationFreezeLastCheckTime = DateTime.MinValue;
 
         // Room visibility / max players / rename-via-recreate flow
         private static bool pendingPrivateRoomRename = false;   // true while a /private <name> request is in flight
@@ -342,12 +345,50 @@ namespace LiftoffAutoLobby
             return false;
         }
 
+        // Keeps HandleGameRoom's rotation timer (Plugin.GameRoom.cs: elapsed = DateTime.Now -
+        // roomCreatedTime, vs GetRotationInterval()) from reaching the interval while disengaged
+        // (/stop) or paused (/pause) — WITHOUT editing Plugin.GameRoom.cs, which belongs to the
+        // other agent working this plugin in parallel. Each tick this holds, nudges
+        // roomCreatedTime forward by the wall-clock delta since the last check, pinning `elapsed`
+        // at whatever it was when the freeze began. /skip and /track still work while frozen:
+        // both set skipRequested = true, which HandleGameRoom's trigger ORs around unconditionally
+        // — never gated by this freeze to begin with. /resume just stops calling this, so elapsed
+        // resumes growing from the frozen value ("remaining time preserved"); /start instead
+        // forces skipRequested = true itself for an immediate fresh track application. Skips the
+        // two pre-existing sentinels of roomCreatedTime (MinValue = room not entered;
+        // MaxValue = settings popup mid-submit) so this never collides with GameRoom/RoomSetup's
+        // own use of them.
+        private static void MaintainRotationPauseFreeze()
+        {
+            bool shouldFreeze = !IsRotationEngaged() || IsRotationPaused();
+            if (!shouldFreeze || roomCreatedTime == DateTime.MinValue || roomCreatedTime == DateTime.MaxValue)
+            {
+                rotationFreezeLastCheckTime = DateTime.MinValue;
+                return;
+            }
+
+            if (rotationFreezeLastCheckTime == DateTime.MinValue)
+            {
+                // First tick of this freeze window — nothing elapsed yet to compensate for.
+                rotationFreezeLastCheckTime = DateTime.Now;
+                return;
+            }
+
+            roomCreatedTime += (DateTime.Now - rotationFreezeLastCheckTime);
+            rotationFreezeLastCheckTime = DateTime.Now;
+        }
+
         private static void RunTick()
         {
             // Failure containment (plugin-mode-split.md): if client mode has hit repeated
             // uncaught tick errors it self-disables for the session rather than thrashing the
             // player's game. Server mode never sets this flag (it has a watchdog).
             if (clientHardDisabled) return;
+
+            // client-lifecycle-commands.md (R4): hold the rotation timer if a server admin has
+            // /stop'd or /pause'd rotation (HandleClientTick does the client-mode equivalent
+            // below). No-op in the default engaged/unpaused state.
+            if (IsServerMode) MaintainRotationPauseFreeze();
 
             ApplyBotNicknameIfNeeded();
 
@@ -576,18 +617,101 @@ namespace LiftoffAutoLobby
             }
         }
 
-        // Client-mode tick (plugin-mode-split.md, R3). Reached only via the IsClientMode branch
-        // in RunTick, so none of the server automation (menus, sign-in, room creation, maintenance
-        // quit, nickname) can run. At R3 this is intentionally inert — the plugin does nothing in
-        // the player's game until the player engages rotation with a lifecycle command
-        // (client-lifecycle-commands.md, R4 flips clientRotationEngaged via /start). Only once
-        // engaged does it drive the SHARED rotation loop (HandleGameRoom / HandleFlightLevel / the
-        // settings-popup Update path) in a room the player already hosts. It must NEVER click a
-        // button the player did not ask for while idle.
+        // Client-mode tick (plugin-mode-split.md R3; engaged rotation wired by
+        // client-lifecycle-commands.md R4). Reached only via the IsClientMode branch in RunTick,
+        // so no server automation (menus, sign-in, room creation, maintenance quit, nickname) can
+        // run. Idle (IsRotationEngaged() false, the client default) until the host runs /start —
+        // this must stay a true early-out. Once engaged it drives the same in-room settings-
+        // Update path server rotation uses (ApplyRoomSettingsPopup(popup, allowCreate:false) —
+        // never Create), only while the player is in that room's waiting-room UI. Never navigates
+        // a menu, joins/creates a room, or clicks anything the player did not ask for.
+        //
+        // Self-contained re-implementation of RunTick's server-tail popup-handling block, not a
+        // shared extraction: that block is unreachable from client mode by construction (this
+        // branch returns before it), and sharing it would mean restructuring RunTick's pinned
+        // body more invasively than the one-line MaintainRotationPauseFreeze hook above. This
+        // duplication is between two branches of the same method family (Plugin.cs), not the
+        // two-state-files anti-pattern AGENTS.md rule 4 warns about.
         private static void HandleClientTick(string sceneName)
         {
-            if (!clientRotationEngaged) return;
-            // (R4) engaged client rotation is wired here — reusing the shared in-room handlers.
+            if (!IsRotationEngaged()) return; // idle: R3/R4 default for client, or after /stop
+
+            MaintainRotationPauseFreeze(); // hold the timer while paused; no-op once engaged+unpaused
+
+            if (sceneName != "MultiplayerMenu") return; // e.g. mid-race in a flight-level scene,
+                                                          // or the player briefly backed out —
+                                                          // do nothing, never navigate.
+
+            GameObject gameRoomObj = GameObject.Find("GameRoom");
+            bool inRoom = (gameRoomObj != null && gameRoomObj.activeInHierarchy);
+            if (!inRoom) return; // no lobby-list/sign-in automation — that stays server-only.
+
+            PopupQuickPlayMultiplayerSetup popup = GameObject.FindObjectOfType<PopupQuickPlayMultiplayerSetup>();
+            bool popupOpen = (popup != null && popup.gameObject.activeInHierarchy);
+
+            if (popupOpen)
+            {
+                if (!popupWasOpen)
+                {
+                    popupOpenedTime = DateTime.Now;
+                    isSubmittingSettings = false;
+                    triedCustomContentTab = false;
+                    targetTrackName = GetNextTrackFromRotation(out targetEnvironment, out targetGameMode);
+                    popupWasOpen = true;
+                }
+
+                if (isSubmittingSettings) return; // waiting for the popup to close, same as server
+
+                double popupAge = (DateTime.Now - popupOpenedTime).TotalSeconds;
+                if (popupAge < 2.0) return; // let the popup finish initializing, same as server
+
+                // Re-synced every tick (not just on open) so a transient Photon read failure on
+                // the first attempt self-heals instead of leaving the player's room briefly
+                // mis-configured — see the method's comment for what this protects against.
+                SyncClientRoomIdentityForPopup();
+                ApplyRoomSettingsPopup(popup, allowCreate: false);
+                return;
+            }
+
+            if (popupWasOpen)
+            {
+                if (roomCreatedTime == DateTime.MaxValue)
+                {
+                    roomCreatedTime = DateTime.Now;
+                    lastActivityTime = DateTime.UtcNow;
+                    chatWarnedAboutNextRace = false;
+                }
+                isSubmittingSettings = false;
+            }
+            popupWasOpen = false;
+
+            HandleGameRoom(); // shared: rotation timer, keep-alive, auto-start (auto-start still
+                               // gated by GetAutoStart(), unrelated to the engaged/paused gate).
+        }
+
+        // client-lifecycle-commands.md (R4 follow-up decision): ApplyRoomSettingsPopup
+        // (Plugin.RoomSetup.cs, out of this feature's file partition) re-applies room_private.txt
+        // and targetLobbyName on every Update — correct for server (the orchestrator owns those
+        // files) but harmful for a client: room_private.txt is normally absent, whose read-side
+        // default is "private", so an unmodified Update would silently flip a player's public
+        // room private and rename it on the first rotation. Fix: snapshot the room's ACTUAL
+        // current visibility/name from Photon (TryGetRoomInfo, Plugin.Photon.cs) into the same
+        // inputs ApplyRoomSettingsPopup reads, right before it runs, so applying settings changes
+        // only track/environment/mode and is a deliberate no-op for the player's own room name/
+        // privacy.
+        private static void SyncClientRoomIdentityForPopup()
+        {
+            bool isVisible; string roomName; int maxPlayers, playerCount;
+            if (!TryGetRoomInfo(out isVisible, out roomName, out maxPlayers, out playerCount)) return;
+            if (!string.IsNullOrEmpty(roomName)) targetLobbyName = roomName;
+            try
+            {
+                File.WriteAllText(Path.Combine(pluginPath, "room_private.txt"), isVisible ? "false" : "true");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Client: failed to sync room_private.txt from live room state: {ex.Message}");
+            }
         }
 
         // Failure containment for client mode (plugin-mode-split.md). On a player's machine there
