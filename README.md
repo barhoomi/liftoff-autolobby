@@ -14,6 +14,27 @@ required) — see [`generator/`](generator/) if that's what you're looking for.
 > against) was found either way. That is not a green light — it is genuinely unknown. Use at
 > your own risk, on an account you're comfortable with.
 
+## Project status
+
+**Working today** — the server package is not hypothetical: it runs this project's own
+persistent lobby (Dockerized, on a dedicated Steam account), with track rotation, chat
+commands, admin tooling, vote-to-skip, maintenance mode, and automatic crash/login recovery.
+
+**In progress — public release v1.** The build/release pipeline (portable build, CI, two
+release zips, single-source versioning) is implemented; the `role=server|client` split that
+makes the player package safe on a personal account, and on-hardware Windows verification,
+are the remaining pieces. Until a tagged release exists, treat install instructions below as
+a preview.
+
+Under the hood, for the curious: the plugin drives the game's own Unity UI (no pixel
+simulation — `Button.onClick.Invoke()` + reflection over TextMeshPro and Photon), patches the
+game with Harmony for chat interception and crash-hardening, and talks to a Python
+orchestrator over a plain-text file protocol. The repo also carries a scenario harness that
+boots the real game headless and asserts on structured logs, plus the pure-Python procedural
+track generator. Project history and design rationale live in [`docs/features/`](docs/features/)
+(a todo/doing/done lifecycle with verification evidence) — start at
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 ## Which package do I want?
 
 | | **Player package** | **Server package** |
