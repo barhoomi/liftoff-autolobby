@@ -1,0 +1,21 @@
+# tracks_to_rotate.txt -- LiftoffAutoLobby rotation playlist (player package, v1)
+#
+# One line per track: TrackName, Environment, GameMode
+#   - Lines starting with # are comments; blank lines are ignored.
+#   - Order is the rotation order (or the shuffle pool, if shuffle is on).
+#
+# v1 scope is a hand-edited list like this one -- no in-game playlist authoring yet
+# (that's planned for v1.1, see backlog/ingame-playlist-authoring.md in the source repo).
+#
+# How to fill this in with tracks you actually own:
+#   1. Install this plugin and start the game once. It writes
+#      track_mode_availability.json into this same BepInEx/plugins/LiftoffAutoLobby/
+#      folder, listing every environment x game-mode x track your install has.
+#   2. Copy names straight out of that file into lines below, in
+#      "TrackName, Environment, GameMode" order.
+#   3. Rename this file to tracks_to_rotate.txt (or edit it in place) and run /start.
+#
+# Two commented-out examples for the format (uncomment and edit to match tracks you own --
+# these track names are illustrative, not guaranteed to exist on your install):
+# 01 - Par For The Course, The Green, Infinite Race
+# Fort Honk - Easy, The Drawing Board, Infinite Race
