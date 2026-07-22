@@ -9,7 +9,15 @@ namespace LiftoffAutoLobby
         private class PlaylistCommand : IChatCommand
         {
             public string Name => "/playlist";
-            public string Description => "Show or set the active playlist. Usage: /playlist [name]";
+
+            // player-onboarding-ux.md work item 2: role-aware description -- available_playlists
+            // .txt is populated by the Python orchestrator (server mode only; see public-
+            // release-v1 D3, "v1 player scope = rotation over a hand-edited tracks_to_rotate
+            // .txt"), so a client-mode reader would otherwise see a command that sounds like it
+            // should work and instead gets an empty "Available: " list with no explanation.
+            public string Description => IsServerMode
+                ? "Show or set the active playlist. Usage: /playlist [name]"
+                : "Server-bot only — v1 client mode has one rotation file, not switchable playlists. Edit tracks_to_rotate.txt directly.";
             public bool IsAdminOnly => true;
 
             public bool CanExecute(string userId, bool democracyEnabled, bool roomOwnedByBot)
@@ -17,6 +25,16 @@ namespace LiftoffAutoLobby
 
             public void Execute(string userName, string userId, string argument)
             {
+                // player-onboarding-ux.md work item 5: playlists.json/available_playlists.txt is
+                // an orchestrator-only concept (no client install has one) -- say so instead of
+                // the generic "Unknown playlist. Available: " (empty) a client-mode admin would
+                // otherwise see, which explains nothing. See the Description comment above.
+                if (IsClientMode)
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Playlists aren't available in client mode — edit {FormatVariable("tracks_to_rotate.txt")} directly.");
+                    return;
+                }
+
                 if (string.IsNullOrEmpty(argument))
                 {
                     string current = "";
