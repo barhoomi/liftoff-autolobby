@@ -83,6 +83,15 @@ namespace LiftoffAutoLobby
         // in both roles once client rotation is engaged (client-lifecycle-commands.md, R4).
         // Server-automation-only settings (Liftoff Pro toggle/nickname/credentials) stay
         // file-only and are loaded only in server mode — client never touches those paths.
+        //
+        // RotationEngaged/RotationPaused (client-lifecycle-commands.md, R4 — extended mid-flight
+        // by an operator scope amendment 2026-07-23 to be functional in BOTH roles, not
+        // client-only): the /start /stop /pause /resume lifecycle-command state, one value per
+        // role via this same settings-source abstraction — never a second mechanism. Defaults
+        // differ deliberately per role (see each implementation): server defaults to engaged/
+        // unpaused so a lobby nobody touches these commands in behaves exactly like before
+        // R4 (server-mode-unchanged guarantee); client defaults to NOT engaged (boots idle,
+        // per the original client-lifecycle-commands.md spec).
         private interface ISettingsSource
         {
             double RotationIntervalSeconds { get; }
@@ -91,6 +100,10 @@ namespace LiftoffAutoLobby
             bool ShuffleMode { get; }
             bool DemocracyMode { get; }
             string OverrideGameMode { get; }   // null when unset (matches the file default)
+            bool RotationEngaged { get; }       // default: server=true, client=false — see impls
+            bool RotationPaused { get; }        // default: false in both roles
+            void SetRotationEngaged(bool engaged);
+            void SetRotationPaused(bool paused);
         }
 
         // Server source: the orchestrator's plain-text protocol files in BepInEx/plugins/, read
@@ -150,6 +163,30 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            // Distinct file names from auto_start.txt on purpose (client-lifecycle-commands.md,
+            // "naming collision to handle") — auto_start.txt means "auto-click Start Race" and is
+            // unrelated to the rotation lifecycle. Absent rotation_engaged.txt = true: an operator
+            // who never runs /start or /stop and has no orchestrator writing this file gets the
+            // exact pre-R4 server behavior (always-on rotation). Absent rotation_paused.txt = false.
+            public bool RotationEngaged
+            {
+                get
+                {
+                    try
+                    {
+                        string p = Path.Combine(pluginPath, "rotation_engaged.txt");
+                        if (File.Exists(p)) return !File.ReadAllText(p).Trim().Equals("false", StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch { }
+                    return true; // absent = engaged (server default: behaviorally unchanged)
+                }
+            }
+
+            public bool RotationPaused => FileFlag("rotation_paused.txt");
+
+            public void SetRotationEngaged(bool engaged) => WriteFileFlag("rotation_engaged.txt", engaged);
+            public void SetRotationPaused(bool paused) => WriteFileFlag("rotation_paused.txt", paused);
+
             private static bool FileFlag(string fileName)
             {
                 try
@@ -159,6 +196,18 @@ namespace LiftoffAutoLobby
                 }
                 catch { }
                 return false;
+            }
+
+            private static void WriteFileFlag(string fileName, bool value)
+            {
+                try
+                {
+                    File.WriteAllText(Path.Combine(pluginPath, fileName), value ? "true" : "false");
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write {fileName}: {ex.Message}");
+                }
             }
         }
 
@@ -180,6 +229,8 @@ namespace LiftoffAutoLobby
             private readonly ConfigEntry<bool> shuffle;
             private readonly ConfigEntry<bool> democracy;
             private readonly ConfigEntry<string> overrideGameMode;
+            private readonly ConfigEntry<bool> rotationEngaged;
+            private readonly ConfigEntry<bool> rotationPaused;
 
             public ConfigSettingsSource(ConfigFile config)
             {
@@ -195,6 +246,14 @@ namespace LiftoffAutoLobby
                     "Let players vote to skip a track with /skip instead of it being admin-only.");
                 overrideGameMode = config.Bind("Rotation", "OverrideGameMode", "",
                     "Force a single game mode for every track (blank = use each rotation line's own mode).");
+                // Client boots idle by design (client-lifecycle-commands.md): false until the
+                // host runs /start. Distinct from AutoStart above, which is the Start-Race
+                // auto-click, not the rotation lifecycle.
+                rotationEngaged = config.Bind("Rotation", "Engaged", false,
+                    "Whether the rotation manager is active in this room. Toggled by /start and /stop " +
+                    "(client mode boots with this false and does nothing until /start).");
+                rotationPaused = config.Bind("Rotation", "Paused", false,
+                    "Whether the rotation timer is temporarily frozen. Toggled by /pause and /resume.");
             }
 
             public double RotationIntervalSeconds => rotationInterval.Value;
@@ -203,6 +262,10 @@ namespace LiftoffAutoLobby
             public bool ShuffleMode => shuffle.Value;
             public bool DemocracyMode => democracy.Value;
             public string OverrideGameMode => string.IsNullOrEmpty(overrideGameMode.Value) ? null : overrideGameMode.Value;
+            public bool RotationEngaged => rotationEngaged.Value;
+            public bool RotationPaused => rotationPaused.Value;
+            public void SetRotationEngaged(bool engaged) => rotationEngaged.Value = engaged;
+            public void SetRotationPaused(bool paused) => rotationPaused.Value = paused;
         }
 
         private static void LoadAdminIds()
@@ -334,6 +397,11 @@ namespace LiftoffAutoLobby
         private static bool GetDemocracyMode() => Settings.DemocracyMode;
 
         private static string GetOverrideGameMode() => Settings.OverrideGameMode;
+
+        // client-lifecycle-commands.md: /start /stop /pause /resume state, one role-appropriate
+        // source via Settings — see the ISettingsSource block above for the default rationale.
+        private static bool IsRotationEngaged() => Settings.RotationEngaged;
+        private static bool IsRotationPaused() => Settings.RotationPaused;
 
         private static bool PlaylistExists(string name)
         {
