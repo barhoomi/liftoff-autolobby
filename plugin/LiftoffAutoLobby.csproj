@@ -2,70 +2,143 @@
 
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
-    <LiftoffPath>/home/dev-user/.steam/debian-installation/steamapps/common/Liftoff</LiftoffPath>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+
+    <!--
+      Reference-assembly resolution (build-release-pipeline.md R1 item 1 + the Option-1
+      licensing decision in that doc's section 2):
+
+        - $(LiftoffPath) is an OPT-IN override for a developer who wants to build against
+          their own local Liftoff install. When set, game DLLs resolve from
+          $(LiftoffPath)/Liftoff_Data/Managed/.
+        - When $(LiftoffPath) is NOT set (the default; CI, and any machine with no
+          Liftoff install), game DLLs resolve from the repo-local libs/ directory instead.
+          Those .dll files are NOT committed to git (Option 1: game DLLs come out of the
+          public tree); libs/ is populated at build time, either by a developer copying
+          their own install's DLLs in, or by a CI step that restores them from a private
+          source. See libs/README.md and this feature doc's "Operator runbook" section for
+          exactly what that restore step needs.
+      LiftoffManagedPath is not itself a HintPath; it's the base directory the HintPaths
+      below are built from, so callers only ever set $(LiftoffPath) (or leave it unset).
+    -->
+    <LiftoffManagedPath Condition="'$(LiftoffPath)' != ''">$(LiftoffPath)/Liftoff_Data/Managed</LiftoffManagedPath>
+    <LiftoffManagedPath Condition="'$(LiftoffPath)' == ''">$(MSBuildThisFileDirectory)libs</LiftoffManagedPath>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Remove="libs/**" />
   </ItemGroup>
 
+  <!--
+    Game assemblies (Liftoff / Photon / Steamworks / Unity). These are NOT NuGet packages;
+    they only exist inside a Liftoff install. Resolved via $(LiftoffManagedPath), see above.
+  -->
   <ItemGroup>
     <Reference Include="UnityEngine">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/UnityEngine.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UI">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.UI.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/UnityEngine.UI.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.UIModule">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.UIModule.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/UnityEngine.UIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.InputLegacyModule.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.IMGUIModule.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.JSONSerializeModule">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/UnityEngine.JSONSerializeModule.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/UnityEngine.JSONSerializeModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Assembly-CSharp">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/Assembly-CSharp.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="PhotonRealtime">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/PhotonRealtime.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/PhotonRealtime.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Photon3Unity3D">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/Photon3Unity3D.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/Photon3Unity3D.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="com.rlabrecque.steamworks.net">
-      <HintPath>$(LiftoffPath)/Liftoff_Data/Managed/com.rlabrecque.steamworks.net.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="BepInEx">
-      <HintPath>$(LiftoffPath)/BepInEx/core/BepInEx.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="0Harmony">
-      <HintPath>$(LiftoffPath)/BepInEx/core/0Harmony.dll</HintPath>
+      <HintPath>$(LiftoffManagedPath)/com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
 
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+  <!--
+    BepInEx / Harmony are the modding framework, not game code; no licensing concern,
+    so these come from NuGet instead of a Liftoff install. Versions decompile-confirmed
+    2026-07-21 against the local BepInEx 5.x install (AGENTS.md rule 1): BepInEx.dll
+    reports AssemblyVersion 5.4.22.0 (5.4.21 is the latest published BepInEx.Core package
+    on the BepInEx NuGet feed; close enough for a compile-only, Private=false reference
+    to a stable public API); 0Harmony.dll reports AssemblyVersion 2.9.0.0, which matches
+    HarmonyX 2.9.0 on nuget.org exactly. ExcludeAssets=runtime keeps both out of the build
+    output; BepInEx supplies the real DLLs from its own core/ folder at runtime, same as
+    the game DLLs above (Private=false).
+  -->
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Core" Version="5.4.21" ExcludeAssets="runtime" />
+    <PackageReference Include="HarmonyX" Version="2.9.0" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <!--
+    Single-source version stamping (build-release-pipeline.md R1 item 3). Generates
+    obj/.../PluginVersion.g.cs containing a `const string` (attribute arguments must be
+    compile-time constants, so this can't be a runtime-computed value) from the one
+    <Version> in Directory.Build.props, and adds it to this compilation. Consumed by
+    Plugin.cs's [BepInPlugin(...)] attribute and Commands/VersionCommand.cs.
+  -->
+  <Target Name="GeneratePluginVersion" BeforeTargets="BeforeCompile;CoreCompile">
+    <PropertyGroup>
+      <PluginVersionFile>$(IntermediateOutputPath)PluginVersion.g.cs</PluginVersionFile>
+    </PropertyGroup>
+    <!--
+      NOTE: MSBuild splits Item Include values on unescaped ';' (list-separator syntax) and
+      trims whitespace around each split entry; that is why every C# statement below is
+      escaped as %3B instead of a literal ';', and none of these lines carry indentation
+      (harmless; this is a generated file, not hand-read source).
+    -->
+    <ItemGroup>
+      <_PluginVersionLines Include="// &lt;auto-generated/&gt;" />
+      <_PluginVersionLines Include="// Generated by the GeneratePluginVersion MSBuild target in LiftoffAutoLobby.csproj" />
+      <_PluginVersionLines Include="// from the single-source &lt;Version&gt; in Directory.Build.props. Do not edit by hand." />
+      <_PluginVersionLines Include="namespace LiftoffAutoLobby" />
+      <_PluginVersionLines Include="{" />
+      <_PluginVersionLines Include="internal static class PluginVersion" />
+      <_PluginVersionLines Include="{" />
+      <_PluginVersionLines Include="public const string Number = &quot;$(Version)&quot;%3B" />
+      <_PluginVersionLines Include="}" />
+      <_PluginVersionLines Include="}" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(PluginVersionFile)" Lines="@(_PluginVersionLines)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(PluginVersionFile)" />
+      <FileWrites Include="$(PluginVersionFile)" />
+    </ItemGroup>
+  </Target>
+
+  <!--
+    Deploy-on-build for the local two-user dev loop (AGENTS.md: dev-user's personal Steam
+    install). Only runs when $(LiftoffPath) was explicitly set AND actually exists; a
+    default build (CI, or any machine without a Liftoff install) must not try to write
+    outside the repo.
+  -->
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(LiftoffPath)' != '' AND Exists('$(LiftoffPath)')">
     <Copy SourceFiles="$(OutputPath)/LiftoffAutoLobby.dll" DestinationFolder="$(LiftoffPath)/BepInEx/plugins/" />
   </Target>
 
