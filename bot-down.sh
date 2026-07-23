@@ -11,7 +11,8 @@
 # only stops the container; it never touches volumes.
 set -euo pipefail
 
-CONTAINER="procedural-fpv-bot-1"
+# Override via env var for testing against a non-existent container name.
+CONTAINER="${CONTAINER:-procedural-fpv-bot-1}"
 
 if ! docker ps >/dev/null 2>&1; then
   echo "ERROR: cannot talk to the Docker daemon as $(whoami)." >&2
