@@ -43,26 +43,43 @@ namespace LiftoffAutoLobby
                 {
                     try
                     {
-                        // Capture "what's coming up next" under the still-active shuffled order
-                        // BEFORE flipping shuffleMode, so turning shuffle off doesn't yank the
-                        // already-announced "Up next" track out from under anyone -- the least-
-                        // surprising choice (bug-shuffle-toggle-and-tracks-incompatibility.md,
-                        // Option 2): only the ordering going FORWARD changes; the very next pick
-                        // stays the same. Definition order resumes sequentially from there.
+                        // Operator ruling (2026-07-23 live session -- amends the earlier
+                        // "preserve the already-announced next pick" design): after /shuffle
+                        // off the NEXT track played must be the DEFINITION-ORDER SUCCESSOR of
+                        // the CURRENT track, NOT the pre-committed shuffled up-next pick. See
+                        // bug-shuffle-toggle-and-tracks-incompatibility.md, "Operator ruling".
+                        //
+                        // rotation_state.txt already points one PAST the current track (it was
+                        // advanced to the up-next pick when the current track was selected), so
+                        // the fix anchors to the CURRENT track's own static index and steps +1.
+                        // lastRotationIndex is the static index of the most recently loaded
+                        // track (set at every selection in GetNextTrackFromRotationOnce, and it
+                        // reflects /track selections too, which load through that same method).
+                        // Fall back to activeOrder[cursor-1] only when lastRotationIndex is out
+                        // of range (e.g. -1 right after a game-process relaunch, before this
+                        // session's first rotation). Under the now-identity order cursor ==
+                        // static index, so writing (currentStaticIndex + 1) makes the next pick
+                        // the definition-order successor and every pick after it ascending
+                        // definition order (wrapping cleanly back to line 1).
                         string tracksPath = Path.Combine(pluginPath, "tracks_to_rotate.txt");
                         string statePath = Path.Combine(pluginPath, "rotation_state.txt");
                         var validTracks = ReadStaticTracks(tracksPath);
                         if (validTracks.Count > 0 && shuffleMode)
                         {
+                            int n = validTracks.Count;
                             List<int> activeOrder = GetActiveRotationOrder(validTracks, forceReshuffle: false);
                             int cursor = 0;
                             if (File.Exists(statePath)) int.TryParse(File.ReadAllText(statePath).Trim(), out cursor);
                             if (cursor < 0 || cursor >= activeOrder.Count) cursor = 0;
-                            int staticIndex = activeOrder[cursor];
-                            // Identity order means cursor == static index, so this single write
-                            // both preserves the next pick and re-anchors the cursor to definition
-                            // order for every pick after it.
-                            File.WriteAllText(statePath, staticIndex.ToString());
+
+                            int currentStaticIndex;
+                            if (lastRotationIndex >= 0 && lastRotationIndex < n)
+                                currentStaticIndex = lastRotationIndex;
+                            else
+                                currentStaticIndex = activeOrder[(cursor - 1 + activeOrder.Count) % activeOrder.Count];
+
+                            int newCursor = (currentStaticIndex + 1) % n;
+                            File.WriteAllText(statePath, newCursor.ToString());
                         }
                     }
                     catch (Exception ex)
