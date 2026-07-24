@@ -66,46 +66,47 @@ namespace LiftoffAutoLobby
                     return "";
                 }
 
-                string[] lines = File.ReadAllLines(tracksPath);
-                var validTracks = new List<string>();
-                foreach (var line in lines)
-                {
-                    if (!string.IsNullOrWhiteSpace(line) && !line.Trim().StartsWith("#"))
-                    {
-                        validTracks.Add(line.Trim());
-                    }
-                }
-
+                List<string> validTracks = ReadStaticTracks(tracksPath);
                 if (validTracks.Count == 0)
                 {
                     UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] No valid tracks parsed.");
                     return "";
                 }
 
-                // Sync shuffleMode from disk (kept for logging parity; selection itself is
-                // mode-agnostic now that shuffling rewrites tracks_to_rotate.txt in place)
+                // Sync shuffleMode from disk (kept for logging parity; selection walks the
+                // persisted/derived active order below -- see bug-shuffle-toggle-and-tracks-
+                // incompatibility.md, Option 2).
                 shuffleMode = GetShuffleMode();
 
-                int index = 0;
+                int cursor = 0;
                 if (File.Exists(statePath))
                 {
-                    int.TryParse(File.ReadAllText(statePath).Trim(), out index);
+                    int.TryParse(File.ReadAllText(statePath).Trim(), out cursor);
                 }
-                if (index < 0 || index >= validTracks.Count)
+                if (cursor < 0 || cursor >= validTracks.Count)
                 {
-                    index = 0;
+                    cursor = 0;
                 }
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Current state index: {index}, validTracks count: {validTracks.Count}");
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Current state index: {cursor}, validTracks count: {validTracks.Count}");
+
+                // Read-only: never deals/forces a fresh reshuffle. If shuffle mode is on and no
+                // valid deal is persisted yet, this still self-heals (deals + persists one) --
+                // that's establishing the derived cache, not advancing rotation progress, so it
+                // doesn't violate "no state is persisted by Peek" below (which is about the
+                // CURSOR, i.e. rotation_state.txt, never being written here).
+                List<int> activeOrder = GetActiveRotationOrder(validTracks, forceReshuffle: false);
 
                 string overrideMode = GetOverrideGameMode();
                 string trackName = "";
 
-                // Walk forward from the current position (read-only, no state is persisted by
-                // Peek) skipping any session-blacklisted (env, track, mode) combos, so the "up
-                // next" chat announcement never names a track that will be skipped instantly.
+                // Walk forward from the current position (read-only, no cursor state is
+                // persisted by Peek) skipping any session-blacklisted (env, track, mode) combos,
+                // so the "up next" chat announcement never names a track that will be skipped
+                // instantly.
                 for (int attempt = 0; attempt < validTracks.Count; attempt++)
                 {
-                    int candidateIndex = (index + attempt) % validTracks.Count;
+                    int walkPos = (cursor + attempt) % validTracks.Count;
+                    int candidateIndex = activeOrder[walkPos];
 
                     string selectedLine = validTracks[candidateIndex];
                     string[] parts = selectedLine.Split(',');
@@ -216,16 +217,7 @@ namespace LiftoffAutoLobby
                     return "";
                 }
 
-                string[] lines = File.ReadAllLines(tracksPath);
-                var validTracks = new List<string>();
-                foreach (var line in lines)
-                {
-                    if (!string.IsNullOrWhiteSpace(line) && !line.Trim().StartsWith("#"))
-                    {
-                        validTracks.Add(line.Trim());
-                    }
-                }
-
+                List<string> validTracks = ReadStaticTracks(tracksPath);
                 if (validTracks.Count == 0)
                 {
                     UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] tracks_to_rotate.txt is empty.");
@@ -235,24 +227,33 @@ namespace LiftoffAutoLobby
                 // Sync shuffleMode from disk
                 shuffleMode = GetShuffleMode();
 
-                int index = 0;
+                int cursor = 0;
                 if (File.Exists(statePath))
-                    int.TryParse(File.ReadAllText(statePath).Trim(), out index);
+                    int.TryParse(File.ReadAllText(statePath).Trim(), out cursor);
 
-                if (index < 0 || index >= validTracks.Count)
-                    index = 0;
+                if (cursor < 0 || cursor >= validTracks.Count)
+                    cursor = 0;
 
-                int nextIndex = (index + 1) % validTracks.Count;
+                // tracks_to_rotate.txt's own line order is the STATIC playlist definition in
+                // both modes now (bug-shuffle-toggle-and-tracks-incompatibility.md, Option 2) --
+                // the plugin never rewrites it. The WALK order (sequential or shuffled) is a
+                // separate, derived layer: GetActiveRotationOrder returns a permutation of
+                // indices into validTracks (identity when shuffle is off, so plain rotation is
+                // byte-for-byte the same behavior as before this fix).
+                List<int> activeOrder = GetActiveRotationOrder(validTracks, forceReshuffle: false);
+                int index = activeOrder[cursor];
+                int nextCursor = (cursor + 1) % validTracks.Count;
 
-                // tracks_to_rotate.txt's line order IS the rotation order in both modes.
-                // In shuffle mode, once a full pass completes, deal a fresh random order
-                // for the next cycle before advancing the cursor back to 0.
-                if (shuffleMode && nextIndex == 0)
+                // Once a full pass completes, deal a fresh random order for the next cycle
+                // before advancing the cursor back to 0 -- same shuffle-bag semantics as before
+                // (see docs/features/done/bug-shuffle-state-persists-across-sessions.md), just
+                // persisted as a derived overlay instead of physically rewriting the static file.
+                if (shuffleMode && nextCursor == 0)
                 {
-                    ShuffleTracksFile(tracksPath);
+                    GetActiveRotationOrder(validTracks, forceReshuffle: true);
                 }
 
-                File.WriteAllText(statePath, nextIndex.ToString());
+                File.WriteAllText(statePath, nextCursor.ToString());
 
                 lastRotationIndex = index; // captured for the structured "rotation" file event
                 string selectedLine = validTracks[index];
@@ -279,58 +280,163 @@ namespace LiftoffAutoLobby
             }
         }
 
-        // Re-shuffles tracks_to_rotate.txt's own line order in place (a real Fisher-Yates
-        // deal, not a derived index list) and preserves any leading '#' header/comment
-        // lines as-is at the top. This is the only place a fresh shuffle gets dealt from
-        // the C# side; the file's order is the single source of truth for both rotation
-        // modes, so there is no separate shuffled/unshuffled state to keep in sync.
-        private static void ShuffleTracksFile(string tracksPath)
+        // Parses tracks_to_rotate.txt into its ordered list of valid (non-blank, non-'#')
+        // lines. This IS the static, authoritative playlist definition
+        // (bug-shuffle-toggle-and-tracks-incompatibility.md, Option 2) -- every index used by
+        // /tracks, /track, and the active rotation order below is a position in THIS list. The
+        // plugin never writes to tracksPath; only the orchestrator (server mode) or the player
+        // by hand (client mode) do.
+        private static List<string> ReadStaticTracks(string tracksPath)
         {
-            try
+            var validTracks = new List<string>();
+            if (!File.Exists(tracksPath)) return validTracks;
+            foreach (var line in File.ReadAllLines(tracksPath))
             {
-                string[] lines = File.ReadAllLines(tracksPath);
-                var header = new List<string>();
-                var trackLines = new List<string>();
-                foreach (var line in lines)
+                if (!string.IsNullOrWhiteSpace(line) && !line.Trim().StartsWith("#"))
                 {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    if (line.Trim().StartsWith("#")) header.Add(line);
-                    else trackLines.Add(line);
+                    validTracks.Add(line.Trim());
                 }
-
-                trackLines = RoundRobinShuffleByEnvironment(trackLines);
-
-                var sb = new System.Text.StringBuilder();
-                foreach (var h in header) sb.AppendLine(h);
-                foreach (var t in trackLines) sb.AppendLine(t);
-                File.WriteAllText(tracksPath, sb.ToString());
             }
-            catch (Exception ex)
+            return validTracks;
+        }
+
+        // shuffle_order.txt persists (server AND client -- this is runtime rotation state, not
+        // configuration, the same category as rotation_state.txt, see plugin-mode-split.md's
+        // settings-source table) the active WALK order as a permutation of indices into
+        // ReadStaticTracks' result. Absent/unused whenever shuffle mode is off -- sequential
+        // order needs no derived state at all, it's just 0..N-1 computed on the fly.
+        private const string ShuffleOrderFileName = "shuffle_order.txt";
+
+        // Deterministic (cross-process-stable) fingerprint of the static track list's content.
+        // Used to detect tracks_to_rotate.txt changing underneath a persisted shuffle_order.txt
+        // (an orchestrator playlist swap, or a client player hand-editing the file) so a stale
+        // permutation is never walked against content it no longer matches. Deliberately NOT
+        // string.GetHashCode(): .NET randomizes string hashing per process by design, so
+        // identical content would "change" on every game restart and defeat the entire point of
+        // persisting this file (AGENTS.md rule 5 -- shuffle-active order surviving a mid-session
+        // crash/restart matters for the server bot; see the feature doc's design record).
+        private static string ComputeTracksSignature(List<string> validTracks)
+        {
+            unchecked
             {
-                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Error shuffling tracks file: {ex.Message}");
+                uint hash = 2166136261; // FNV-1a, 32-bit
+                foreach (var line in validTracks)
+                {
+                    foreach (byte b in Encoding.UTF8.GetBytes(line))
+                    {
+                        hash ^= b;
+                        hash *= 16777619;
+                    }
+                    hash ^= (byte)'\n'; // line separator, so ["ab","c"] hashes differently from ["a","bc"]
+                    hash *= 16777619;
+                }
+                return hash.ToString("x8");
             }
         }
 
-        // Shuffles each environment's lines among themselves, shuffles the order environments
+        // Returns the active walk order as a permutation of indices into validTracks. Identity
+        // order (no file I/O at all) whenever shuffle mode is off -- there is nothing to persist
+        // for plain sequential rotation, and this makes shuffle-off byte-for-byte the same
+        // behavior as before this fix. When shuffle mode is on, loads the persisted deal from
+        // shuffle_order.txt if it is still valid for the CURRENT static content; deals and
+        // persists a fresh round-robin-by-environment order otherwise (forceReshuffle, a missing
+        // file, a signature mismatch, or a corrupt/wrong-length file all count as "invalid" --
+        // self-healing, so this can never get stuck referencing content that no longer exists,
+        // and never requires the orchestrator to keep a second file in sync, per AGENTS.md
+        // rule 4).
+        private static List<int> GetActiveRotationOrder(List<string> validTracks, bool forceReshuffle)
+        {
+            int n = validTracks.Count;
+            if (!shuffleMode || n == 0)
+            {
+                var identity = new List<int>(n);
+                for (int i = 0; i < n; i++) identity.Add(i);
+                return identity;
+            }
+
+            string path = Path.Combine(pluginPath, ShuffleOrderFileName);
+            string signature = ComputeTracksSignature(validTracks);
+
+            if (!forceReshuffle)
+            {
+                List<int> loaded = TryLoadPersistedShuffleOrder(path, signature, n);
+                if (loaded != null) return loaded;
+            }
+
+            return DealAndPersistShuffleOrder(validTracks, path, signature);
+        }
+
+        private static List<int> TryLoadPersistedShuffleOrder(string path, string expectedSignature, int expectedCount)
+        {
+            try
+            {
+                if (!File.Exists(path)) return null;
+                string[] lines = File.ReadAllLines(path);
+                if (lines.Length < 1 || !lines[0].StartsWith("# signature:")) return null;
+                string signature = lines[0].Substring("# signature:".Length).Trim();
+                if (!string.Equals(signature, expectedSignature, StringComparison.Ordinal)) return null;
+
+                var order = new List<int>();
+                var seen = new HashSet<int>();
+                for (int i = 1; i < lines.Length; i++)
+                {
+                    string trimmed = lines[i].Trim();
+                    if (trimmed.Length == 0) continue;
+                    int idx;
+                    if (!int.TryParse(trimmed, out idx)) return null;
+                    if (idx < 0 || idx >= expectedCount || !seen.Add(idx)) return null;
+                    order.Add(idx);
+                }
+                return order.Count == expectedCount ? order : null;
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to read {ShuffleOrderFileName}, dealing a fresh order: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static List<int> DealAndPersistShuffleOrder(List<string> validTracks, string path, string signature)
+        {
+            List<int> order = RoundRobinShuffleByEnvironment(validTracks);
+            try
+            {
+                var sb = new StringBuilder();
+                sb.Append("# signature:").Append(signature).Append('\n');
+                foreach (var idx in order) sb.Append(idx).Append('\n');
+                File.WriteAllText(path, sb.ToString());
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to write {ShuffleOrderFileName}: {ex.Message}");
+            }
+            return order;
+        }
+
+        // Shuffles each environment's indices among themselves, shuffles the order environments
         // are visited in, then interleaves round-robin across environments. A flat shuffle can
         // (and does, by chance) land two tracks from the same environment back-to-back — the
         // environment is the dominant visual cue players notice, so that reads as "stale" even
         // though no individual track repeated. Round-robin guarantees same-environment picks
         // are spread apart (until an environment runs out of tracks) while staying random.
-        private static List<string> RoundRobinShuffleByEnvironment(List<string> trackLines)
+        // Operates on INDICES into validTracks (not the line strings themselves) so two
+        // textually-identical lines can never be conflated — see bug-shuffle-toggle-and-tracks-
+        // incompatibility.md, Option 2 (this used to shuffle and return List<string> lines
+        // directly, back when tracks_to_rotate.txt itself was the thing being rewritten).
+        private static List<int> RoundRobinShuffleByEnvironment(List<string> validTracks)
         {
-            var groups = new Dictionary<string, List<string>>();
+            var groups = new Dictionary<string, List<int>>();
             var envOrder = new List<string>();
-            foreach (var line in trackLines)
+            for (int i = 0; i < validTracks.Count; i++)
             {
-                string[] parts = line.Split(',');
+                string[] parts = validTracks[i].Split(',');
                 string env = parts.Length > 1 ? parts[1].Trim() : "";
                 if (!groups.ContainsKey(env))
                 {
-                    groups[env] = new List<string>();
+                    groups[env] = new List<int>();
                     envOrder.Add(env);
                 }
-                groups[env].Add(line);
+                groups[env].Add(i);
             }
 
             foreach (var env in envOrder)
@@ -339,7 +445,7 @@ namespace LiftoffAutoLobby
                 for (int i = g.Count - 1; i > 0; i--)
                 {
                     int j = rng.Next(0, i + 1);
-                    string temp = g[i]; g[i] = g[j]; g[j] = temp;
+                    int temp = g[i]; g[i] = g[j]; g[j] = temp;
                 }
             }
 
@@ -349,10 +455,10 @@ namespace LiftoffAutoLobby
                 string temp = envOrder[i]; envOrder[i] = envOrder[j]; envOrder[j] = temp;
             }
 
-            var result = new List<string>();
+            var result = new List<int>();
             int round = 0;
             bool addedAny = true;
-            while (result.Count < trackLines.Count && addedAny)
+            while (result.Count < validTracks.Count && addedAny)
             {
                 addedAny = false;
                 foreach (var env in envOrder)

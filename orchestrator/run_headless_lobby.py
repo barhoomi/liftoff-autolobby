@@ -107,6 +107,16 @@ def round_robin_shuffle_by_environment(resolved_tracks):
     environment is the dominant visual cue players notice, so that reads as "stale"/repetitive
     even though no individual track repeated. Round-robin guarantees same-environment picks
     are spread apart (until an environment runs out of tracks) while staying genuinely random.
+
+    NOT called by resolve_and_write_playlist() as of
+    docs/features/doing/bug-shuffle-toggle-and-tracks-incompatibility.md (Option 2,
+    2026-07-23): tracks_to_rotate.txt is now always written in playlist definition order,
+    and the plugin owns 100% of shuffling as a derived overlay (see
+    plugin/Plugin.Rotation.cs's GetActiveRotationOrder/RoundRobinShuffleByEnvironment, a
+    ported version of this exact algorithm). Kept here -- rather than deleted along with its
+    call site -- because it is pure, well-tested, self-contained logic with no state to go
+    stale; if it never regains a caller, it and its dedicated tests in
+    test_run_headless_lobby.py are safe to delete together.
     """
     import random
 
@@ -137,13 +147,21 @@ def round_robin_shuffle_by_environment(resolved_tracks):
     return result
 
 
-def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_fallback=False, logger=None):
+def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_fallback=False, logger=None,
+                                playlists_path=None, master_list_path=None):
+    """playlists_path/master_list_path default to the real repo files (project_dir-relative,
+    exactly as before this signature grew the two optional params) -- they're only ever
+    overridden by tests, so master_tracks_list.json's real gitignored/generated-at-runtime
+    copy (see AGENTS.md) never has to exist on disk to unit-test this function's shuffle/
+    definition-order behavior in isolation."""
     import random
 
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    playlists_path = os.path.join(project_dir, "playlists.json")
-    master_list_path = os.path.join(project_dir, "master_tracks_list.json")
-    
+    if playlists_path is None:
+        playlists_path = os.path.join(project_dir, "playlists.json")
+    if master_list_path is None:
+        master_list_path = os.path.join(project_dir, "master_tracks_list.json")
+
     # Check playlists file
     if not os.path.exists(playlists_path):
         print(f"ERROR: Playlists file not found at {playlists_path}")
@@ -270,7 +288,8 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
                 logger.error("playlist resolved to 0 tracks; falling back to all_official_races",
                              context="playlist_resolution", playlist=playlist_name)
             return resolve_and_write_playlist("all_official_races", shuffle_enabled, output_file,
-                                              is_fallback=True, logger=logger)
+                                              is_fallback=True, logger=logger,
+                                              playlists_path=playlists_path, master_list_path=master_list_path)
         else:
             print(f"[Playlist] CRITICAL: '{playlist_name}' resolved to 0 tracks (fallback exhausted or unavailable). "
                   f"Writing empty rotation file — bot may get stuck.")
@@ -278,16 +297,18 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
                 logger.error("playlist resolved to 0 tracks; fallback exhausted, writing empty rotation",
                              context="playlist_resolution", playlist=playlist_name)
 
-    # tracks_to_rotate.txt's line order IS the rotation order — there's no separate
-    # "shuffled" vs "unshuffled" state. When shuffle is requested we randomize the
-    # order once here; the plugin re-shuffles this same file in place (and resets
-    # rotation_state.txt to 0) whenever it completes a full pass or shuffle is
-    # toggled on mid-session, so every fresh deal is a genuine new permutation.
-    if shuffle_enabled:
-        resolved_tracks = round_robin_shuffle_by_environment(resolved_tracks)
-        print("[Playlist] Shuffling track rotation order (round-robin by environment)...")
-    else:
-        print("[Playlist] Using track rotation in playlist definition order...")
+    # tracks_to_rotate.txt is the STATIC, authoritative playlist definition
+    # (docs/features/doing/bug-shuffle-toggle-and-tracks-incompatibility.md, Option 2) --
+    # always written here in resolved/definition order, regardless of shuffle_enabled. The
+    # orchestrator used to deal a shuffled order into this same file, which was the root
+    # cause of that bug: /tracks' PlaylistIndex (a line number in this file) drifted out
+    # from under any shuffle, and /shuffle off had no definition order left to restore
+    # (the file itself stayed shuffled forever -- "off" only ever flipped a flag). The
+    # plugin now owns 100% of shuffling, as a derived, self-regenerating overlay
+    # (shuffle_order.txt, plugin-owned, never written here) -- see
+    # plugin/Plugin.Rotation.cs's GetActiveRotationOrder/RoundRobinShuffleByEnvironment.
+    print("[Playlist] Writing track rotation in playlist definition order "
+          f"(shuffle={'on' if shuffle_enabled else 'off'} -- shuffling is applied by the plugin, not here)...")
 
     # Write to tracks_to_rotate.txt
     with open(output_file, "w") as f:
@@ -310,6 +331,25 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
         print(f"[Playlist] Reset rotation state in: {state_file}")
     except Exception as e:
         print(f"[Playlist] WARNING: Failed to reset rotation state file: {e}")
+
+    # A fresh playlist resolution (startup, or an in-session /playlist swap) must also
+    # invalidate any persisted shuffle deal. shuffle_order.txt is plugin-owned derived
+    # state that self-heals via a content signature (see GetActiveRotationOrder in
+    # Plugin.Rotation.cs), but that signature alone can't distinguish "brand new session,
+    # same playlist" from "same playlist, still mid-cycle" -- tracks_to_rotate.txt's bytes
+    # are identical either way now that this function always writes definition order.
+    # Deleting it here (the SAME trigger/call site that already resets rotation_state.txt
+    # above -- not a second synchronization channel the orchestrator has to remember to
+    # keep in step with the plugin) guarantees a genuinely fresh shuffle-bag deal every
+    # session, preserving the promise from docs/features/done/bug-shuffle-state-persists-
+    # across-sessions.md ("shuffle order feels stale/precomputed" was that original bug).
+    shuffle_order_file = os.path.join(os.path.dirname(output_file), "shuffle_order.txt")
+    try:
+        if os.path.exists(shuffle_order_file):
+            os.remove(shuffle_order_file)
+            print(f"[Playlist] Cleared stale shuffle order in: {shuffle_order_file}")
+    except Exception as e:
+        print(f"[Playlist] WARNING: Failed to clear shuffle order file: {e}")
 
 
 def load_config():
