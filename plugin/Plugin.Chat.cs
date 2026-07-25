@@ -132,8 +132,20 @@ namespace LiftoffAutoLobby
         // Chat-color formatting helpers. Every helper emits a fully balanced, properly nested
         // tag block (<b>/<i>/<color=…>) so the SplitMessage tag-tracking/re-opening logic stays
         // correct across chunk boundaries. Do not emit unbalanced tags here.
+        //
+        // client-chat-presentation.md tag policy: in client mode, IsAdmin(userId) ==
+        // IsLocalPlayer(userId) (Plugin.Config.cs) -- there is no other admin -- so every
+        // [ADMIN]-tagged message in client mode narrates the local host's own action back to
+        // them. Announcing your own action to yourself with a bot-style authority tag is noise,
+        // so it's dropped here, once, for every caller (mine and the ones in files outside this
+        // feature's partition) automatically -- no per-command special-casing. Informational tags
+        // (SYSTEM/INFO/HISTORY/PLAYERS/TRACKS/DEMOCRACY/PRO TIP/HELP) are untouched: they narrate
+        // room state or multi-party outcomes, not a single authorized action, so they stay in
+        // both roles. Dropping to "" (not omitting the call) means every existing call site needs
+        // no edit -- SendChatMessage below trims the resulting leading space.
         private static string FormatTag(string text, string colorHex)
         {
+            if (text == "ADMIN" && IsClientMode) return "";
             return $"<b><color={colorHex}>[{text}]</color></b>";
         }
 
