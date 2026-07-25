@@ -403,6 +403,15 @@ namespace LiftoffAutoLobby
             if (string.IsNullOrEmpty(message)) return;
             lastActivityTime = DateTime.UtcNow;
 
+            // client-chat-presentation.md: FormatTag("ADMIN", ...) returns "" in client mode, so
+            // "{FormatTag(...)} text" call sites degrade to " text" (the literal template space
+            // survives even though the tag text doesn't). Trim it here, once, for every caller.
+            // Safe for every other message too: FormatContinuation()'s "  ↳" indentation is
+            // *inside* a <color=...> tag, so that string's first character is '<', never a
+            // literal space -- TrimStart is a no-op for it.
+            message = message.TrimStart(' ');
+            if (string.IsNullOrEmpty(message)) return;
+
             if (message.Length <= CHAT_MAX_CHARS)
             {
                 SendChatMessageRaw(message);
