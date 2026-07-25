@@ -20,7 +20,14 @@ namespace LiftoffAutoLobby
             public void Execute(string userName, string userId, string argument)
             {
                 Settings.SetRotationPaused(false);
-                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation timer resumed by {FormatVariable(userName)}.");
+                if (IsClientMode)
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation timer resumed.");
+                }
+                else
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation timer resumed by {FormatVariable(userName)}.");
+                }
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} ran /resume.");
             }
         }
