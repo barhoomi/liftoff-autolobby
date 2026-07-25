@@ -21,7 +21,14 @@ namespace LiftoffAutoLobby
             {
                 Settings.SetRotationEngaged(false);
                 Settings.SetRotationPaused(false); // stop is a full reset, not a resumable freeze
-                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation stopped by {FormatVariable(userName)}. Current track stays loaded — run /start to resume automatic rotation.");
+                if (IsClientMode)
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation stopped. Current track stays loaded — run /start to resume automatic rotation.");
+                }
+                else
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation stopped by {FormatVariable(userName)}. Current track stays loaded — run /start to resume automatic rotation.");
+                }
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} ran /stop — rotation disengaged.");
             }
         }
