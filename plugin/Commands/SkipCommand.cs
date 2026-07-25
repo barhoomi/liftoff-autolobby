@@ -42,7 +42,24 @@ namespace LiftoffAutoLobby
                 {
                     skipRequested = true;
                     chatWarnedAboutNextRace = false;
-                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Skipping to next track.");
+
+                    // client-chat-presentation.md: server-mode wording is the exact original
+                    // literal (byte-identical); client mode renders the customizable template,
+                    // peeking the next track so {track}/{environment} are available. Peeking is
+                    // gated behind IsClientMode so server mode's PeekNextTrackName call pattern
+                    // (and its logging) is completely unchanged.
+                    if (IsClientMode)
+                    {
+                        string env, mode; int idx;
+                        string next = PeekNextTrackName(out env, out mode, out idx);
+                        string body = RenderClientTemplate(Settings.SkipMessageTemplate, "Skipping to next track.",
+                            ("track", next ?? ""), ("environment", env ?? ""));
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} {body}");
+                    }
+                    else
+                    {
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Skipping to next track.");
+                    }
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} triggered /skip");
                     return;
                 }
