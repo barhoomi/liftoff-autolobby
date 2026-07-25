@@ -23,7 +23,14 @@ namespace LiftoffAutoLobby
             {
                 Settings.SetRotationPaused(true);
                 string note = IsRotationEngaged() ? "" : " (rotation is currently stopped — /start to activate)";
-                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation timer paused by {FormatVariable(userName)}.{note}");
+                if (IsClientMode)
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation timer paused.{note}");
+                }
+                else
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation timer paused by {FormatVariable(userName)}.{note}");
+                }
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} ran /pause.");
             }
         }
