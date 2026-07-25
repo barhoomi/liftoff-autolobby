@@ -167,6 +167,48 @@ namespace LiftoffAutoLobby
             return $"<color={activeTheme.mutedTextColor}>  ↳</color> ";
         }
 
+        // client-chat-presentation.md: customizable client-mode chat templates. A user-authored
+        // template can NEVER introduce chat markup -- every '<'/'>' character is stripped before
+        // it reaches SplitMessage, so a malformed template cannot break SplitMessage's tag-
+        // tracking (by construction, not by a runtime test -- see the feature doc's "Shared chat
+        // paths" section for why no C# test project exists to assert this directly). Rendered
+        // output is deliberately plain text: no FormatVariable/FormatHighlight markup is
+        // auto-applied around substituted placeholder values, since a user-placed {track} could
+        // land anywhere in their sentence and re-wrapping it would reintroduce the same
+        // tag-balance risk the stripper exists to avoid.
+        private static readonly Regex TemplateMarkupStrip = new Regex("[<>]");
+
+        private static string SanitizeTemplateText(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return raw ?? "";
+            return TemplateMarkupStrip.Replace(raw, "");
+        }
+
+        // Substitutes "{key}" tokens for the matching value (both sanitized first). Unknown/
+        // mistyped placeholder tokens are left as literal text in the output -- visible and
+        // debuggable, not silently swallowed.
+        private static string RenderTemplate(string template, params (string key, string value)[] placeholders)
+        {
+            string result = SanitizeTemplateText(template);
+            foreach (var (key, value) in placeholders)
+            {
+                result = result.Replace("{" + key + "}", SanitizeTemplateText(value));
+            }
+            return result;
+        }
+
+        // The one entry point every templated command call site should use (never RenderTemplate
+        // directly): falls back to builtinDefault when the config value is unset/blank, AND when
+        // the rendered result is blank (e.g. a user explicitly cleared the template) -- "sane
+        // defaults when unset" from the acceptance criteria, guaranteed once, not re-implemented
+        // per command.
+        private static string RenderClientTemplate(string userTemplate, string builtinDefault, params (string key, string value)[] placeholders)
+        {
+            string source = string.IsNullOrWhiteSpace(userTemplate) ? builtinDefault : userTemplate;
+            string rendered = RenderTemplate(source, placeholders);
+            return string.IsNullOrWhiteSpace(rendered) ? builtinDefault : rendered;
+        }
+
         private const int CHAT_MAX_CHARS = 220;
 
         private static string ParseTag(string s, int index, out int nextIndex)
