@@ -42,7 +42,16 @@ namespace LiftoffAutoLobby
                 skipRequested = true;
                 chatWarnedAboutNextRace = false;
 
-                SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation started by {FormatVariable(userName)}. Next: {FormatHighlight($"{env} - {next}")}");
+                if (IsClientMode)
+                {
+                    string rendered = RenderClientTemplate(Settings.RotationStartedTemplate, "Rotation started. Next: {environment} - {track}",
+                        ("track", next), ("environment", env));
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} {rendered}");
+                }
+                else
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Rotation started by {FormatVariable(userName)}. Next: {FormatHighlight($"{env} - {next}")}");
+                }
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} ran /start — rotation engaged.");
             }
         }
