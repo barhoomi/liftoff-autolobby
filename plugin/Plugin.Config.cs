@@ -104,6 +104,22 @@ namespace LiftoffAutoLobby
             bool RotationPaused { get; }        // default: false in both roles
             void SetRotationEngaged(bool engaged);
             void SetRotationPaused(bool paused);
+
+            // client-chat-presentation.md: customizable chat message templates. Client-only in
+            // v1 (public-release-v1 freeze) -- FileSettingsSource returns its literal default
+            // with NO file backing it (the server source gets no template files, by design; see
+            // the feature doc's "Non-goals"), so server call sites that never read these are
+            // unaffected either way, and any call site that DID read them in server mode would
+            // still get today's exact wording. Every server-mode Command.Execute() call site
+            // keeps using its original hardcoded string directly instead of reading these, so
+            // server output stays byte-identical regardless. Placeholders are substituted by
+            // Plugin.Chat.cs's RenderClientTemplate ({track}/{environment}/{time}, plus a couple
+            // of command-specific extras documented per template below and in the feature doc).
+            string SkipMessageTemplate { get; }     // /skip (admin path). {track} {environment}
+            string TrackJumpTemplate { get; }       // /track. {track} {environment}
+            string PrevTrackTemplate { get; }       // /prev. {track} {environment}
+            string RotationStartedTemplate { get; } // /start (client-only wording). {track} {environment}
+            string ExtendTemplate { get; }          // /extend (client-only wording). {seconds} {time} {track} {environment}
         }
 
         // Server source: the orchestrator's plain-text protocol files in BepInEx/plugins/, read
@@ -187,6 +203,17 @@ namespace LiftoffAutoLobby
             public void SetRotationEngaged(bool engaged) => WriteFileFlag("rotation_engaged.txt", engaged);
             public void SetRotationPaused(bool paused) => WriteFileFlag("rotation_paused.txt", paused);
 
+            // client-chat-presentation.md: server mode gets NO template files, ever -- these are
+            // literal in-memory defaults, never read from disk. No server call site actually
+            // reads them today (each keeps its own hardcoded string), but the property exists so
+            // FileSettingsSource fully implements ISettingsSource, matching every other member's
+            // pattern in this class.
+            public string SkipMessageTemplate => "Skipping to next track.";
+            public string TrackJumpTemplate => "Rotating to track: {track} ({environment})";
+            public string PrevTrackTemplate => "Rotating to the previous track: {track} ({environment})";
+            public string RotationStartedTemplate => "Rotation started. Next: {environment} - {track}";
+            public string ExtendTemplate => "Extended by {seconds}s. Next rotation in {time}s.";
+
             private static bool FileFlag(string fileName)
             {
                 try
@@ -231,6 +258,11 @@ namespace LiftoffAutoLobby
             private readonly ConfigEntry<string> overrideGameMode;
             private readonly ConfigEntry<bool> rotationEngaged;
             private readonly ConfigEntry<bool> rotationPaused;
+            private readonly ConfigEntry<string> skipMessageTemplate;
+            private readonly ConfigEntry<string> trackJumpTemplate;
+            private readonly ConfigEntry<string> prevTrackTemplate;
+            private readonly ConfigEntry<string> rotationStartedTemplate;
+            private readonly ConfigEntry<string> extendTemplate;
 
             public ConfigSettingsSource(ConfigFile config)
             {
@@ -254,6 +286,16 @@ namespace LiftoffAutoLobby
                     "(client mode boots with this false and does nothing until /start).");
                 rotationPaused = config.Bind("Rotation", "Paused", false,
                     "Whether the rotation timer is temporarily frozen. Toggled by /pause and /resume.");
+                skipMessageTemplate = config.Bind("Messages", "SkipMessage", "Skipping to next track.",
+                    "Chat message when skipping the current track. Placeholders: {track}, {environment}");
+                trackJumpTemplate = config.Bind("Messages", "TrackJump", "Rotating to track: {track} ({environment})",
+                    "Chat message when rotating to a specific track. Placeholders: {track}, {environment}");
+                prevTrackTemplate = config.Bind("Messages", "PrevTrack", "Rotating to the previous track: {track} ({environment})",
+                    "Chat message when rotating to the previous track. Placeholders: {track}, {environment}");
+                rotationStartedTemplate = config.Bind("Messages", "RotationStarted", "Rotation started. Next: {environment} - {track}",
+                    "Chat message when rotation starts (client-only wording). Placeholders: {track}, {environment}");
+                extendTemplate = config.Bind("Messages", "Extend", "Extended by {seconds}s. Next rotation in {time}s.",
+                    "Chat message when rotation is extended. Placeholders: {seconds}, {time}, {track}, {environment}");
             }
 
             public double RotationIntervalSeconds => rotationInterval.Value;
@@ -266,6 +308,11 @@ namespace LiftoffAutoLobby
             public bool RotationPaused => rotationPaused.Value;
             public void SetRotationEngaged(bool engaged) => rotationEngaged.Value = engaged;
             public void SetRotationPaused(bool paused) => rotationPaused.Value = paused;
+            public string SkipMessageTemplate => skipMessageTemplate.Value;
+            public string TrackJumpTemplate => trackJumpTemplate.Value;
+            public string PrevTrackTemplate => prevTrackTemplate.Value;
+            public string RotationStartedTemplate => rotationStartedTemplate.Value;
+            public string ExtendTemplate => extendTemplate.Value;
         }
 
         private static void LoadAdminIds()
