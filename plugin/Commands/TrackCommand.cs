@@ -64,7 +64,21 @@ namespace LiftoffAutoLobby
                     skipRequested = true;
                     chatWarnedAboutNextRace = false;
 
-                    SendTaggedLines("ADMIN", activeTheme.adminTagColor, $"Rotating to track: {FormatVariable(selected.TrackName)} ({selected.Environment})");
+                    // client-chat-presentation.md: server-mode wording is the exact original
+                    // literal (byte-identical, with its FormatVariable-colored track name).
+                    // Client mode renders the customizable TrackJumpTemplate instead (plain
+                    // text -- see Plugin.Chat.cs's RenderClientTemplate for why no markup is
+                    // auto-applied to templated output).
+                    if (IsClientMode)
+                    {
+                        string body = RenderClientTemplate(Settings.TrackJumpTemplate, "Rotating to track: {track} ({environment})",
+                            ("track", selected.TrackName ?? ""), ("environment", selected.Environment ?? ""));
+                        SendTaggedLines("ADMIN", activeTheme.adminTagColor, body);
+                    }
+                    else
+                    {
+                        SendTaggedLines("ADMIN", activeTheme.adminTagColor, $"Rotating to track: {FormatVariable(selected.TrackName)} ({selected.Environment})");
+                    }
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} triggered /track {index}. Updated rotation cursor (walk position {walkPos}) to static index {selected.PlaylistIndex}");
                 }
                 catch (Exception ex)
