@@ -629,6 +629,19 @@ namespace LiftoffAutoLobby
                 GameObject gameRoomObj = GameObject.Find("GameRoom");
                 bool inRoom = (gameRoomObj != null && gameRoomObj.activeInHierarchy);
 
+                // client-ingame-track-change.md (Plan B', code item 2): the "GameRoom" object is
+                // part of the MultiplayerMenu waiting-room UI and does NOT exist in a flight
+                // scene, so an in-flight client rotation would find inRoom == false and click
+                // nothing (allowCreate is false there, so the create branch is skipped too).
+                // Photon's own InRoom is the scene-independent truth. Gated on IsClientMode so
+                // the server path stays byte-for-byte identical: in server mode this condition is
+                // never evaluated (&& short-circuits on IsClientMode == false).
+                if (!inRoom && IsClientMode && IsPhotonInRoom())
+                {
+                    inRoom = true;
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Client: no GameRoom object in this scene (flight level) — using Photon InRoom for the in-room settings test.");
+                }
+
                 if (inRoom)
                 {
                     // We are in a room, we want to update settings. SHARED — this is the Update
