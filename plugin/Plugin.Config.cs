@@ -120,6 +120,7 @@ namespace LiftoffAutoLobby
             string PrevTrackTemplate { get; }       // /prev. {track} {environment}
             string RotationStartedTemplate { get; } // /start (client-only wording). {track} {environment}
             string ExtendTemplate { get; }          // /extend (client-only wording). {seconds} {time} {track} {environment}
+            string UpNextTemplate { get; }          // "Up next" rotation announcement. {track} {environment}
         }
 
         // Server source: the orchestrator's plain-text protocol files in BepInEx/plugins/, read
@@ -213,6 +214,7 @@ namespace LiftoffAutoLobby
             public string PrevTrackTemplate => "Rotating to the previous track: {track} ({environment})";
             public string RotationStartedTemplate => "Rotation started. Next: {environment} - {track}";
             public string ExtendTemplate => "Extended by {seconds}s. Next rotation in {time}s.";
+            public string UpNextTemplate => "Up next: {environment} - {track}";
 
             private static bool FileFlag(string fileName)
             {
@@ -263,6 +265,7 @@ namespace LiftoffAutoLobby
             private readonly ConfigEntry<string> prevTrackTemplate;
             private readonly ConfigEntry<string> rotationStartedTemplate;
             private readonly ConfigEntry<string> extendTemplate;
+            private readonly ConfigEntry<string> upNextTemplate;
 
             public ConfigSettingsSource(ConfigFile config)
             {
@@ -296,6 +299,8 @@ namespace LiftoffAutoLobby
                     "Chat message when rotation starts (client-only wording). Placeholders: {track}, {environment}");
                 extendTemplate = config.Bind("Messages", "Extend", "Extended by {seconds}s. Next rotation in {time}s.",
                     "Chat message when rotation is extended. Placeholders: {seconds}, {time}, {track}, {environment}");
+                upNextTemplate = config.Bind("Messages", "UpNext", "Up next: {environment} - {track}",
+                    "Chat message announcing the next track in rotation. Placeholders: {track}, {environment}");
             }
 
             public double RotationIntervalSeconds => rotationInterval.Value;
@@ -313,6 +318,7 @@ namespace LiftoffAutoLobby
             public string PrevTrackTemplate => prevTrackTemplate.Value;
             public string RotationStartedTemplate => rotationStartedTemplate.Value;
             public string ExtendTemplate => extendTemplate.Value;
+            public string UpNextTemplate => upNextTemplate.Value;
         }
 
         private static void LoadAdminIds()
