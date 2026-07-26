@@ -161,7 +161,16 @@ namespace LiftoffAutoLobby
                 string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
                 if (!string.IsNullOrEmpty(nextTrackName))
                 {
-                    SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} Up next: {FormatHighlight($"{nextEnv} - {nextTrackName}")}");
+                    if (IsClientMode)
+                    {
+                        string body = RenderClientTemplate(Settings.UpNextTemplate, "Up next: {environment} - {track}",
+                            ("track", nextTrackName ?? ""), ("environment", nextEnv ?? ""));
+                        SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} {body}");
+                    }
+                    else
+                    {
+                        SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} Up next: {FormatHighlight($"{nextEnv} - {nextTrackName}")}");
+                    }
                 }
                 else
                 {
