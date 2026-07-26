@@ -382,7 +382,14 @@ namespace LiftoffAutoLobby
                     roomOwnedByBot = false;
                     // democracy-skip.md: entering a (different) room starts with no skip votes.
                     skipVotes.Clear();
-                    QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} A room named '{FormatVariable($"{pendingPrivateRoomName}")}' already existed — joined it instead of creating a new one. <color={activeTheme.alertTagColor}><i>This bot is not the room owner and cannot control settings/rotation here.</i></color> Current host: please transfer host to this bot from the player list so it can control settings/rotation, or use /private with a different name to have the bot create its own room instead.");
+                    if (IsClientMode)
+                    {
+                        QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} A room named '{FormatVariable($"{pendingPrivateRoomName}")}' already existed — joined it instead of creating a new one. <color={activeTheme.alertTagColor}><i>You are not the room owner and cannot control settings/rotation here.</i></color> Transfer host back to yourself from the player list, or use /private with a different name to create your own room instead.");
+                    }
+                    else
+                    {
+                        QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} A room named '{FormatVariable($"{pendingPrivateRoomName}")}' already existed — joined it instead of creating a new one. <color={activeTheme.alertTagColor}><i>This bot is not the room owner and cannot control settings/rotation here.</i></color> Current host: please transfer host to this bot from the player list so it can control settings/rotation, or use /private with a different name to have the bot create its own room instead.");
+                    }
                     pendingPrivateRoomRename = false;
                     pendingPrivateRoomRenameStartTime = DateTime.MinValue;
                     pendingJoinByName = false;
