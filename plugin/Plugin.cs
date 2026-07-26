@@ -638,9 +638,22 @@ namespace LiftoffAutoLobby
 
             MaintainRotationPauseFreeze(); // hold the timer while paused; no-op once engaged+unpaused
 
-            if (sceneName != "MultiplayerMenu") return; // e.g. mid-race in a flight-level scene,
-                                                          // or the player briefly backed out —
-                                                          // do nothing, never navigate.
+            if (sceneName != "MultiplayerMenu")
+            {
+                // client-ingame-track-change.md (Plan B'): a flight level is no longer a dead end —
+                // rotation keeps running while the host is mid-race and applies the next track in
+                // place through the in-game settings popup. This still NEVER navigates, never opens
+                // the player's pause menu, and never takes them out of the flight level. Every other
+                // scene (main menu, splash/loading/unknown, or the player briefly backed out) stays
+                // a true no-op exactly as before. Flight-level detection mirrors the server tail's
+                // test in RunTick: "not one of the known non-flight scenes".
+                if (!string.IsNullOrEmpty(sceneName) && sceneName != "MainMenu" &&
+                    sceneName != "SplashScreen" && sceneName != "LoadingScreen" && sceneName != "UnknownScene")
+                {
+                    HandleClientInFlightRotation();
+                }
+                return;
+            }
 
             GameObject gameRoomObj = GameObject.Find("GameRoom");
             bool inRoom = (gameRoomObj != null && gameRoomObj.activeInHierarchy);
