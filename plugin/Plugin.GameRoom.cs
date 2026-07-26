@@ -234,10 +234,7 @@ namespace LiftoffAutoLobby
 
             if (inFlightPopupRequestedTime != DateTime.MinValue)
             {
-                // TODO (next micro-step): pickup/apply/confirm half — find the instantiated
-                // PopupQuickPlayMultiplayerSetup, drive it through ApplyRoomSettingsPopup(popup,
-                // allowCreate: false), confirm the effect with GetRoomPropertiesSnapshot before/
-                // after, and time out (InFlightPopupAppearTimeoutSeconds) if it never appears.
+                DriveInFlightSettingsPopup();
                 return;
             }
 
@@ -284,6 +281,123 @@ namespace LiftoffAutoLobby
             popupWasOpen = false;
             isSubmittingSettings = false;
             roomCreatedTime = DateTime.MaxValue;
+        }
+
+        // Pickup / apply / confirm half of the client in-flight rotation (Plan B', code item 4).
+        // Runs on every tick between the OnMultiplayerGameSettings() request and the resolution of
+        // the apply. Three outcomes, all of which end with the request state cleared and the
+        // rotation timer running again:
+        //   1. popup appears -> ApplyRoomSettingsPopup(popup, allowCreate:false) drives it (the same
+        //      live-proven driver server rotation uses; it clicks Update, never Create) -> once the
+        //      popup closes, confirm the effect and log honestly either way.
+        //   2. popup never appears within InFlightPopupAppearTimeoutSeconds -> warn, give up on this
+        //      rotation, retry on the next interval. currentTrackName untouched.
+        //   3. the player left the room mid-attempt -> abandon quietly.
+        private static void DriveInFlightSettingsPopup()
+        {
+            PopupQuickPlayMultiplayerSetup popup = GameObject.FindObjectOfType<PopupQuickPlayMultiplayerSetup>();
+            bool popupOpen = (popup != null && popup.gameObject.activeInHierarchy);
+
+            if (popupOpen)
+            {
+                if (!popupWasOpen)
+                {
+                    // First sighting: same initialization the waiting-room client path does on
+                    // popup open, so ApplyRoomSettingsPopup sees exactly the inputs it expects.
+                    popupOpenedTime = DateTime.Now;
+                    isSubmittingSettings = false;
+                    triedCustomContentTab = false;
+                    targetTrackName = GetNextTrackFromRotation(out targetEnvironment, out targetGameMode);
+                    popupWasOpen = true;
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Client in-flight rotation: settings popup is up; target '{targetEnvironment} - {targetTrackName}' ({targetGameMode}).");
+                }
+
+                if (isSubmittingSettings) return; // Update already clicked — wait for the popup to close
+
+                if ((DateTime.Now - popupOpenedTime).TotalSeconds < 2.0) return; // let it initialize
+
+                // Snapshot the room's custom properties immediately BEFORE the first drive attempt,
+                // so the post-apply diff has a valid baseline (AGENTS.md rules 2-3: confirm by
+                // observed effect, never by "the call didn't throw"). Taken once per request.
+                if (inFlightPropsBeforeApply == null)
+                {
+                    inFlightPropsBeforeApply = GetRoomPropertiesSnapshot();
+                }
+
+                // Keeps the player's own room name/visibility a deliberate no-op on Update.
+                SyncClientRoomIdentityForPopup();
+                ApplyRoomSettingsPopup(popup, allowCreate: false);
+                return;
+            }
+
+            // Popup is not open.
+            if (popupWasOpen)
+            {
+                // It was open and is now gone — the apply resolved (or the popup was dismissed).
+                ConfirmInFlightApply();
+                ClearInFlightRotationRequest(restartTimer: true);
+                return;
+            }
+
+            if (!IsPhotonInRoom())
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: no longer in a room while waiting for the settings popup — abandoning this rotation.");
+                ClearInFlightRotationRequest(restartTimer: true);
+                return;
+            }
+
+            double waited = (DateTime.Now - inFlightPopupRequestedTime).TotalSeconds;
+            if (waited >= InFlightPopupAppearTimeoutSeconds)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Client in-flight rotation: settings popup never appeared {waited:F1}s after OnMultiplayerGameSettings — giving up on this rotation, the track was NOT changed. Retrying on the next interval.");
+                ClearInFlightRotationRequest(restartTimer: true);
+            }
+        }
+
+        // Effect confirmation for an in-flight apply (VERDICT "Effect confirmation", AGENTS.md
+        // rules 2-3). Never claims success from a return value: the room's custom properties are
+        // the actual transport, and the loaded-track read-back is the independent second opinion.
+        // A null "before" snapshot means the baseline read failed — that is reported as unknown,
+        // never as success.
+        private static void ConfirmInFlightApply()
+        {
+            string after = GetRoomPropertiesSnapshot();
+            string loadedTrack, loadedEnv;
+            bool haveTrack = TryGetCurrentLoadedTrack(out loadedTrack, out loadedEnv);
+            string trackDetail = haveTrack ? $"{loadedEnv} - {loadedTrack}" : "unreadable";
+
+            if (inFlightPropsBeforeApply == null || after == null)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Client in-flight rotation: could not read room properties before/after the apply — result UNKNOWN (loaded track now: {trackDetail}).");
+                return;
+            }
+
+            if (after != inFlightPropsBeforeApply)
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Client in-flight rotation: room properties changed — apply CONFIRMED (loaded track now: {trackDetail}, target was '{targetEnvironment} - {targetTrackName}').");
+            }
+            else
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Client in-flight rotation: room properties are unchanged after the settings popup closed — the track was probably NOT changed (loaded track: {trackDetail}, target was '{targetEnvironment} - {targetTrackName}').");
+            }
+        }
+
+        // Clears the outstanding in-flight request and (by default) restarts the rotation timer that
+        // the request half froze at DateTime.MaxValue, so rotation keeps running whichever way the
+        // attempt ended. ApplyRoomSettingsPopup already restarts the timer when it clicks Update;
+        // this makes the failure paths behave the same instead of freezing rotation for the session.
+        private static void ClearInFlightRotationRequest(bool restartTimer)
+        {
+            inFlightPopupRequestedTime = DateTime.MinValue;
+            inFlightPropsBeforeApply = null;
+            popupWasOpen = false;
+            isSubmittingSettings = false;
+            if (restartTimer && roomCreatedTime == DateTime.MaxValue)
+            {
+                roomCreatedTime = DateTime.Now;
+                lastActivityTime = DateTime.UtcNow;
+                chatWarnedAboutNextRace = false;
+            }
         }
 
         private static void HandleFlightLevel()
