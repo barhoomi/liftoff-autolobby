@@ -153,6 +153,52 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            AnnounceNextTrackIfDue(elapsed);
+
+            if (skipRequested || elapsed >= GetRotationInterval())
+            {
+                if (skipRequested)
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Skip requested by admin — forcing rotation.");
+                skipRequested = false;
+                chatWarnedAboutNextRace = false;
+
+                // Timer expired (or skip forced) inside waiting room, open change settings popup!
+                string[] changeSettingsNames = { "buttonChangeRoomSettings", "btnChangeRoomSettings", "ChangeRoomSettings" };
+                Button changeSettingsBtn = FindButtonByTextOrName("CHANGE SETTINGS", changeSettingsNames);
+                if (changeSettingsBtn != null && changeSettingsBtn.gameObject.activeInHierarchy && changeSettingsBtn.interactable)
+                {
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Clicking CHANGE SETTINGS button.");
+                    changeSettingsBtn.onClick.Invoke();
+                    roomCreatedTime = DateTime.MaxValue; // Freeze timer until settings updated
+                }
+                return;
+            }
+
+            HandleKeepAlive();
+        }
+
+        // ---------------------------------------------------------------
+        // client-ingame-track-change.md (Plan B'): CLIENT-ONLY in-flight rotation. Server mode
+        // never reaches any of the members below; HandleFlightLevel (the server's
+        // exit-to-waiting-room path) is untouched.
+        // ---------------------------------------------------------------
+
+        // Room custom properties snapshotted immediately before an in-flight Update click, diffed
+        // against the live room afterwards to confirm the apply landed (AGENTS.md rules 2-3;
+        // VERDICT "Effect confirmation"). null means "unknown", never "changed".
+        private static string inFlightPropsBeforeApply = null;
+        // When the in-flight popup was requested, so a popup that never appears times out instead
+        // of freezing rotation for the rest of the session.
+        private static DateTime inFlightPopupRequestedTime = DateTime.MinValue;
+        private const double InFlightPopupAppearTimeoutSeconds = 15.0;
+
+        // Pre-rotation "Up next" callout. Extracted VERBATIM out of HandleGameRoom (pure move, no
+        // rewording — client-chat-presentation.md owns the message text) so the client in-flight
+        // rotation path can fire the same callout: conductor ruling 2026-07-26, from the
+        // operator's "callouts are client-critical" decision — an in-flight track change must be
+        // announced to the room exactly like a waiting-room one.
+        private static void AnnounceNextTrackIfDue(double elapsed)
+        {
             if (!chatWarnedAboutNextRace && elapsed >= GetRotationInterval() - 10.0 && elapsed < GetRotationInterval())
             {
                 chatWarnedAboutNextRace = true;
@@ -177,27 +223,190 @@ namespace LiftoffAutoLobby
                     UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] PeekNextTrackName returned null/empty.");
                 }
             }
+        }
 
-            if (skipRequested || elapsed >= GetRotationInterval())
+        // CLIENT-ONLY in-flight rotation (Plan B', code item 4). Called from HandleClientTick when
+        // the player is inside a flight level and rotation is engaged. Server mode never calls this
+        // — the server keeps its HandleFlightLevel exit-to-waiting-room path, untouched.
+        //
+        // Request half (this commit): on rotation-interval expiry (or an admin /skip), fire the same
+        // pre-rotation "Up next" callout the waiting-room path fires, ask InGameMenuMainPanel to
+        // instantiate the multiplayer settings popup, and record that a request is outstanding. The
+        // pickup/apply/confirm half runs on subsequent ticks (next micro-step).
+        //
+        // /pause and /stop keep working with no extra gate: /stop makes IsRotationEngaged() false so
+        // HandleClientTick never reaches here, and /pause holds roomCreatedTime at DateTime.MaxValue
+        // (MaintainRotationPauseFreeze), which this method treats as "timer not running".
+        private static void HandleClientInFlightRotation()
+        {
+            if (!IsClientMode) return; // defense in depth: server mode must never reach this path
+
+            if (inFlightPopupRequestedTime != DateTime.MinValue)
             {
-                if (skipRequested)
-                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Skip requested by admin — forcing rotation.");
-                skipRequested = false;
-                chatWarnedAboutNextRace = false;
-
-                // Timer expired (or skip forced) inside waiting room, open change settings popup!
-                string[] changeSettingsNames = { "buttonChangeRoomSettings", "btnChangeRoomSettings", "ChangeRoomSettings" };
-                Button changeSettingsBtn = FindButtonByTextOrName("CHANGE SETTINGS", changeSettingsNames);
-                if (changeSettingsBtn != null && changeSettingsBtn.gameObject.activeInHierarchy && changeSettingsBtn.interactable)
-                {
-                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Clicking CHANGE SETTINGS button.");
-                    changeSettingsBtn.onClick.Invoke();
-                    roomCreatedTime = DateTime.MaxValue; // Freeze timer until settings updated
-                }
+                DriveInFlightSettingsPopup();
                 return;
             }
 
-            HandleKeepAlive();
+            // DateTime.MaxValue = timer frozen (paused, or an apply in progress); DateTime.MinValue
+            // = never started. Neither is a running rotation timer.
+            if (roomCreatedTime == DateTime.MaxValue || roomCreatedTime == DateTime.MinValue) return;
+
+            double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
+
+            // Same callout as the waiting-room path, same text: an in-flight track change is
+            // announced to the room exactly like a waiting-room one (conductor ruling 2026-07-26
+            // from the operator's "callouts are client-critical" decision).
+            AnnounceNextTrackIfDue(elapsed);
+
+            if (!skipRequested && elapsed < GetRotationInterval()) return;
+
+            if (skipRequested)
+                UnityEngine.Debug.Log("[AutoLobbyPlugin] Client in-flight rotation: skip requested by admin — forcing rotation.");
+            skipRequested = false;
+            chatWarnedAboutNextRace = false;
+
+            // Photon's InRoom is the scene-independent in-room test (there is no "GameRoom" object
+            // in a flight scene). Nothing to update if the player is not in a room.
+            if (!IsPhotonInRoom())
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: interval expired but Photon reports not in a room — skipping this rotation.");
+                roomCreatedTime = DateTime.Now; // retry a full interval from now, not every tick
+                return;
+            }
+
+            if (!TryOpenInFlightMultiplayerSettingsPopup())
+            {
+                // Already logged by the helper. currentTrackName is deliberately left untouched:
+                // nothing changed, so nothing may be reported as changed (AGENTS.md rule 2).
+                roomCreatedTime = DateTime.Now; // retry on the next interval instead of hammering
+                return;
+            }
+
+            // Request is out. Freeze the rotation timer until the apply resolves (the same freeze
+            // the waiting-room path uses when it clicks CHANGE SETTINGS), and reset the popup-
+            // driving flags so the pickup half sees a clean first sighting.
+            inFlightPopupRequestedTime = DateTime.Now;
+            inFlightPropsBeforeApply = null;
+            popupWasOpen = false;
+            isSubmittingSettings = false;
+            roomCreatedTime = DateTime.MaxValue;
+        }
+
+        // Pickup / apply / confirm half of the client in-flight rotation (Plan B', code item 4).
+        // Runs on every tick between the OnMultiplayerGameSettings() request and the resolution of
+        // the apply. Three outcomes, all of which end with the request state cleared and the
+        // rotation timer running again:
+        //   1. popup appears -> ApplyRoomSettingsPopup(popup, allowCreate:false) drives it (the same
+        //      live-proven driver server rotation uses; it clicks Update, never Create) -> once the
+        //      popup closes, confirm the effect and log honestly either way.
+        //   2. popup never appears within InFlightPopupAppearTimeoutSeconds -> warn, give up on this
+        //      rotation, retry on the next interval. currentTrackName untouched.
+        //   3. the player left the room mid-attempt -> abandon quietly.
+        private static void DriveInFlightSettingsPopup()
+        {
+            PopupQuickPlayMultiplayerSetup popup = GameObject.FindObjectOfType<PopupQuickPlayMultiplayerSetup>();
+            bool popupOpen = (popup != null && popup.gameObject.activeInHierarchy);
+
+            if (popupOpen)
+            {
+                if (!popupWasOpen)
+                {
+                    // First sighting: same initialization the waiting-room client path does on
+                    // popup open, so ApplyRoomSettingsPopup sees exactly the inputs it expects.
+                    popupOpenedTime = DateTime.Now;
+                    isSubmittingSettings = false;
+                    triedCustomContentTab = false;
+                    targetTrackName = GetNextTrackFromRotation(out targetEnvironment, out targetGameMode);
+                    popupWasOpen = true;
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Client in-flight rotation: settings popup is up; target '{targetEnvironment} - {targetTrackName}' ({targetGameMode}).");
+                }
+
+                if (isSubmittingSettings) return; // Update already clicked — wait for the popup to close
+
+                if ((DateTime.Now - popupOpenedTime).TotalSeconds < 2.0) return; // let it initialize
+
+                // Snapshot the room's custom properties immediately BEFORE the first drive attempt,
+                // so the post-apply diff has a valid baseline (AGENTS.md rules 2-3: confirm by
+                // observed effect, never by "the call didn't throw"). Taken once per request.
+                if (inFlightPropsBeforeApply == null)
+                {
+                    inFlightPropsBeforeApply = GetRoomPropertiesSnapshot();
+                }
+
+                // Keeps the player's own room name/visibility a deliberate no-op on Update.
+                SyncClientRoomIdentityForPopup();
+                ApplyRoomSettingsPopup(popup, allowCreate: false);
+                return;
+            }
+
+            // Popup is not open.
+            if (popupWasOpen)
+            {
+                // It was open and is now gone — the apply resolved (or the popup was dismissed).
+                ConfirmInFlightApply();
+                ClearInFlightRotationRequest(restartTimer: true);
+                return;
+            }
+
+            if (!IsPhotonInRoom())
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: no longer in a room while waiting for the settings popup — abandoning this rotation.");
+                ClearInFlightRotationRequest(restartTimer: true);
+                return;
+            }
+
+            double waited = (DateTime.Now - inFlightPopupRequestedTime).TotalSeconds;
+            if (waited >= InFlightPopupAppearTimeoutSeconds)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Client in-flight rotation: settings popup never appeared {waited:F1}s after OnMultiplayerGameSettings — giving up on this rotation, the track was NOT changed. Retrying on the next interval.");
+                ClearInFlightRotationRequest(restartTimer: true);
+            }
+        }
+
+        // Effect confirmation for an in-flight apply (VERDICT "Effect confirmation", AGENTS.md
+        // rules 2-3). Never claims success from a return value: the room's custom properties are
+        // the actual transport, and the loaded-track read-back is the independent second opinion.
+        // A null "before" snapshot means the baseline read failed — that is reported as unknown,
+        // never as success.
+        private static void ConfirmInFlightApply()
+        {
+            string after = GetRoomPropertiesSnapshot();
+            string loadedTrack, loadedEnv;
+            bool haveTrack = TryGetCurrentLoadedTrack(out loadedTrack, out loadedEnv);
+            string trackDetail = haveTrack ? $"{loadedEnv} - {loadedTrack}" : "unreadable";
+
+            if (inFlightPropsBeforeApply == null || after == null)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Client in-flight rotation: could not read room properties before/after the apply — result UNKNOWN (loaded track now: {trackDetail}).");
+                return;
+            }
+
+            if (after != inFlightPropsBeforeApply)
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Client in-flight rotation: room properties changed — apply CONFIRMED (loaded track now: {trackDetail}, target was '{targetEnvironment} - {targetTrackName}').");
+            }
+            else
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Client in-flight rotation: room properties are unchanged after the settings popup closed — the track was probably NOT changed (loaded track: {trackDetail}, target was '{targetEnvironment} - {targetTrackName}').");
+            }
+        }
+
+        // Clears the outstanding in-flight request and (by default) restarts the rotation timer that
+        // the request half froze at DateTime.MaxValue, so rotation keeps running whichever way the
+        // attempt ended. ApplyRoomSettingsPopup already restarts the timer when it clicks Update;
+        // this makes the failure paths behave the same instead of freezing rotation for the session.
+        private static void ClearInFlightRotationRequest(bool restartTimer)
+        {
+            inFlightPopupRequestedTime = DateTime.MinValue;
+            inFlightPropsBeforeApply = null;
+            popupWasOpen = false;
+            isSubmittingSettings = false;
+            if (restartTimer && roomCreatedTime == DateTime.MaxValue)
+            {
+                roomCreatedTime = DateTime.Now;
+                lastActivityTime = DateTime.UtcNow;
+                chatWarnedAboutNextRace = false;
+            }
         }
 
         private static void HandleFlightLevel()

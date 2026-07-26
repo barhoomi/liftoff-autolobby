@@ -482,6 +482,101 @@ namespace LiftoffAutoLobby
             return false;
         }
 
+        // ---------------------------------------------------------------
+        // client-ingame-track-change.md (Plan B', code item 1): effect confirmation for an
+        // in-flight track apply, and the Photon in-room test the in-flight path needs.
+        // ---------------------------------------------------------------
+
+        // True when Photon says we are in a room. The in-flight rotation path cannot use the
+        // usual GameObject.Find("GameRoom") test: that object only exists in the
+        // MultiplayerMenu scene, not in a flight level (VERDICT code item 2). Thin named
+        // wrapper so call sites read as intent rather than as a magic property string.
+        private static bool IsPhotonInRoom()
+        {
+            return GetPhotonBoolProperty("InRoom");
+        }
+
+        // Snapshot of the current room's custom properties, rendered as a stable string.
+        //
+        // Why a string blob instead of reading the Track key directly: F6(b) established that
+        // the track rides in the room's custom properties under keys taken from an enum whose
+        // *members* are readable but whose key encoding in the Hashtable is written by
+        // obfuscated members of CurrentMultiplayerGame — addressing one key by literal would be
+        // exactly the guess AGENTS.md rule 1 forbids, and obfuscated names are not stable across
+        // game patches. Comparing a before/after snapshot needs no key names at all and matches
+        // the semantics of the game's own apply return value (F6a: `num > 0`, i.e. "at least one
+        // room property actually changed"). Keys are sorted so ordering noise never reads as a
+        // change. Returns null when there is no room / the read fails — callers must treat null
+        // as "unknown", never as "changed".
+        private static string GetRoomPropertiesSnapshot()
+        {
+            object room = GetPhotonCurrentRoom();
+            if (room == null) return null;
+            try
+            {
+                PropertyInfo propsProp = room.GetType().GetProperty("CustomProperties",
+                    BindingFlags.Public | BindingFlags.Instance);
+                var table = propsProp?.GetValue(room) as System.Collections.IDictionary;
+                if (table == null) return null;
+                var entries = new List<string>();
+                foreach (System.Collections.DictionaryEntry entry in table)
+                {
+                    entries.Add($"{entry.Key}={entry.Value}");
+                }
+                entries.Sort(StringComparer.Ordinal);
+                return string.Join("|", entries.ToArray());
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to snapshot room custom properties: {ex.Message}");
+                return null;
+            }
+        }
+
+        // The track the game currently has loaded, by display name, plus its environment.
+        //
+        // Second, independent effect confirmation (VERDICT confirmation step 2): the room
+        // properties say what was published, this says what the local client actually rebuilt.
+        // Every name used here survived obfuscation and was confirmed by decompile:
+        // `CurrentContentContainer` (a LugusSingletonExisting<> MonoBehaviour) exposes
+        // `public Level Level` and `public Track Track`; `Track : TrackQuickInfo : ShareableContent`
+        // gives the readable `public string Name { get; set; }` and the readable public field
+        // `string environment`. Reached via Resources.FindObjectsOfTypeAll rather than the Lugus
+        // generic static, matching the plugin's existing InGameMenuMainPanel access pattern.
+        private static bool TryGetCurrentLoadedTrack(out string trackName, out string environment)
+        {
+            trackName = null;
+            environment = null;
+            try
+            {
+                Type containerType = Type.GetType("CurrentContentContainer, Assembly-CSharp");
+                if (containerType == null) return false;
+                var containers = Resources.FindObjectsOfTypeAll(containerType);
+                object container = null;
+                foreach (var candidate in containers)
+                {
+                    if (candidate != null) { container = candidate; break; }
+                }
+                if (container == null) return false;
+
+                object track = containerType.GetProperty("Track",
+                    BindingFlags.Public | BindingFlags.Instance)?.GetValue(container);
+                if (track == null) return false;
+
+                Type trackType = track.GetType();
+                trackName = trackType.GetProperty("Name",
+                    BindingFlags.Public | BindingFlags.Instance)?.GetValue(track) as string;
+                environment = trackType.GetField("environment",
+                    BindingFlags.Public | BindingFlags.Instance)?.GetValue(track) as string;
+                return !string.IsNullOrEmpty(trackName);
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to read currently loaded track: {ex.Message}");
+                return false;
+            }
+        }
+
         private static bool GetPhotonBoolProperty(string propertyName)
         {
             try

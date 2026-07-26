@@ -629,6 +629,19 @@ namespace LiftoffAutoLobby
                 GameObject gameRoomObj = GameObject.Find("GameRoom");
                 bool inRoom = (gameRoomObj != null && gameRoomObj.activeInHierarchy);
 
+                // client-ingame-track-change.md (Plan B', code item 2): the "GameRoom" object is
+                // part of the MultiplayerMenu waiting-room UI and does NOT exist in a flight
+                // scene, so an in-flight client rotation would find inRoom == false and click
+                // nothing (allowCreate is false there, so the create branch is skipped too).
+                // Photon's own InRoom is the scene-independent truth. Gated on IsClientMode so
+                // the server path stays byte-for-byte identical: in server mode this condition is
+                // never evaluated (&& short-circuits on IsClientMode == false).
+                if (!inRoom && IsClientMode && IsPhotonInRoom())
+                {
+                    inRoom = true;
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Client: no GameRoom object in this scene (flight level) — using Photon InRoom for the in-room settings test.");
+                }
+
                 if (inRoom)
                 {
                     // We are in a room, we want to update settings. SHARED — this is the Update
@@ -664,6 +677,63 @@ namespace LiftoffAutoLobby
                     }
                 }
             }
+        }
+
+        // client-ingame-track-change.md (Plan B', code item 3): instantiate the multiplayer
+        // settings popup from INSIDE a flight level, without opening the in-game menu.
+        // Invokes InGameMenuMainPanel.OnMultiplayerGameSettings() by reflection (F5). Never calls
+        // InGameMenu.OpenMenuAtState/CloseInGameMenu — F8: all pause/cursor/input disruption
+        // lives there, and Plan B' exists to bypass it.
+        private static bool TryOpenInFlightMultiplayerSettingsPopup()
+        {
+            Type panelType = Type.GetType("InGameMenuMainPanel, Assembly-CSharp");
+            if (panelType == null)
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: InGameMenuMainPanel type not resolvable.");
+                return false;
+            }
+
+            // FindObjectsOfTypeAll (not FindObjectOfType): the in-game menu panel is inactive
+            // while the player is flying, so only the include-inactive search finds it. Same
+            // access pattern as the server's OnToWaitingRoom path in Plugin.GameRoom.cs.
+            object panel = null;
+            foreach (var candidate in Resources.FindObjectsOfTypeAll(panelType))
+            {
+                if (candidate != null) { panel = candidate; break; }
+            }
+            if (panel == null)
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: no InGameMenuMainPanel instance in this scene.");
+                return false;
+            }
+
+            // Private instance method (F5) — the same handler btnMultiplayerGameSettings is wired
+            // to in Awake(), so invoking it does exactly what clicking that button does, minus the
+            // menu-open path.
+            MethodInfo method = panelType.GetMethod("OnMultiplayerGameSettings",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (method == null)
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: InGameMenuMainPanel.OnMultiplayerGameSettings not found (game update?).");
+                return false;
+            }
+
+            try
+            {
+                method.Invoke(panel, null);
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Client in-flight rotation: OnMultiplayerGameSettings threw: {ex}");
+                return false;
+            }
+
+            // The handler is void, so "invoked without throwing" is all this layer can assert
+            // (AGENTS.md rule 2): true here means "popup instantiation was requested", NOT "the
+            // track changed". The caller finds the popup on a later tick and drives it, and the
+            // effect is confirmed from room state (item 4 / the Plugin.Photon.cs helpers).
+            UnityEngine.Debug.Log("[AutoLobbyPlugin] Client in-flight rotation: invoked InGameMenuMainPanel.OnMultiplayerGameSettings — settings popup should now exist.");
+            return true;
         }
 
         // Reflection Helpers to access private fields on PopupQuickPlayMultiplayerSetup
