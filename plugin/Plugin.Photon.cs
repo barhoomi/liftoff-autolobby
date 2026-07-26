@@ -435,12 +435,26 @@ namespace LiftoffAutoLobby
                 if (isLocal && !wasOwned)
                 {
                     UnityEngine.Debug.Log("[AutoLobbyPlugin] Master client switched to this bot — room is now bot-owned.");
-                    QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} This bot is now the room host — settings/rotation control restored.");
+                    if (IsClientMode)
+                    {
+                        QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} You are now the room host — settings/rotation control restored.");
+                    }
+                    else
+                    {
+                        QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} This bot is now the room host — settings/rotation control restored.");
+                    }
                 }
                 else if (!isLocal && wasOwned)
                 {
                     UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Master client switched away from this bot — room is no longer bot-owned.");
-                    QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Master client switched away from this bot. This bot no longer owns the room — settings/rotation control disabled.");
+                    if (IsClientMode)
+                    {
+                        QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Host status was transferred away from you — you no longer own this room — settings/rotation control disabled.");
+                    }
+                    else
+                    {
+                        QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Master client switched away from this bot. This bot no longer owns the room — settings/rotation control disabled.");
+                    }
                 }
             }
             catch (Exception ex)
