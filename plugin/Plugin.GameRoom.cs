@@ -153,21 +153,7 @@ namespace LiftoffAutoLobby
                 }
             }
 
-            if (!chatWarnedAboutNextRace && elapsed >= GetRotationInterval() - 10.0 && elapsed < GetRotationInterval())
-            {
-                chatWarnedAboutNextRace = true;
-                string nextEnv, nextMode;
-                int trackIdx;
-                string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
-                if (!string.IsNullOrEmpty(nextTrackName))
-                {
-                    SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} Up next: {FormatHighlight($"{nextEnv} - {nextTrackName}")}");
-                }
-                else
-                {
-                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] PeekNextTrackName returned null/empty.");
-                }
-            }
+            AnnounceNextTrackIfDue(elapsed);
 
             if (skipRequested || elapsed >= GetRotationInterval())
             {
@@ -189,6 +175,30 @@ namespace LiftoffAutoLobby
             }
 
             HandleKeepAlive();
+        }
+
+        // Pre-rotation "Up next" callout. Extracted VERBATIM out of HandleGameRoom (pure move, no
+        // rewording — client-chat-presentation.md owns the message text) so the client in-flight
+        // rotation path can fire the same callout: conductor ruling 2026-07-26, from the
+        // operator's "callouts are client-critical" decision — an in-flight track change must be
+        // announced to the room exactly like a waiting-room one.
+        private static void AnnounceNextTrackIfDue(double elapsed)
+        {
+            if (!chatWarnedAboutNextRace && elapsed >= GetRotationInterval() - 10.0 && elapsed < GetRotationInterval())
+            {
+                chatWarnedAboutNextRace = true;
+                string nextEnv, nextMode;
+                int trackIdx;
+                string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
+                if (!string.IsNullOrEmpty(nextTrackName))
+                {
+                    SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} Up next: {FormatHighlight($"{nextEnv} - {nextTrackName}")}");
+                }
+                else
+                {
+                    UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] PeekNextTrackName returned null/empty.");
+                }
+            }
         }
 
         private static void HandleFlightLevel()
