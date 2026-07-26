@@ -216,6 +216,76 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // CLIENT-ONLY in-flight rotation (Plan B', code item 4). Called from HandleClientTick when
+        // the player is inside a flight level and rotation is engaged. Server mode never calls this
+        // — the server keeps its HandleFlightLevel exit-to-waiting-room path, untouched.
+        //
+        // Request half (this commit): on rotation-interval expiry (or an admin /skip), fire the same
+        // pre-rotation "Up next" callout the waiting-room path fires, ask InGameMenuMainPanel to
+        // instantiate the multiplayer settings popup, and record that a request is outstanding. The
+        // pickup/apply/confirm half runs on subsequent ticks (next micro-step).
+        //
+        // /pause and /stop keep working with no extra gate: /stop makes IsRotationEngaged() false so
+        // HandleClientTick never reaches here, and /pause holds roomCreatedTime at DateTime.MaxValue
+        // (MaintainRotationPauseFreeze), which this method treats as "timer not running".
+        private static void HandleClientInFlightRotation()
+        {
+            if (!IsClientMode) return; // defense in depth: server mode must never reach this path
+
+            if (inFlightPopupRequestedTime != DateTime.MinValue)
+            {
+                // TODO (next micro-step): pickup/apply/confirm half — find the instantiated
+                // PopupQuickPlayMultiplayerSetup, drive it through ApplyRoomSettingsPopup(popup,
+                // allowCreate: false), confirm the effect with GetRoomPropertiesSnapshot before/
+                // after, and time out (InFlightPopupAppearTimeoutSeconds) if it never appears.
+                return;
+            }
+
+            // DateTime.MaxValue = timer frozen (paused, or an apply in progress); DateTime.MinValue
+            // = never started. Neither is a running rotation timer.
+            if (roomCreatedTime == DateTime.MaxValue || roomCreatedTime == DateTime.MinValue) return;
+
+            double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
+
+            // Same callout as the waiting-room path, same text: an in-flight track change is
+            // announced to the room exactly like a waiting-room one (conductor ruling 2026-07-26
+            // from the operator's "callouts are client-critical" decision).
+            AnnounceNextTrackIfDue(elapsed);
+
+            if (!skipRequested && elapsed < GetRotationInterval()) return;
+
+            if (skipRequested)
+                UnityEngine.Debug.Log("[AutoLobbyPlugin] Client in-flight rotation: skip requested by admin — forcing rotation.");
+            skipRequested = false;
+            chatWarnedAboutNextRace = false;
+
+            // Photon's InRoom is the scene-independent in-room test (there is no "GameRoom" object
+            // in a flight scene). Nothing to update if the player is not in a room.
+            if (!IsPhotonInRoom())
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: interval expired but Photon reports not in a room — skipping this rotation.");
+                roomCreatedTime = DateTime.Now; // retry a full interval from now, not every tick
+                return;
+            }
+
+            if (!TryOpenInFlightMultiplayerSettingsPopup())
+            {
+                // Already logged by the helper. currentTrackName is deliberately left untouched:
+                // nothing changed, so nothing may be reported as changed (AGENTS.md rule 2).
+                roomCreatedTime = DateTime.Now; // retry on the next interval instead of hammering
+                return;
+            }
+
+            // Request is out. Freeze the rotation timer until the apply resolves (the same freeze
+            // the waiting-room path uses when it clicks CHANGE SETTINGS), and reset the popup-
+            // driving flags so the pickup half sees a clean first sighting.
+            inFlightPopupRequestedTime = DateTime.Now;
+            inFlightPropsBeforeApply = null;
+            popupWasOpen = false;
+            isSubmittingSettings = false;
+            roomCreatedTime = DateTime.MaxValue;
+        }
+
         private static void HandleFlightLevel()
         {
             double elapsed = (DateTime.Now - sceneLoadTime).TotalSeconds;
