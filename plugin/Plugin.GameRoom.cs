@@ -177,6 +177,21 @@ namespace LiftoffAutoLobby
             HandleKeepAlive();
         }
 
+        // ---------------------------------------------------------------
+        // client-ingame-track-change.md (Plan B'): CLIENT-ONLY in-flight rotation. Server mode
+        // never reaches any of the members below; HandleFlightLevel (the server's
+        // exit-to-waiting-room path) is untouched.
+        // ---------------------------------------------------------------
+
+        // Room custom properties snapshotted immediately before an in-flight Update click, diffed
+        // against the live room afterwards to confirm the apply landed (AGENTS.md rules 2-3;
+        // VERDICT "Effect confirmation"). null means "unknown", never "changed".
+        private static string inFlightPropsBeforeApply = null;
+        // When the in-flight popup was requested, so a popup that never appears times out instead
+        // of freezing rotation for the rest of the session.
+        private static DateTime inFlightPopupRequestedTime = DateTime.MinValue;
+        private const double InFlightPopupAppearTimeoutSeconds = 15.0;
+
         // Pre-rotation "Up next" callout. Extracted VERBATIM out of HandleGameRoom (pure move, no
         // rewording — client-chat-presentation.md owns the message text) so the client in-flight
         // rotation path can fire the same callout: conductor ruling 2026-07-26, from the
