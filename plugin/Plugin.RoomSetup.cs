@@ -686,7 +686,28 @@ namespace LiftoffAutoLobby
         // lives there, and Plan B' exists to bypass it.
         private static bool TryOpenInFlightMultiplayerSettingsPopup()
         {
-            UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] TryOpenInFlightMultiplayerSettingsPopup: not implemented yet.");
+            Type panelType = Type.GetType("InGameMenuMainPanel, Assembly-CSharp");
+            if (panelType == null)
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: InGameMenuMainPanel type not resolvable.");
+                return false;
+            }
+
+            // FindObjectsOfTypeAll (not FindObjectOfType): the in-game menu panel is inactive
+            // while the player is flying, so only the include-inactive search finds it. Same
+            // access pattern as the server's OnToWaitingRoom path in Plugin.GameRoom.cs.
+            object panel = null;
+            foreach (var candidate in Resources.FindObjectsOfTypeAll(panelType))
+            {
+                if (candidate != null) { panel = candidate; break; }
+            }
+            if (panel == null)
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: no InGameMenuMainPanel instance in this scene.");
+                return false;
+            }
+
+            // TODO (next micro-step): invoke OnMultiplayerGameSettings() on `panel`.
             return false;
         }
 
