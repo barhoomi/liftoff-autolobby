@@ -707,8 +707,33 @@ namespace LiftoffAutoLobby
                 return false;
             }
 
-            // TODO (next micro-step): invoke OnMultiplayerGameSettings() on `panel`.
-            return false;
+            // Private instance method (F5) — the same handler btnMultiplayerGameSettings is wired
+            // to in Awake(), so invoking it does exactly what clicking that button does, minus the
+            // menu-open path.
+            MethodInfo method = panelType.GetMethod("OnMultiplayerGameSettings",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (method == null)
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] Client in-flight rotation: InGameMenuMainPanel.OnMultiplayerGameSettings not found (game update?).");
+                return false;
+            }
+
+            try
+            {
+                method.Invoke(panel, null);
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Client in-flight rotation: OnMultiplayerGameSettings threw: {ex}");
+                return false;
+            }
+
+            // The handler is void, so "invoked without throwing" is all this layer can assert
+            // (AGENTS.md rule 2): true here means "popup instantiation was requested", NOT "the
+            // track changed". The caller finds the popup on a later tick and drives it, and the
+            // effect is confirmed from room state (item 4 / the Plugin.Photon.cs helpers).
+            UnityEngine.Debug.Log("[AutoLobbyPlugin] Client in-flight rotation: invoked InGameMenuMainPanel.OnMultiplayerGameSettings — settings popup should now exist.");
+            return true;
         }
 
         // Reflection Helpers to access private fields on PopupQuickPlayMultiplayerSetup
