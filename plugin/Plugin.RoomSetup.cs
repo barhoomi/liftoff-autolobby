@@ -679,6 +679,17 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // client-ingame-track-change.md (Plan B', code item 3): instantiate the multiplayer
+        // settings popup from INSIDE a flight level, without opening the in-game menu.
+        // Invokes InGameMenuMainPanel.OnMultiplayerGameSettings() by reflection (F5). Never calls
+        // InGameMenu.OpenMenuAtState/CloseInGameMenu — F8: all pause/cursor/input disruption
+        // lives there, and Plan B' exists to bypass it.
+        private static bool TryOpenInFlightMultiplayerSettingsPopup()
+        {
+            UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] TryOpenInFlightMultiplayerSettingsPopup: not implemented yet.");
+            return false;
+        }
+
         // Reflection Helpers to access private fields on PopupQuickPlayMultiplayerSetup
         private static RoomSettingsPanel GetPopupRoomSettings(PopupQuickPlayMultiplayerSetup popup)
         {
