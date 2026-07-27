@@ -11,7 +11,8 @@
 set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 PRIMARY_LIFTOFF="${PRIMARY_LIFTOFF:-$HOME/.steam/debian-installation/steamapps/common/Liftoff}"
 
@@ -31,6 +32,6 @@ else
 fi
 
 echo "=== 3. Syncing to Bot Account ==="
-sudo "$SCRIPT_DIR/infra/setup_bot.sh"
+sudo "$REPO_ROOT/infra/setup_bot.sh"
 
 echo "=== Build and Sync Completed Successfully! ==="

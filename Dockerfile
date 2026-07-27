@@ -1,6 +1,6 @@
 # Dockerfile — procedural-fpv bot, containerized.
 #
-# Reproduces the host flow (see AGENTS.md / run_bot.sh / infra/setup_bot.sh) inside an
+# Reproduces the host flow (see scripts/run_bot.sh / infra/setup_bot.sh) inside an
 # isolated image: Xvfb virtual display + full graphical Steam client (for the Steamworks
 # runtime IPC the game binary needs at launch -- NOT just steamcmd; see the "Spec conflict"
 # section of docs/features/doing/docker-container.md for why both are installed) +
@@ -65,7 +65,7 @@ COPY --chown=botuser:botuser . /app
 
 # WORKDIR creates /app as root; COPY --chown fixes the copied *contents* but not the
 # directory entry itself, which botuser then can't write into (e.g. the entrypoint's
-# lobby_config.json/playlists.json symlink-into-/config step) without this.
+# config/*.json symlink-into-/config step) without this.
 RUN chown botuser:botuser /app \
     && chmod +x /app/infra/docker-entrypoint.sh /app/infra/install_bepinex.sh
 

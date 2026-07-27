@@ -32,8 +32,8 @@ MAIN_CHECKOUT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GAME_DIR = "/home/fpv_bot/.steam/debian-installation/steamapps/common/Liftoff"
 PLUGINS_DIR = f"{GAME_DIR}/BepInEx/plugins"
 SCENARIO_LOG_DIR = "/home/fpv_bot/scenario_logs"
-KILL_BOT_SH = f"{MAIN_CHECKOUT}/kill_bot.sh"
-RUN_BOT_SH = f"{MAIN_CHECKOUT}/run_bot.sh"
+KILL_BOT_SH = f"{MAIN_CHECKOUT}/scripts/kill_bot.sh"
+RUN_BOT_SH = f"{MAIN_CHECKOUT}/scripts/run_bot.sh"
 RUN_BEPINEX_SH = f"{GAME_DIR}/run_bepinex.sh"
 LIFTOFF_EXE = f"{GAME_DIR}/Liftoff.x86_64"
 

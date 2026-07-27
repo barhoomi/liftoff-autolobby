@@ -17,7 +17,7 @@ generator/                                                procedural track gener
 trackcheck/                                                track/playlist validation library
 infra/                                                     setup + Docker entrypoint scripts
 Dockerfile, docker-compose.yml                             containerized bot
-lobby_config.json, playlists.json                          starter config -- edit before running
+config/lobby_config.json, config/playlists.json            starter config -- edit before running
 ```
 
 ## Run it
@@ -33,8 +33,8 @@ not include a dedicated Steam account for you.
 
 ## Configure
 
-Edit `lobby_config.json` (Liftoff path inside the container, display, lobby name) and
-`playlists.json` (named track playlists) before starting. The plugin ⇄ orchestrator
+Edit `config/lobby_config.json` (Liftoff path inside the container, display, lobby name) and
+`config/playlists.json` (named track playlists) before starting. The plugin ⇄ orchestrator
 protocol is plain text files under BepInEx's `plugins/LiftoffAutoLobby/` directory
 (`tracks_to_rotate.txt`, `rotation_state.txt`, `admin_ids.txt`, ...) -- the orchestrator
 writes them, the plugin polls them.

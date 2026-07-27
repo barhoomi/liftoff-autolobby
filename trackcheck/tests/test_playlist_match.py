@@ -129,8 +129,10 @@ class TestParityWithOrchestratorResolver:
         fake_repo = tmp_path / "fake_repo"
         fake_orchestrator_dir = fake_repo / "orchestrator"
         fake_orchestrator_dir.mkdir(parents=True)
-        (fake_repo / "playlists.json").write_text(json.dumps(playlists_data))
-        (fake_repo / "master_tracks_list.json").write_text(json.dumps(master_data))
+        fake_config_dir = fake_repo / "config"
+        fake_config_dir.mkdir()
+        (fake_config_dir / "playlists.json").write_text(json.dumps(playlists_data))
+        (fake_config_dir / "master_tracks_list.json").write_text(json.dumps(master_data))
 
         # resolve_and_write_playlist() derives project_dir from
         # os.path.dirname(os.path.dirname(os.path.abspath(__file__))) at call time --

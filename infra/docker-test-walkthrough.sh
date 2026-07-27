@@ -45,7 +45,7 @@ echo "the two Steam sessions will kick each other."
 if pgrep -af 'run_headless_lobby.py|Liftoff\.x86_64$' >/dev/null 2>&1; then
     echo
     echo "WARNING: it looks like the host bot (or the game) is currently running."
-    echo "Stop it first (kill_bot.sh) before continuing."
+    echo "Stop it first (scripts/kill_bot.sh) before continuing."
     pause
 fi
 

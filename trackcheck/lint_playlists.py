@@ -18,7 +18,7 @@ playlist_match.py's docstring for how that's kept in sync). Flags:
     {environment, track, mode} object
 
 Exits nonzero (and prints every finding) if anything above is flagged for any
-playlist. Intended to run in `run_tests.sh` and, per the feature doc, to be callable
+playlist. Intended to run in `scripts/run_tests.sh` and, per the feature doc, to be callable
 by the orchestrator at startup for a loud pre-fallback warning.
 """
 
@@ -37,8 +37,8 @@ from trackcheck.playlist_match import normalize_playlist_item, resolve_playlist
 KNOWN_MODES = {"Infinite Race", "Classic Race", "Dropout Race", "Survival"}
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_PLAYLISTS_PATH = os.path.join(_PROJECT_ROOT, "playlists.json")
-DEFAULT_MASTER_PATH = os.path.join(_PROJECT_ROOT, "master_tracks_list.json")
+DEFAULT_PLAYLISTS_PATH = os.path.join(_PROJECT_ROOT, "config", "playlists.json")
+DEFAULT_MASTER_PATH = os.path.join(_PROJECT_ROOT, "config", "master_tracks_list.json")
 
 
 def _is_known_environment_pattern(env_pattern):

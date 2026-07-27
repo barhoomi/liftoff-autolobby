@@ -30,7 +30,7 @@ WIDTH=640
 HEIGHT=480
 
 # Load config file if present
-CONF="$SCRIPT_DIR/bot_launch.conf"
+CONF="$(cd "$SCRIPT_DIR/.." && pwd)/config/bot_launch.conf"
 if [[ -f "$CONF" ]]; then
     # shellcheck source=/dev/null
     source "$CONF"

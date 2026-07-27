@@ -42,8 +42,8 @@ fi
 sudo cp -r "$SRC_PROJECT_DIR" "$DEST_PROJECT_DIR"
 
 # 3.5 Copy bot nickname config to both BepInEx plugins directories
-cp "$SRC_PROJECT_DIR/bot_nickname.txt" "$SRC_GAME_DIR/BepInEx/plugins/" 2>/dev/null || true
-sudo cp "$SRC_PROJECT_DIR/bot_nickname.txt" "$DEST_GAME_DIR/BepInEx/plugins/" 2>/dev/null || true
+cp "$SRC_PROJECT_DIR/config/bot_nickname.txt" "$SRC_GAME_DIR/BepInEx/plugins/" 2>/dev/null || true
+sudo cp "$SRC_PROJECT_DIR/config/bot_nickname.txt" "$DEST_GAME_DIR/BepInEx/plugins/" 2>/dev/null || true
 
 # 4. Fix permissions
 echo "Setting owner permissions to fpv_bot..."
@@ -55,7 +55,7 @@ sudo chmod +x "$DEST_GAME_DIR"/*.sh
 echo "Updating bot config to point to new executable path..."
 sudo python3 -c "
 import json
-path = '$DEST_PROJECT_DIR/lobby_config.json'
+path = '$DEST_PROJECT_DIR/config/lobby_config.json'
 with open(path, 'r') as f:
     data = json.load(f)
 data['liftoff_path'] = '$DEST_GAME_DIR/Liftoff.x86_64'

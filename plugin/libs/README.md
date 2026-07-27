@@ -19,7 +19,7 @@ new game version with that repo's `refresh.sh`.
 Either:
 
 - Don't — just pass `-p:LiftoffPath=/path/to/your/Liftoff/install` to `dotnet build` (this is
-  what `build.sh` and `infra/package_release.sh` do), **or**
+  what `scripts/build.sh` and `infra/package_release.sh` do), **or**
 - Copy these 11 files here from your own Liftoff install's `Liftoff_Data/Managed/` folder:
   - `Assembly-CSharp.dll`
   - `PhotonRealtime.dll`

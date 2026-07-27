@@ -59,7 +59,7 @@ def main():
         # Update rotation configuration file
         try:
             import json
-            config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lobby_config.json")
+            config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "lobby_config.json")
             if os.path.exists(config_path):
                 with open(config_path, "r") as f:
                     config = json.load(f)

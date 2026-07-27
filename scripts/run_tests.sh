@@ -6,7 +6,7 @@
 # scripts can reach system-installed packages), but that shadows this venv's
 # own pytest/pluggy/packaging with older system versions and breaks pytest's
 # own imports. Clearing it here is scoped to this script only.
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 env -u PYTHONPATH venv/bin/python3 -m pytest "$@"
 PYTEST_STATUS=$?
 
@@ -15,7 +15,7 @@ PYTEST_STATUS=$?
 # doesn't exist on a fresh checkout or in CI. Lint against it when present (fails
 # loudly on real typos); skip with a warning rather than failing when it's absent --
 # see trackcheck/tests for the fixture-backed tests that always run regardless.
-if [ -f master_tracks_list.json ]; then
+if [ -f config/master_tracks_list.json ]; then
     echo "--- trackcheck: linting playlists.json against master_tracks_list.json ---"
     env -u PYTHONPATH venv/bin/python3 -m trackcheck.lint_playlists
     LINT_STATUS=$?
