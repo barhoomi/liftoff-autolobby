@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bot-up.sh — start the Dockerized Liftoff bot and wait for it to come up.
 #
-# Supersedes restart_bot.sh (bare-metal era) for normal operation. Operator
+# Supersedes the bare-metal-era launch scripts for normal operation. Operator
 # directive 2026-07-17: the bot runs in Docker only.
 #
 # NEVER run `docker compose down -v` (or otherwise remove volumes). The

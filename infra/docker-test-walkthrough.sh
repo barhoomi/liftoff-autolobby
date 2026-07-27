@@ -40,7 +40,7 @@ fi
 echo "docker + docker compose found."
 echo
 echo "IMPORTANT: this test uses the bot's real Steam account (\"Bar's Bot\")."
-echo "Do not run this at the same time as the live host bot (restart_bot.sh) —"
+echo "Do not run this at the same time as the live host bot (bare-metal launch) —"
 echo "the two Steam sessions will kick each other."
 if pgrep -af 'run_headless_lobby.py|Liftoff\.x86_64$' >/dev/null 2>&1; then
     echo
