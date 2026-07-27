@@ -133,7 +133,7 @@
   </Target>
 
   <!--
-    Deploy-on-build for the local two-user dev loop (AGENTS.md: dev-user's personal Steam
+    Deploy-on-build for the local two-user dev loop (the dev user's personal Steam
     install). Only runs when $(LiftoffPath) was explicitly set AND actually exists; a
     default build (CI, or any machine without a Liftoff install) must not try to write
     outside the repo.

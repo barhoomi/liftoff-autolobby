@@ -118,3 +118,12 @@ generator/staging/
 liftoff_pro_username.txt
 liftoff_pro_password.txt
 Credentials.xml
+
+# Private project material — kept locally only; purged from public history (2026-07-27 rewrite)
+/docs/
+/.claude/
+/.agents/
+/CLAUDE.md
+/AGENTS.md
+/GEMINI.md
+/gemini_execution_plan.md

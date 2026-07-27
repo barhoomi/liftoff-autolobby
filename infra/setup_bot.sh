@@ -5,9 +5,12 @@ set -e
 
 echo "=== Liftoff Bot Account Setup Script ==="
 
-SRC_GAME_DIR="/home/dev-user/.steam/debian-installation/steamapps/common/Liftoff"
+# Runs under sudo (see build.sh), so the dev user's home comes from SUDO_USER, and the
+# project dir from this script's own location.
+DEV_HOME="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)"
+SRC_GAME_DIR="${SRC_GAME_DIR:-$DEV_HOME/.steam/debian-installation/steamapps/common/Liftoff}"
 DEST_GAME_DIR="/home/fpv_bot/.steam/debian-installation/steamapps/common/Liftoff"
-SRC_PROJECT_DIR="/home/dev-user/Projects/procedural-fpv"
+SRC_PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST_PROJECT_DIR="/home/fpv_bot/procedural-fpv"
 
 # 1. Check directories

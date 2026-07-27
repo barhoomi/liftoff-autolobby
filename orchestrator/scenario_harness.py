@@ -7,15 +7,15 @@ second launch, config files read once per-process at Awake(), the need to md5sum
 every deploy, etc).
 
 Everything that touches the `fpv_bot` account goes through `sudo -u fpv_bot -n` — never
-plain `sudo` (root), since `/home/dev-user` is mode 750 and fpv_bot cannot traverse into
-it directly. Anything that needs to move bytes from dev-user's filesystem into fpv_bot's
-(the built DLL, config file contents) is read locally as dev-user first, then piped into
-a `tee`/`cat` running as fpv_bot via stdin — never a cross-user `cp`.
+plain `sudo` (root), since the dev user's home is mode 750 and fpv_bot cannot traverse
+into it directly. Anything that needs to move bytes from the dev user's filesystem into
+fpv_bot's (the built DLL, config file contents) is read locally as the dev user first,
+then piped into a `tee`/`cat` running as fpv_bot via stdin — never a cross-user `cp`.
 
-The reverse also holds: `/home/fpv_bot` itself is mode 750, so *dev-user* cannot `cd`
+The reverse also holds: `/home/fpv_bot` itself is mode 750, so the dev user cannot `cd`
 into anything under it either (confirmed live — `cd /home/fpv_bot/...` fails with
-"permission denied" as dev-user). subprocess.Popen's `cwd=` performs the chdir in the
-child *before* exec, i.e. still as dev-user, so it can never point under
+"permission denied"). subprocess.Popen's `cwd=` performs the chdir in the
+child *before* exec, i.e. still as the dev user, so it can never point under
 `/home/fpv_bot`. Every launch below therefore uses absolute paths for everything and
 never passes `cwd=` for a path under `/home/fpv_bot` — Python resolves `__file__`
 absolutely regardless of cwd, and `run_bepinex.sh`/`Liftoff.x86_64` are invoked by
@@ -28,7 +28,7 @@ import subprocess
 import time
 import uuid
 
-MAIN_CHECKOUT = "/home/dev-user/Projects/procedural-fpv"
+MAIN_CHECKOUT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GAME_DIR = "/home/fpv_bot/.steam/debian-installation/steamapps/common/Liftoff"
 PLUGINS_DIR = f"{GAME_DIR}/BepInEx/plugins"
 SCENARIO_LOG_DIR = "/home/fpv_bot/scenario_logs"
@@ -38,10 +38,10 @@ RUN_BEPINEX_SH = f"{GAME_DIR}/run_bepinex.sh"
 LIFTOFF_EXE = f"{GAME_DIR}/Liftoff.x86_64"
 
 # fpv_bot's own deployed copy of the project (set up by infra/setup_bot.sh). The server
-# role must run *from here*, not from this worktree under /home/dev-user -- that
+# role must run *from here*, not from a checkout under the dev user's home -- that
 # directory is mode 750, so fpv_bot can't even traverse into it, let alone read a
 # script out of it (confirmed live: "python3: can't open file
-# '/home/dev-user/.../run_headless_lobby.py': [Errno 13] Permission denied").
+# '/home/<dev>/.../run_headless_lobby.py': [Errno 13] Permission denied").
 BOT_PROJECT_DIR = "/home/fpv_bot/procedural-fpv"
 ORCHESTRATOR_SCRIPT_REMOTE = f"{BOT_PROJECT_DIR}/orchestrator/run_headless_lobby.py"
 # run_headless_lobby.py imports event_log at module load; it must be deployed alongside

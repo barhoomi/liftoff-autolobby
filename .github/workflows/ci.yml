@@ -1,6 +1,6 @@
 name: CI
 
-# Push/PR gate (build-release-pipeline.md R1 item 4): catches the "works on dev-user's
+# Push/PR gate (build-release-pipeline.md R1 item 4): catches the "works on my
 # machine" class of breakage that was previously invisible. Two independent jobs so a
 # Python-only PR isn't blocked on the plugin DLL restore, and vice versa.
 

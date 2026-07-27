@@ -13,7 +13,7 @@ TRACK_IDS=(
   3067920271 # Part 9
 )
 
-SRC_DIR="/home/dev-user/.steam/debian-installation/steamapps/workshop/content/410340"
+SRC_DIR="$HOME/.steam/debian-installation/steamapps/workshop/content/410340"
 DST_DIR="/home/fpv_bot/.steam/debian-installation/steamapps/workshop/content/410340"
 
 echo "Copying invntn_ skill series tracks to fpv_bot workshop directory..."

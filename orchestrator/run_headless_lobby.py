@@ -454,7 +454,7 @@ def main():
     liftoff_path = os.path.expanduser(config.get("liftoff_path", ""))
     lobby_name = args.lobby_name if args.lobby_name else config.get("lobby_name", "Procedural Loop Room")
     
-    # Auto-correct paths referencing another user's home (e.g. /home/fpv_bot vs /home/dev-user)
+    # Auto-correct paths referencing another user's home (e.g. /home/fpv_bot vs the dev user's home)
     if not os.path.exists(liftoff_path):
         import getpass
         current_user = getpass.getuser()
