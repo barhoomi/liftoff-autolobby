@@ -41,9 +41,24 @@ mkdir -p "$DIST"
 
 echo "--- Assembling player package ---"
 PLAYER_STAGE="$DIST/player-stage"
-mkdir -p "$PLAYER_STAGE/BepInEx/plugins/LiftoffAutoLobby"
-cp "$DLL" "$PLAYER_STAGE/BepInEx/plugins/LiftoffAutoLobby/LiftoffAutoLobby.dll"
-cp packaging/player/tracks_to_rotate.example.txt "$PLAYER_STAGE/BepInEx/plugins/LiftoffAutoLobby/tracks_to_rotate.txt"
+# DLL and data files go FLAT into BepInEx/plugins/ -- the plugin resolves its data dir
+# as <gameRoot>/BepInEx/plugins (Plugin.cs pluginPath), so a subfolder would make it
+# miss tracks_to_rotate.txt and every other config/state file.
+mkdir -p "$PLAYER_STAGE/BepInEx/plugins" "$PLAYER_STAGE/BepInEx/config"
+cp "$DLL" "$PLAYER_STAGE/BepInEx/plugins/LiftoffAutoLobby.dll"
+cp packaging/player/tracks_to_rotate.example.txt "$PLAYER_STAGE/BepInEx/plugins/tracks_to_rotate.txt"
+# Ship Role = client preconfigured: the plugin defaults to 'server' (full menu
+# automation, room creation, auto-login) which must never run on a player's personal
+# account. BepInEx merges this file and fills in any missing entries on first launch.
+cat > "$PLAYER_STAGE/BepInEx/config/com.lugus.liftoff.autolobby.cfg" <<'CFGEOF'
+[General]
+
+## Plugin role. 'client' (this package) runs inside your own game: no menu automation,
+## no auto-login, no room creation -- it sits idle until you type /start in a room you
+## host. Do NOT change this to 'server' unless you are running the dedicated-bot
+## server package on a separate Steam account.
+Role = client
+CFGEOF
 cp packaging/player/README.md "$PLAYER_STAGE/README.md"
 PLAYER_ZIP="$REPO_ROOT/$DIST/liftoff-autolobby-player-v$VERSION.zip"
 ( cd "$PLAYER_STAGE" && zip -r -q "$PLAYER_ZIP" . )
