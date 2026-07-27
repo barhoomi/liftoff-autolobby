@@ -4,10 +4,15 @@ This directory is the **default** target for `LiftoffAutoLobby.csproj`'s game-as
 references when `$(LiftoffPath)` is not set (see that file's `LiftoffManagedPath` property
 and `docs/features/doing/build-release-pipeline.md` section 2/2a for the full reasoning).
 
-**Nothing in this directory is committed to git.** Liftoff's own assemblies are LuGus
-Studios'/Unity's code, not this project's, so they don't belong in a public repo — see the
-feature doc's licensing section for the decision (Option 1) and the operator runbook for how
-CI restores them from a private source instead.
+**No game assemblies in this directory are committed to git.** Liftoff's own assemblies
+are LuGus Studios'/Unity's code, not this project's, so they don't belong in a public
+repo — see the feature doc's licensing section for the decision (Option 1). CI restores
+them from the private `barhoomi/procedural-fpv-libs` repo instead, which stores the
+bundle per Liftoff Steam buildid and publishes each as release `liftoff-<buildid>`
+(asset `liftoff-libs.zip`, the 11 DLLs flat). `liftoff-buildid.txt` here (the one file
+in this directory that IS committed, besides this README) pins which release this
+commit builds against — bump it after capturing a new game build with that repo's
+`refresh.sh`.
 
 ## Populating this directory for a local build
 
@@ -15,7 +20,7 @@ Either:
 
 - Don't — just pass `-p:LiftoffPath=/path/to/your/Liftoff/install` to `dotnet build` (this is
   what `build.sh` and `infra/package_release.sh` do), **or**
-- Copy these 7 files here from your own Liftoff install's `Liftoff_Data/Managed/` folder:
+- Copy these 11 files here from your own Liftoff install's `Liftoff_Data/Managed/` folder:
   - `Assembly-CSharp.dll`
   - `PhotonRealtime.dll`
   - `Photon3Unity3D.dll`

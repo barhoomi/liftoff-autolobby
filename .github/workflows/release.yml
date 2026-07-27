@@ -7,8 +7,8 @@ name: Release
 # NOTE (build-release-pipeline.md acceptance criteria): this workflow is committed but
 # not yet runnable end-to-end -- the build-packages job needs an operator-configured
 # private source for the game reference DLLs (Option-1 licensing decision; see that doc's
-# "Operator runbook" section). Until LIFTOFF_DLLS_URL/LIFTOFF_DLLS_TOKEN secrets exist,
-# this job fails at the "Restore game reference DLLs" step, on purpose and loudly.
+# "Operator runbook" section). Until the LIFTOFF_DLLS_TOKEN secret exists, this job
+# fails at the "Restore game reference DLLs" step, on purpose and loudly.
 
 on:
   push:
@@ -25,17 +25,21 @@ jobs:
         with:
           dotnet-version: "7.0.x"
 
+      # The DLL bundle is versioned per Liftoff Steam buildid in the private
+      # procedural-fpv-libs repo; plugin/libs/liftoff-buildid.txt pins which release
+      # this commit builds against.
       - name: Restore game reference DLLs (private source)
         env:
-          LIFTOFF_DLLS_URL: ${{ secrets.LIFTOFF_DLLS_URL }}
-          LIFTOFF_DLLS_TOKEN: ${{ secrets.LIFTOFF_DLLS_TOKEN }}
+          GH_TOKEN: ${{ secrets.LIFTOFF_DLLS_TOKEN }}
         run: |
-          if [ -z "$LIFTOFF_DLLS_URL" ]; then
-            echo "::error::LIFTOFF_DLLS_URL secret is not set -- see 'Operator runbook' in docs/features/doing/build-release-pipeline.md for how to create and configure the private DLL source. This is an operator setup step, not something this workflow can do for itself."
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::LIFTOFF_DLLS_TOKEN secret is not set -- see 'Operator runbook' in docs/features/doing/build-release-pipeline.md for how to create and configure the private DLL source. This is an operator setup step, not something this workflow can do for itself."
             exit 1
           fi
+          tag="liftoff-$(cat plugin/libs/liftoff-buildid.txt)"
+          gh release download "$tag" --repo barhoomi/procedural-fpv-libs \
+            --pattern liftoff-libs.zip --output /tmp/liftoff-libs.zip
           mkdir -p plugin/libs
-          curl -sSL -H "Authorization: token ${LIFTOFF_DLLS_TOKEN}" "$LIFTOFF_DLLS_URL" -o /tmp/liftoff-libs.zip
           unzip -oq /tmp/liftoff-libs.zip -d plugin/libs
 
       - name: Verify tag matches Directory.Build.props version

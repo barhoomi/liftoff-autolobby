@@ -21,18 +21,21 @@ jobs:
 
       # Same private-source restore as release.yml -- see that workflow and this feature
       # doc's "Operator runbook" for what has to exist before this step (and therefore
-      # this whole job) can pass.
+      # this whole job) can pass. The DLL bundle is versioned per Liftoff Steam buildid
+      # in the private procedural-fpv-libs repo; plugin/libs/liftoff-buildid.txt pins
+      # which release this commit builds against.
       - name: Restore game reference DLLs (private source)
         env:
-          LIFTOFF_DLLS_URL: ${{ secrets.LIFTOFF_DLLS_URL }}
-          LIFTOFF_DLLS_TOKEN: ${{ secrets.LIFTOFF_DLLS_TOKEN }}
+          GH_TOKEN: ${{ secrets.LIFTOFF_DLLS_TOKEN }}
         run: |
-          if [ -z "$LIFTOFF_DLLS_URL" ]; then
-            echo "::error::LIFTOFF_DLLS_URL secret is not set -- see 'Operator runbook' in docs/features/doing/build-release-pipeline.md."
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::LIFTOFF_DLLS_TOKEN secret is not set -- see 'Operator runbook' in docs/features/doing/build-release-pipeline.md."
             exit 1
           fi
+          tag="liftoff-$(cat plugin/libs/liftoff-buildid.txt)"
+          gh release download "$tag" --repo barhoomi/procedural-fpv-libs \
+            --pattern liftoff-libs.zip --output /tmp/liftoff-libs.zip
           mkdir -p plugin/libs
-          curl -sSL -H "Authorization: token ${LIFTOFF_DLLS_TOKEN}" "$LIFTOFF_DLLS_URL" -o /tmp/liftoff-libs.zip
           unzip -oq /tmp/liftoff-libs.zip -d plugin/libs
 
       - name: dotnet build (0 warnings required)
