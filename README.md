@@ -1,5 +1,6 @@
 # Liftoff Auto Lobby
 
+[![Latest release](https://img.shields.io/github/v/release/barhoomi/liftoff-autolobby)](https://github.com/barhoomi/liftoff-autolobby/releases/latest)
 [![CI](https://github.com/barhoomi/liftoff-autolobby/actions/workflows/ci.yml/badge.svg)](https://github.com/barhoomi/liftoff-autolobby/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20tested%20·%20Windows%20untested-blue.svg)](#install-player)
@@ -45,24 +46,26 @@ required) — see [`generator/`](generator/).
 | Platform | Linux (Windows untested) | Linux (Docker) |
 | Mode | `client` — plugin sits idle until you type `/start` in a room you host; you are automatically the admin | `server` — a Python orchestrator handles Steam login, game launch, recovery, and playlists on a dedicated Steam account |
 
-Until a tagged release exists there are no downloadable zips yet — build from source
-(below). Release zips will be `liftoff-autolobby-player-vX.Y.Z.zip` and
-`liftoff-autolobby-server-vX.Y.Z.zip`.
+**Download from the [Releases page](https://github.com/barhoomi/liftoff-autolobby/releases/latest)** —
+grab `liftoff-autolobby-player-vX.Y.Z.zip` or `liftoff-autolobby-server-vX.Y.Z.zip`.
+(Or build from source — see the bottom of this page.)
 
 ## Install (player)
 
-1. Install [BepInEx 5.x](https://github.com/BepInEx/BepInEx/releases) — the **Mono** build
+1. Download `liftoff-autolobby-player-vX.Y.Z.zip` from the
+   [latest release](https://github.com/barhoomi/liftoff-autolobby/releases/latest).
+2. Install [BepInEx 5.x](https://github.com/BepInEx/BepInEx/releases) — the **Mono** build
    (Liftoff is a Mono Unity game) — into your Liftoff install folder, and launch the game
    once so BepInEx generates its folder tree. On Linux that means extracting the Unix zip
    into e.g. `~/.steam/steam/steamapps/common/Liftoff`, `chmod +x run_bepinex.sh`, and
    setting the Steam launch option `/path/to/Liftoff/run_bepinex.sh %command%` (or running
    that script directly).
-2. Extract the player zip's `BepInEx/` folder over the game's `BepInEx/` folder. This puts
+3. Extract the player zip's `BepInEx/` folder over the game's `BepInEx/` folder. This puts
    `LiftoffAutoLobby.dll` and a starter `tracks_to_rotate.txt` **directly in
    `BepInEx/plugins/`** (flat — the plugin reads all its config/state files from that
    folder, so don't move them into a subfolder), plus a config file in `BepInEx/config/`
    that sets the plugin to client mode.
-3. Launch the game, join or host a multiplayer room, and type `/version` in chat to
+4. Launch the game, join or host a multiplayer room, and type `/version` in chat to
    confirm it's alive.
 
 If you built from source instead of using a zip: copy the DLL into `BepInEx/plugins/` and
@@ -153,6 +156,7 @@ The server package runs the same DLL in `server` mode: a Python orchestrator man
 Steam login, launch/recovery, and playlists, and writes the plugin's config as text files
 in `BepInEx/plugins/` instead of chat commands. Docker (`Dockerfile`,
 `docker-compose.yml`, `infra/docker-entrypoint.sh`) is the supported way to run it —
+a prebuilt image is published per release at `ghcr.io/barhoomi/liftoff-autolobby` —
 starter config lives in `config/`, and the plugin⇄orchestrator file protocol is
 documented in `orchestrator/run_headless_lobby.py`. It needs its own dedicated Steam
 account (one interactive login to prime the session, then it's unattended).
