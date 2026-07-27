@@ -95,6 +95,12 @@ plugin/bin/
 plugin/obj/
 LiftoffAutoLobby/
 
+# Game reference assemblies (Option 1 licensing decision, docs/features/doing/
+# build-release-pipeline.md section 2/2a) -- not committed; plugin/libs/README.md explains
+# how to populate this directory locally. README.md itself is not matched by these patterns.
+plugin/libs/*.dll
+plugin/libs/*.decompiled.cs
+
 # Runtime / generated data files
 tracks_to_rotate.txt
 master_tracks_list.json
