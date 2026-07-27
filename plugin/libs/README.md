@@ -8,11 +8,11 @@ and `docs/features/doing/build-release-pipeline.md` section 2/2a for the full re
 are LuGus Studios'/Unity's code, not this project's, so they don't belong in a public
 repo — see the feature doc's licensing section for the decision (Option 1). CI restores
 them from the private `barhoomi/procedural-fpv-libs` repo instead, which stores the
-bundle per Liftoff Steam buildid and publishes each as release `liftoff-<buildid>`
-(asset `liftoff-libs.zip`, the 11 DLLs flat). `liftoff-buildid.txt` here (the one file
-in this directory that IS committed, besides this README) pins which release this
-commit builds against — bump it after capturing a new game build with that repo's
-`refresh.sh`.
+bundle per Liftoff game version and publishes each as release `liftoff-<game-version>`
+(e.g. `liftoff-1.7.4`; asset `liftoff-libs.zip`, the 11 DLLs flat).
+`liftoff-version.txt` here (the one file in this directory that IS committed, besides
+this README) pins which release this commit builds against — bump it after capturing a
+new game version with that repo's `refresh.sh`.
 
 ## Populating this directory for a local build
 
