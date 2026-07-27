@@ -1,10 +1,10 @@
 # Liftoff Auto Lobby
 
-[![CI](https://github.com/barhoomi/procedural-fpv/actions/workflows/ci.yml/badge.svg)](https://github.com/barhoomi/procedural-fpv/actions/workflows/ci.yml)
+[![CI](https://github.com/barhoomi/liftoff-autolobby/actions/workflows/ci.yml/badge.svg)](https://github.com/barhoomi/liftoff-autolobby/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20tested%20·%20Windows%20untested-blue.svg)](#install-player)
 [![Game](https://img.shields.io/badge/game-Liftoff%3A%20FPV%20Drone%20Racing-8A2BE2.svg)](https://store.steampowered.com/app/410340/)
-[![Bug reports](https://img.shields.io/badge/bugs-GitHub%20Issues-orange.svg)](https://github.com/barhoomi/procedural-fpv/issues)
+[![Bug reports](https://img.shields.io/badge/bugs-GitHub%20Issues-orange.svg)](https://github.com/barhoomi/liftoff-autolobby/issues)
 
 An unofficial [BepInEx](https://github.com/BepInEx/BepInEx) plugin for *Liftoff: FPV Drone
 Racing* (Steam) that runs an auto-rotating multiplayer lobby: pick a list of tracks, and the
@@ -17,7 +17,7 @@ required) — see [`generator/`](generator/).
 > [!WARNING]
 > **Tested on Linux only so far.** Windows support is implemented but has not been
 > verified on real hardware yet. If you run it on Windows, expect rough edges — and please
-> [open an issue](https://github.com/barhoomi/procedural-fpv/issues) telling us how it went,
+> [open an issue](https://github.com/barhoomi/liftoff-autolobby/issues) telling us how it went,
 > even if it worked fine.
 
 > [!IMPORTANT]
@@ -29,7 +29,7 @@ required) — see [`generator/`](generator/).
 
 ## Found a bug?
 
-**[Open a GitHub issue](https://github.com/barhoomi/procedural-fpv/issues).** Include:
+**[Open a GitHub issue](https://github.com/barhoomi/liftoff-autolobby/issues).** Include:
 
 1. The output of `/version` (typed in room chat).
 2. Whether you're on the player or server package, and your OS.
@@ -169,7 +169,7 @@ account (one interactive login to prime the session, then it's unattended).
   (track/playlist validation), `config/` (runtime config), `scripts/` (dev + ops entry
   points), `infra/` (setup, Docker entrypoint, release packaging).
 
-Bug reports and PRs welcome — [GitHub issues](https://github.com/barhoomi/procedural-fpv/issues)
+Bug reports and PRs welcome — [GitHub issues](https://github.com/barhoomi/liftoff-autolobby/issues)
 is the place.
 
 ## License

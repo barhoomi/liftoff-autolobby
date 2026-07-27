@@ -6,9 +6,9 @@ by LuGus Studios.
 
 > **Tested on Linux only so far.** Windows is expected to work but has not been verified
 > on real hardware yet — if you try it, please report how it goes either way:
-> https://github.com/barhoomi/procedural-fpv/issues
+> https://github.com/barhoomi/liftoff-autolobby/issues
 
-Full, maintained documentation: https://github.com/barhoomi/procedural-fpv
+Full, maintained documentation: https://github.com/barhoomi/liftoff-autolobby
 
 ## Install
 
@@ -43,5 +43,5 @@ BepInEx's:
   `[AutoLobbyPlugin]` lines.
 - `BepInEx/LogOutput.log` only confirms the plugin loaded.
 
-Report bugs at https://github.com/barhoomi/procedural-fpv/issues with the `/version`
+Report bugs at https://github.com/barhoomi/liftoff-autolobby/issues with the `/version`
 output and the relevant `Player.log` excerpt.

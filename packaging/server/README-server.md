@@ -6,7 +6,7 @@ supervises it, the procedural track generator, and Docker packaging.
 
 This is a starting operations guide; see the project repository's README and
 `docs/features/` for the maintained version and full architecture notes
-(`https://github.com/barhoomi/procedural-fpv`).
+(`https://github.com/barhoomi/liftoff-autolobby`).
 
 ## Contents
 
