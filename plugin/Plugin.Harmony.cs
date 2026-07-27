@@ -77,7 +77,7 @@ namespace LiftoffAutoLobby
                 {
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Found validator method to patch: {targetType.FullName}::{targetMethod.Name}");
                     
-                    var harmony = new HarmonyLib.Harmony("com.lugus.liftoff.autolobby.patch");
+                    var harmony = new HarmonyLib.Harmony("com.barhoomi.liftoff.autolobby.patch");
                     var prefixMethod = typeof(AutoLobbyPlugin).GetMethod("ValidationPrefix", BindingFlags.NonPublic | BindingFlags.Static);
                     
                     if (prefixMethod != null)
@@ -104,7 +104,7 @@ namespace LiftoffAutoLobby
                         var chatPostfix = typeof(ChatMessagePatch).GetMethod("Postfix", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
                         if (chatPostfix != null)
                         {
-                            var harmony = new HarmonyLib.Harmony("com.lugus.liftoff.autolobby.chat");
+                            var harmony = new HarmonyLib.Harmony("com.barhoomi.liftoff.autolobby.chat");
                             harmony.Patch(chatTarget, postfix: new HarmonyLib.HarmonyMethod(chatPostfix));
                             UnityEngine.Debug.Log("[AutoLobbyPlugin] ChatMessagePatch applied successfully!");
                         }
@@ -133,7 +133,7 @@ namespace LiftoffAutoLobby
                         if (createInstanceMethod != null)
                         {
                             UnityEngine.Debug.Log("[AutoLobbyPlugin] Found RaceLinesVisualizer.CreateInstance! Patching with finalizer.");
-                            var harmony = new HarmonyLib.Harmony("com.lugus.liftoff.autolobby.visualizer");
+                            var harmony = new HarmonyLib.Harmony("com.barhoomi.liftoff.autolobby.visualizer");
                             var finalizerMethod = typeof(AutoLobbyPlugin).GetMethod("CreateInstanceFinalizer", BindingFlags.NonPublic | BindingFlags.Static);
                             if (finalizerMethod != null)
                             {
@@ -161,7 +161,7 @@ namespace LiftoffAutoLobby
                         .Select(t => t.FullName)
                         .ToArray();
 
-                    var harmony = new HarmonyLib.Harmony("com.lugus.liftoff.autolobby.photon");
+                    var harmony = new HarmonyLib.Harmony("com.barhoomi.liftoff.autolobby.photon");
                     var prefixMethod = typeof(AutoLobbyPlugin).GetMethod("PhotonContainerPrefix", BindingFlags.NonPublic | BindingFlags.Static);
                     
                     if (prefixMethod != null)
@@ -228,7 +228,7 @@ namespace LiftoffAutoLobby
                         MethodInfo onEnableMethod = waitingRoomPanelType.GetMethod("OnEnable", BindingFlags.NonPublic | BindingFlags.Instance);
                         if (onEnableMethod != null)
                         {
-                            var harmony = new HarmonyLib.Harmony("com.lugus.liftoff.autolobby.inactivitywatchdog");
+                            var harmony = new HarmonyLib.Harmony("com.barhoomi.liftoff.autolobby.inactivitywatchdog");
                             var prefixMethod = typeof(AutoLobbyPlugin).GetMethod("InactivityWatchdogPrefix", BindingFlags.NonPublic | BindingFlags.Static);
                             if (prefixMethod != null)
                             {

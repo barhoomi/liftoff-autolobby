@@ -50,7 +50,7 @@ cp packaging/player/tracks_to_rotate.example.txt "$PLAYER_STAGE/BepInEx/plugins/
 # Ship Role = client preconfigured: the plugin defaults to 'server' (full menu
 # automation, room creation, auto-login) which must never run on a player's personal
 # account. BepInEx merges this file and fills in any missing entries on first launch.
-cat > "$PLAYER_STAGE/BepInEx/config/com.lugus.liftoff.autolobby.cfg" <<'CFGEOF'
+cat > "$PLAYER_STAGE/BepInEx/config/com.barhoomi.liftoff.autolobby.cfg" <<'CFGEOF'
 [General]
 
 ## Plugin role. 'client' (this package) runs inside your own game: no menu automation,

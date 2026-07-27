@@ -1,5 +1,11 @@
 # Liftoff Auto Lobby
 
+[![CI](https://github.com/barhoomi/procedural-fpv/actions/workflows/ci.yml/badge.svg)](https://github.com/barhoomi/procedural-fpv/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20tested%20·%20Windows%20untested-blue.svg)](#install-player)
+[![Game](https://img.shields.io/badge/game-Liftoff%3A%20FPV%20Drone%20Racing-8A2BE2.svg)](https://store.steampowered.com/app/410340/)
+[![Bug reports](https://img.shields.io/badge/bugs-GitHub%20Issues-orange.svg)](https://github.com/barhoomi/procedural-fpv/issues)
+
 An unofficial [BepInEx](https://github.com/BepInEx/BepInEx) plugin for *Liftoff: FPV Drone
 Racing* (Steam) that runs an auto-rotating multiplayer lobby: pick a list of tracks, and the
 plugin cycles through them on a timer in a room you host, with chat commands to control
@@ -8,11 +14,13 @@ everything.
 The repo also contains a standalone procedural track generator (pure Python, no game
 required) — see [`generator/`](generator/).
 
-> ⚠️ **Tested on Linux only so far.** Windows support is implemented but has not been
+> [!WARNING]
+> **Tested on Linux only so far.** Windows support is implemented but has not been
 > verified on real hardware yet. If you run it on Windows, expect rough edges — and please
 > [open an issue](https://github.com/barhoomi/procedural-fpv/issues) telling us how it went,
 > even if it worked fine.
 
+> [!IMPORTANT]
 > **This project is not official, is not affiliated with, and is not supported by LuGus
 > Studios.** It drives the game's own UI from inside the process — the same technique other
 > Liftoff BepInEx mods use. No anti-cheat is known to exist in Liftoff, and LuGus has made
@@ -58,15 +66,16 @@ Until a tagged release exists there are no downloadable zips yet — build from 
    confirm it's alive.
 
 If you built from source instead of using a zip: copy the DLL into `BepInEx/plugins/` and
-create `BepInEx/config/com.lugus.liftoff.autolobby.cfg` containing:
+create `BepInEx/config/com.barhoomi.liftoff.autolobby.cfg` containing:
 
 ```ini
 [General]
 Role = client
 ```
 
-Without it the plugin defaults to `server` mode, which automates menus and creates rooms
-by itself — you don't want that on a personal account.
+> [!CAUTION]
+> Without that config the plugin defaults to `server` mode, which automates menus and
+> creates rooms by itself — you don't want that on a personal account.
 
 ## Build a playlist
 
@@ -92,8 +101,9 @@ playlist, announces the first track, and starts the rotation timer. As the host,
 automatically the admin. `/pause` / `/resume` freeze the timer; `/stop` goes back to
 idle.
 
-`/help` (in chat) always shows the current command list you're allowed to run — it's the
-source of truth if this table ever drifts:
+> [!TIP]
+> `/help` (in chat) always shows the current command list *you* are allowed to run — it's
+> the live source of truth if this table ever drifts.
 
 | Command | Who | What |
 |---|---|---|

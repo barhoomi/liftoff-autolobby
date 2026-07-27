@@ -20,7 +20,7 @@ namespace LiftoffAutoLobby
     // Version is stamped from the single source in Directory.Build.props by the
     // GeneratePluginVersion MSBuild target (plugin/LiftoffAutoLobby.csproj), which writes
     // PluginVersion.g.cs into obj/ before compilation. See also Commands/VersionCommand.cs.
-    [BepInPlugin("com.lugus.liftoff.autolobby", "Liftoff Auto Lobby", PluginVersion.Number)]
+    [BepInPlugin("com.barhoomi.liftoff.autolobby", "Liftoff Auto Lobby", PluginVersion.Number)]
     public partial class AutoLobbyPlugin : BaseUnityPlugin
     {
         private static string pluginPath;
