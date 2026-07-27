@@ -15,6 +15,13 @@ on:
     tags:
       - "v*"
 
+# The default GITHUB_TOKEN is read-only on this repo; the draft-release step needs
+# contents:write and the GHCR push needs packages:write (both 403'd on the first
+# v1.0.0 run without these).
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build-packages:
     runs-on: ubuntu-latest
