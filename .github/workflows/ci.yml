@@ -61,5 +61,5 @@ jobs:
           # grepping generator/, orchestrator/, trackcheck/ for non-stdlib imports.
           venv/bin/pip install -q pytest numpy
 
-      - name: bash run_tests.sh
-        run: bash run_tests.sh
+      - name: bash scripts/run_tests.sh
+        run: bash scripts/run_tests.sh

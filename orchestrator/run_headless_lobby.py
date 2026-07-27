@@ -158,9 +158,9 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
 
     project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if playlists_path is None:
-        playlists_path = os.path.join(project_dir, "playlists.json")
+        playlists_path = os.path.join(project_dir, "config", "playlists.json")
     if master_list_path is None:
-        master_list_path = os.path.join(project_dir, "master_tracks_list.json")
+        master_list_path = os.path.join(project_dir, "config", "master_tracks_list.json")
 
     # Check playlists file
     if not os.path.exists(playlists_path):
@@ -353,7 +353,7 @@ def resolve_and_write_playlist(playlist_name, shuffle_enabled, output_file, is_f
 
 
 def load_config():
-    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lobby_config.json")
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "lobby_config.json")
     if not os.path.exists(config_path):
         print(f"ERROR: Configuration file not found at {config_path}")
         sys.exit(1)
@@ -527,7 +527,7 @@ def main():
         f.write(playlist_val)
 
     # Write available playlists to available_playlists.txt
-    playlists_path = os.path.join(project_dir, "playlists.json")
+    playlists_path = os.path.join(project_dir, "config", "playlists.json")
     if os.path.exists(playlists_path):
         try:
             with open(playlists_path, "r") as f:

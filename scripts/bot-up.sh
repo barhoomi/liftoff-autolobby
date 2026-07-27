@@ -23,8 +23,8 @@ for arg in "$@"; do
   esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"   # docker compose reads docker-compose.yml from the repo root
 
 if ! docker ps >/dev/null 2>&1; then
   echo "ERROR: cannot talk to the Docker daemon as $(whoami)." >&2

@@ -57,12 +57,12 @@ liftoff-autolobby-player-vX.Y.Z.zip
 liftoff-autolobby-server-vX.Y.Z.zip
   BepInEx/plugins/LiftoffAutoLobby.dll
   orchestrator/ generator/ trackcheck/ infra/
-  Dockerfile docker-compose.yml lobby_config.json playlists.json
+  Dockerfile docker-compose.yml config/
   README.md
 ```
 
 If you're reading this before a tagged release exists, there is no downloadable zip yet — build
-from source per [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).
+from source (see "Contributing / building from source" below).
 
 ## Requirements
 
@@ -287,14 +287,22 @@ added.)
 
 The server package runs the same plugin DLL in `server` mode: a Python orchestrator manages
 Steam login, launch/recovery, and playlists, and writes the plugin's config as text files in
-`BepInEx/plugins/` instead of you typing chat commands. See
-[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the full dev/operator setup (`build.sh`,
-`infra/setup_bot.sh`, Docker), and `AGENTS.md` for the plugin⇄orchestrator file protocol if
+`BepInEx/plugins/` instead of you typing chat commands. The Docker flow (`Dockerfile`,
+`docker-compose.yml`, `infra/docker-entrypoint.sh`) is the supported way to run it; the
+plugin⇄orchestrator file protocol is documented in `orchestrator/run_headless_lobby.py` if
 you're scripting against it.
 
 ## Contributing / building from source
 
-See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).
+- Plugin: `dotnet build plugin/ -c Debug` (game reference DLLs required — copy them from
+  your own install per `plugin/libs/README.md`, or pass
+  `-p:LiftoffPath=/path/to/your/Liftoff` to build straight against it).
+- Python: `bash scripts/run_tests.sh` runs the pytest suites (generator, orchestrator,
+  trackcheck) plus the playlist lint.
+- Repo layout: `plugin/` (C# BepInEx plugin), `orchestrator/` (launcher/watchdog +
+  scenario tests), `generator/` (procedural track generator), `trackcheck/` (track/playlist
+  validation), `config/` (runtime config), `scripts/` (dev + ops entry points),
+  `infra/` (setup, Docker entrypoint, release packaging).
 
 ## License
 

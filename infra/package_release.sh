@@ -58,7 +58,9 @@ cp -r orchestrator "$SERVER_STAGE/orchestrator"
 cp -r generator "$SERVER_STAGE/generator"
 cp -r trackcheck "$SERVER_STAGE/trackcheck"
 cp -r infra "$SERVER_STAGE/infra"
-cp Dockerfile docker-compose.yml lobby_config.json playlists.json "$SERVER_STAGE/"
+cp Dockerfile docker-compose.yml "$SERVER_STAGE/"
+mkdir -p "$SERVER_STAGE/config"
+cp config/lobby_config.json config/playlists.json "$SERVER_STAGE/config/"
 cp packaging/server/README-server.md "$SERVER_STAGE/README-server.md"
 # Strip dev cruft that shouldn't ship in a release zip.
 find "$SERVER_STAGE" -name "__pycache__" -type d -prune -exec rm -rf {} +

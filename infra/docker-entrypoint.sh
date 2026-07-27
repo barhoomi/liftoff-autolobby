@@ -1,7 +1,7 @@
 #!/bin/bash
 # docker-entrypoint.sh — container startup for the procedural-fpv bot.
 #
-# Reproduces, inside the container, the same flow run_bot.sh / setup_bot.sh drive on the
+# Reproduces, inside the container, the same flow scripts/run_bot.sh / infra/setup_bot.sh drive on the
 # host (see AGENTS.md): steamcmd installs/updates the paid game into a persistent volume,
 # BepInEx gets deployed into it, the plugin is compiled against that install's Managed
 # DLLs, a real (graphical, Xvfb-hosted) Steam client is started and logged in — the game
@@ -98,12 +98,12 @@ for f in lobby_config.json playlists.json master_tracks_list.json; do
     # runtime by gather_tracks.py's gather_tracks_and_races() (see AGENTS.md: it's a local,
     # gitignored artifact). Only seed from an image default when one actually exists; the
     # symlink still needs creating either way so the file lands on /config once generated.
-    if [[ ! -f "$CONFIG_DIR/$f" && -f "$PROJECT_DIR/$f" ]]; then
+    if [[ ! -f "$CONFIG_DIR/$f" && -f "$PROJECT_DIR/config/$f" ]]; then
         log "Seeding $CONFIG_DIR/$f from image default."
-        cp "$PROJECT_DIR/$f" "$CONFIG_DIR/$f"
+        cp "$PROJECT_DIR/config/$f" "$CONFIG_DIR/$f"
     fi
-    rm -f "$PROJECT_DIR/$f"
-    ln -sf "$CONFIG_DIR/$f" "$PROJECT_DIR/$f"
+    rm -f "$PROJECT_DIR/config/$f"
+    ln -sf "$CONFIG_DIR/$f" "$PROJECT_DIR/config/$f"
 done
 
 # lobby_config.json's liftoff_path/display must point at *this* container's install dir
@@ -219,8 +219,8 @@ else
 fi
 mkdir -p "$LIFTOFF_INSTALL_DIR/BepInEx/plugins"
 
-if [[ -f "$PROJECT_DIR/bot_nickname.txt" ]]; then
-    cp "$PROJECT_DIR/bot_nickname.txt" "$LIFTOFF_INSTALL_DIR/BepInEx/plugins/bot_nickname.txt"
+if [[ -f "$PROJECT_DIR/config/bot_nickname.txt" ]]; then
+    cp "$PROJECT_DIR/config/bot_nickname.txt" "$LIFTOFF_INSTALL_DIR/BepInEx/plugins/bot_nickname.txt"
 fi
 
 # ---------- admin IDs (server-mode chat command authorization) ----------
@@ -368,7 +368,7 @@ fi
 # The game binary calls SteamAPI_Init, which talks to a *running, logged-in Steam client*
 # process over a local IPC pipe -- steamcmd (above) is a separate, short-lived content
 # tool and does not provide this. This matches how the bot already runs on the host
-# (run_bot.sh starts `dbus-run-session /usr/games/steam`, not steamcmd, before launching
+# (scripts/run_bot.sh starts `dbus-run-session /usr/games/steam`, not steamcmd, before launching
 # the game) and the documented "steamid=0 -> SteamAPI_Init False" black-screen failure
 # mode when Steam isn't signed in. See the feature doc's "Spec conflict" section.
 # Steam's Linux compat layer (Pressure Vessel/bubblewrap) needs container privileges Docker
