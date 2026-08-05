@@ -355,12 +355,42 @@ PREFSEOF
 fi
 
 # ---------- Xvfb ----------
-log "Starting Xvfb on display $DISPLAY_NUM ..."
-Xvfb "$DISPLAY_NUM" -screen 0 1280x720x24 &
-XVFB_PID=$!
-sleep 2
-if ! kill -0 "$XVFB_PID" 2>/dev/null; then
-    fatal "Xvfb failed to start on display $DISPLAY_NUM."
+# Stale-lock cleanup, found live 2026-08-05: `docker compose restart` (unlike `up -d
+# --force-recreate`) REUSES the container filesystem, so /tmp survives. Xvfb's own
+# /tmp/.X<N>-lock and /tmp/.X11-unix/X<N> socket from the previous run are then still there,
+# Xvfb refuses to start ("Server is already active for display 99"), and the entrypoint died
+# at the fatal below -- with no display, no VNC, and no way in for the operator. Removing the
+# lock unconditionally would be worse (it would let a SECOND Xvfb stomp a live display), so
+# gate on the PID the lock file itself records: X writes the owning server's PID there, so a
+# lock whose PID is gone -- or belongs to something that is not an X server -- is provably
+# stale and safe to clear.
+DISPLAY_INDEX="${DISPLAY_NUM#:}"      # ":99" -> "99"
+DISPLAY_INDEX="${DISPLAY_INDEX%%.*}"  # ":99.0" -> "99" (screen suffix)
+X_LOCK="/tmp/.X${DISPLAY_INDEX}-lock"
+X_SOCKET="/tmp/.X11-unix/X${DISPLAY_INDEX}"
+if [[ -e "$X_LOCK" ]]; then
+    LOCK_PID="$(tr -dc '0-9' < "$X_LOCK" 2>/dev/null || true)"
+    if [[ -n "$LOCK_PID" ]] && kill -0 "$LOCK_PID" 2>/dev/null \
+        && ps -p "$LOCK_PID" -o comm= 2>/dev/null | grep -qiE 'x(vfb|org)|^X'; then
+        log "An X server (pid $LOCK_PID) already owns display $DISPLAY_NUM -- reusing it instead of starting a second Xvfb."
+        XVFB_ALREADY_RUNNING=1
+    else
+        log "Removing stale X lock $X_LOCK (recorded pid '${LOCK_PID:-none}' is not a live X server -- leftover from a previous run in this container filesystem)."
+        rm -f "$X_LOCK" "$X_SOCKET"
+        XVFB_ALREADY_RUNNING=0
+    fi
+else
+    XVFB_ALREADY_RUNNING=0
+fi
+
+if [[ "$XVFB_ALREADY_RUNNING" -eq 0 ]]; then
+    log "Starting Xvfb on display $DISPLAY_NUM ..."
+    Xvfb "$DISPLAY_NUM" -screen 0 1280x720x24 &
+    XVFB_PID=$!
+    sleep 2
+    if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+        fatal "Xvfb failed to start on display $DISPLAY_NUM. If this says the server is already active, a stale lock survived (see the cleanup above) -- \`docker compose up -d --force-recreate\` gives the container a fresh /tmp and always clears it."
+    fi
 fi
 
 # ---------- x11vnc (one-time interactive Steam login + observation) ----------
@@ -451,10 +481,50 @@ client_auth_revoked() {
         | grep -qE 'Access Denied|Do not reconnect'
 }
 
+# Is any part of the graphical client still alive? Same process set the readiness gate keys
+# off, so "alive" means the same thing in both places (AGENTS.md rule 4).
+steam_client_alive() {
+    pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1
+}
+
+# Single launch path, so a relaunch is byte-identical to the original invocation.
+STEAM_CLIENT_MODE="windowed"
+launch_steam_client() {
+    if [[ "$STEAM_CLIENT_MODE" == "silent" ]]; then
+        dbus-run-session -- steam -silent &
+    else
+        dbus-run-session -- steam &
+    fi
+}
+
+# Relaunch-if-absent, called from inside the two wait loops below. Found live 2026-08-05: the
+# operator pkill'd the Steam client while troubleshooting and the entrypoint sat at the login
+# gate against an EMPTY desktop until the timeout expired -- the client was started exactly
+# once and never supervised. This is deliberately not a supervisor: one check per loop tick,
+# a backoff so a client that crashes instantly can't be respawned in a tight loop, and a log
+# line so the relaunch is visible in `docker compose logs`.
+STEAM_RELAUNCH_BACKOFF="${STEAM_RELAUNCH_BACKOFF:-60}"
+steam_relaunch_cooldown=0
+ensure_steam_client_running() {
+    local tick="$1"   # seconds since the previous call (this loop's sleep interval)
+    if steam_client_alive; then
+        steam_relaunch_cooldown=0
+        return 0
+    fi
+    if (( steam_relaunch_cooldown > 0 )); then
+        steam_relaunch_cooldown=$(( steam_relaunch_cooldown - tick ))
+        return 0
+    fi
+    log "Graphical Steam client is NOT running (crashed, or was killed) -- relaunching it ($STEAM_CLIENT_MODE) so the login/Library UI stays reachable over VNC. Next check in ${STEAM_RELAUNCH_BACKOFF}s."
+    launch_steam_client
+    steam_relaunch_cooldown="$STEAM_RELAUNCH_BACKOFF"
+}
+
 if client_has_cached_login && game_install_ready; then
     log "Graphical Steam client has a cached login ($LOGINUSERS_VDF) -- starting silent."
     STEAM_LOGIN_PENDING=0
-    dbus-run-session -- steam -silent &
+    STEAM_CLIENT_MODE="silent"
+    launch_steam_client
 elif client_has_cached_login; then
     # Cached login, but no finished game install yet: the operator still has to drive the
     # client's Library UI over VNC to install (or finish installing) Liftoff, and `-silent`
@@ -464,7 +534,7 @@ elif client_has_cached_login; then
     # goes back to silent automatically.
     log "Graphical Steam client has a cached login, but no completed Liftoff install was found -- starting it WITH a window so the Library UI is usable over VNC."
     STEAM_LOGIN_PENDING=0
-    dbus-run-session -- steam &
+    launch_steam_client
 else
     STEAM_LOGIN_PENDING=1
     cat >&2 <<EOF
@@ -491,7 +561,7 @@ is machine-scoped and the graphical client cannot use it.) ONE-TIME manual step:
 
 EOF
     log "Starting graphical Steam client WITH visible login window (no -silent)..."
-    dbus-run-session -- steam &
+    launch_steam_client
 fi
 
 # Readiness = ALL of: (a) the steamclient.so the game will dlopen exists (on a first-ever
@@ -530,6 +600,9 @@ while [[ "$SECONDS_WAITED" -lt "$WAIT_BUDGET" ]]; do
     if [[ "$STEAM_LOGIN_PENDING" -eq 1 && $((SECONDS_WAITED % 60)) -eq 0 && "$SECONDS_WAITED" -gt 0 ]]; then
         log "Still waiting for the one-time Steam login via VNC (localhost:5900)... ${SECONDS_WAITED}s/${WAIT_BUDGET}s"
     fi
+    # A client that died (crash, or an operator pkill while troubleshooting) used to leave
+    # this loop staring at an empty desktop until the budget expired. Bring it back instead.
+    ensure_steam_client_running 5
     sleep 5
     SECONDS_WAITED=$((SECONDS_WAITED + 5))
 done
@@ -604,6 +677,9 @@ EOF
             installed="$(du -sh "$CLIENT_LIBRARY_INSTALL_DIR" 2>/dev/null | cut -f1)"
             log "Still waiting for the Liftoff install via the Steam Library UI (VNC localhost:5900)... ${INSTALL_WAITED}s/${GAME_INSTALL_TIMEOUT}s (downloading: ${downloaded:-none}, installed dir: ${installed:-none})"
         fi
+        # The install is driven from the client's own UI, so the client dying here strands
+        # the operator exactly as it does at the login gate -- same relaunch-if-absent guard.
+        ensure_steam_client_running 15
         sleep 15
         INSTALL_WAITED=$((INSTALL_WAITED + 15))
     done
