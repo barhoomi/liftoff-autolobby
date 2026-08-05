@@ -168,10 +168,34 @@ namespace LiftoffAutoLobby
         // Emit a player_join / player_leave file event for a Photon Player arg from the
         // callback-dispatch prefix. count (current room player count) is optional — omitted
         // if the room can't be read. Reuses the existing TryGetRoomInfo reflection reader.
+        //
+        // lifecycle-event-logging.md, "Observed quirk": the live JSONL showed a second,
+        // identity-less line right after a real join —
+        //   {"event":"player_join","player":"futurehasnomercy","userId":"steam_...","count":2}
+        //   {"event":"player_join","player":"","count":2}
+        // Decompile of PhotonRealtime.dll (per CLAUDE rule #1, not guessed) settles where that
+        // comes from: InRoomCallbacksContainer.OnPlayerEnteredRoom is the ONLY dispatch method
+        // for this callback, it is a plain `List<IInRoomCallbacks>` loop with no fan-out to
+        // sibling containers, and LoadBalancingClient calls it from exactly ONE site
+        // (OnEvent, EventCode.Join == 255, the `sender != LocalPlayer.ActorNumber` branch). So
+        // one dispatch == one prefix firing: a second line is a second *dispatch*, not a
+        // double-logging bug. In that same call site, a Player the room has not stored yet is
+        // built by `CreatePlayer(string.Empty, sender, isLocal: false, actorProperties)` — which
+        // yields exactly NickName == "" / UserId == null when the join event carried no
+        // nickname/userId properties. That is the empty line: a dispatch that carries no
+        // identity at all, and therefore no information a JSONL consumer can use.
+        // We drop those from the JSONL (they would inflate join/leave counts for the next
+        // investigation) but still surface them in the Unity log, so nothing becomes invisible.
         private static void LogPlayerPresenceEvent(string eventName, object playerObj)
         {
             string nick, userId;
             ReadPhotonPlayerInfo(playerObj, out nick, out userId);
+
+            if (string.IsNullOrEmpty(nick) && string.IsNullOrEmpty(userId))
+            {
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Skipping identity-less {eventName} JSONL line (Photon dispatched a Player with no nick and no userId).");
+                return;
+            }
 
             object count = null;
             try
@@ -183,6 +207,74 @@ namespace LiftoffAutoLobby
             catch { /* count stays null -> omitted */ }
 
             LogJsonEvent(eventName, ("player", nick), ("userId", userId), ("count", count));
+        }
+
+        // Emit a `disconnect` file event from the Photon callback-dispatch prefix
+        // (lifecycle-event-logging.md). MUST be called BEFORE the prefix resets roomCreatedTime,
+        // since elapsed_s is the whole point of the event: it shows "the bot dropped at 291s of a
+        // 300s configured rotation" in one line, which is what `lobby-room-churn-on-rotation.md`
+        // had to reconstruct from ~83,000 lines of Player.log by hand.
+        //
+        // `cause` is the raw Photon callback name, never a paraphrase, so the JSONL greps against
+        // Player.log's own callback names. The two causes are NOT duplicates of each other and a
+        // consumer must not collapse them — decompile of LoadBalancingClient:
+        //   OnLeftRoom      — one call site, inside the StatusCode.Disconnect handler, gated on
+        //                     `Server == GameServer && CurrentRoom != null` with CurrentRoom
+        //                     nulled immediately before the call. It therefore fires on EVERY room
+        //                     exit, including a perfectly graceful leave (leaving the game server
+        //                     is how Realtime leaves a room), and cannot fire twice until the
+        //                     client has re-entered a room.
+        //   OnDisconnected  — two call sites, but they are mutually exclusive branches of one
+        //                     `switch (State)` in the same handler, so at most one fires per
+        //                     StatusCode.Disconnect, and only when the client actually lands in
+        //                     ClientState.Disconnected.
+        // That is why the churn investigation saw 92 OnLeftRoom vs 54 OnDisconnected: every
+        // rotation/room recreate contributes an OnLeftRoom, only genuine drops add an
+        // OnDisconnected. Neither is double-fired, so no de-dup guard is applied here.
+        private static void LogDisconnectEvent(string cause)
+        {
+            object elapsedSeconds = null;
+            try
+            {
+                // Both sentinels mean "no meaningful room timer": MinValue = not in a room,
+                // MaxValue = timer frozen (settings update pending / rotation paused). Omit
+                // rather than emit a nonsense elapsed.
+                if (roomCreatedTime != DateTime.MinValue && roomCreatedTime != DateTime.MaxValue)
+                    elapsedSeconds = Math.Round((DateTime.Now - roomCreatedTime).TotalSeconds, 1);
+            }
+            catch { /* elapsed_s stays null -> omitted */ }
+
+            object configuredInterval = null;
+            try { configuredInterval = GetRotationInterval(); }
+            catch { /* configured_interval_s stays null -> omitted */ }
+
+            LogJsonEvent("disconnect",
+                ("cause", cause),
+                ("elapsed_s", elapsedSeconds),
+                ("configured_interval_s", configuredInterval));
+        }
+
+        // Emit an `admin_command_result` file event (lifecycle-event-logging.md). One line per
+        // CommandRegistry.Process outcome, so a JSONL-only reader can tell "admin ran /interval
+        // and it took effect" from "a non-admin's /interval was silently ignored" from "admin ran
+        // it but the bot doesn't own the room" — the three states `container-seed-admin-ids.md`
+        // had to disambiguate with a docker exec plus a code read.
+        //
+        // NOTE the deliberate split between the two logging sinks (structured-logging.md): the
+        // pre-existing `LogEvent("chat_command", ...)` in Process is the Unity-log slice ONLY
+        // (LogEvent just Debug.Logs "[AutoLobbyPlugin:EVENT] {...}" for the scenario harness to
+        // grep) — it never reaches the JSONL. So this is genuinely net-new information in the
+        // file log, not a duplicate of an existing call.
+        //
+        // cmd/user_name/user_id/result are all REQUIRED fields, so they are coalesced to "" and
+        // never omitted; LogJsonEvent's omit-on-null rule stays reserved for optional fields.
+        private static void LogAdminCommandResult(string cmd, string userName, string userId, string result)
+        {
+            LogJsonEvent("admin_command_result",
+                ("cmd", cmd ?? ""),
+                ("user_name", userName ?? ""),
+                ("user_id", userId ?? ""),
+                ("result", result));
         }
     }
 }
