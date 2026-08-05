@@ -346,6 +346,9 @@ namespace LiftoffAutoLobby
                 if (methodName == "OnLeftRoom" || methodName == "OnDisconnected")
                 {
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Photon Callback: {methodName} detected. Immediately resetting lastInRoomTime to trigger lobby recovery.");
+                    // lifecycle-event-logging.md: log BEFORE the resets below — LogDisconnectEvent
+                    // reads roomCreatedTime, which the next lines clear.
+                    LogDisconnectEvent(methodName);
                     lastInRoomTime = DateTime.MinValue;
                     roomCreatedTime = DateTime.MinValue;
                     isLeaving = false;
