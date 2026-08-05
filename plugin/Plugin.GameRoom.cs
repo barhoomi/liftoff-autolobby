@@ -63,6 +63,12 @@ namespace LiftoffAutoLobby
             {
                 UnityEngine.Debug.Log("[AutoLobbyPlugin] Entered GameRoom. Starting room timer.");
                 LogEvent("room_entered");
+                // lifecycle-event-logging.md: JSONL twin. The enclosing branch is entered on both
+                // sentinels; MinValue means a genuinely new room (bot startup / post-disconnect
+                // recreate, set by Plugin.Navigation's leave paths and PhotonContainerPrefix's
+                // disconnect branch), MaxValue means the timer was frozen for an in-place settings
+                // update. Must be evaluated BEFORE the assignment below clears the sentinel.
+                LogJsonEvent("room_entered", ("fresh", roomCreatedTime == DateTime.MinValue));
                 roomCreatedTime = DateTime.Now;
                 lastActivityTime = DateTime.UtcNow;
                 chatWarnedAboutNextRace = false;
