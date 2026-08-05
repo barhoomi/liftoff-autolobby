@@ -1,0 +1,31 @@
+# RUNTIME dependencies of the dashboard sidecar (docs/features/doing/bot-dashboard.md).
+#
+# Why this file exists separately from requirements-dev.txt: the Docker image has to install
+# these to run `python3 -m dashboard` (the sidecar died with `ModuleNotFoundError: No module
+# named 'uvicorn'` until it did), and requirements-dev.txt is explicitly the DEV/CI set --
+# baking pytest, numpy and httpx into a production image to get two runtime packages would
+# ship a test framework to the live host for no reason. Keep this file to what the dashboard
+# imports at runtime; anything test-only belongs in requirements-dev.txt.
+#
+# The rest of the Python in this repo (orchestrator, gather_tracks, the control plane) is
+# pure stdlib on purpose -- that is what kept the image pip-free until the dashboard landed.
+#
+# Install (bare metal):  pip install -r requirements-dashboard.txt
+# In the image:          see the pip stage in Dockerfile.
+
+# ASGI app framework -- dashboard/api.py, write_api.py (FastAPI, SSE responses).
+fastapi>=0.110
+
+# ASGI server -- dashboard/__main__.py does `import uvicorn; uvicorn.run(...)`.
+# [standard] pulls in uvloop/httptools/websockets: the SSE event stream is a long-lived
+# connection, so the faster loop and proper HTTP parsing are worth the few extra MB.
+uvicorn[standard]>=0.27
+
+# Request/response models -- imported directly by dashboard/write_api.py, not just pulled in
+# as a FastAPI transitive dep, so it is declared here rather than left implicit.
+pydantic>=2
+
+# NOT here on purpose:
+#   httpx   -- only needed by fastapi.testclient, i.e. dashboard/tests (requirements-dev.txt)
+#   pytest  -- test runner (requirements-dev.txt)
+#   numpy   -- generator/trackcheck geometry, not used by the dashboard or the bot at runtime
