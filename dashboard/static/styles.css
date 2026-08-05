@@ -30,6 +30,14 @@
 
 * { box-sizing: border-box; }
 
+/* The [hidden] attribute must always win over any element/class's own `display` rule
+   (e.g. .gate below sets `display: grid`, same specificity as the UA [hidden] rule and
+   loaded after it, so it silently wins the cascade and the attribute stops hiding
+   anything). app.js toggles visibility purely via `el.hidden = true/false` (never a
+   class), so this one rule is the single place that contract has to hold -- see
+   bot-dashboard.md known-issues, "auth gate never visually disappears after unlock". */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
