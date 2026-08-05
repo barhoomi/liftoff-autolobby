@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Liftoff bot dashboard</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<div id="gate" class="gate">
+  <form id="gate-form" class="card">
+    <h1>Liftoff bot</h1>
+    <p class="muted">Enter the dashboard token.</p>
+    <input id="gate-token" type="password" autocomplete="current-password" placeholder="token" required>
+    <button type="submit">Unlock</button>
+    <p id="gate-error" class="error" hidden></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <div class="brand">
+      <span class="dot" id="conn-dot" title="event stream"></span>
+      <strong>Liftoff bot</strong>
+    </div>
+    <nav id="tabs">
+      <button data-tab="state" class="active">State</button>
+      <button data-tab="live">Live</button>
+      <button data-tab="logs">Logs</button>
+    </nav>
+    <button id="lock" class="ghost" title="Forget token">lock</button>
+  </header>
+
+  <main>
+    <section id="tab-state" class="tab active">
+      <div class="grid" id="state-cards"></div>
+      <div class="card">
+        <h2>Players <span id="player-count" class="pill"></span></h2>
+        <ul id="players" class="list"></ul>
+      </div>
+      <div class="card">
+        <h2>Rotation</h2>
+        <ol id="rotation-list" class="list numbered"></ol>
+      </div>
+      <div class="card" id="errors-card" hidden>
+        <h2>Recent errors</h2>
+        <ul id="errors" class="list"></ul>
+      </div>
+    </section>
+
+    <section id="tab-live" class="tab">
+      <div class="card">
+        <div class="row wrap">
+          <input id="filter" type="search" placeholder="filter (text or event name)">
+          <label class="check"><input type="checkbox" id="autoscroll" checked> follow</label>
+          <button id="clear-stream" class="ghost">clear</button>
+        </div>
+        <div class="row wrap" id="kind-filters"></div>
+      </div>
+      <div id="stream" class="stream"></div>
+    </section>
+
+    <section id="tab-logs" class="tab">
+      <div class="card">
+        <h2>Log files</h2>
+        <ul id="log-list" class="list"></ul>
+      </div>
+      <div class="card">
+        <div class="row wrap">
+          <strong id="log-title">Select a log</strong>
+          <select id="log-lines">
+            <option value="100">100 lines</option>
+            <option value="200" selected>200 lines</option>
+            <option value="1000">1000 lines</option>
+            <option value="5000">5000 lines</option>
+          </select>
+          <button id="log-refresh" class="ghost">refresh</button>
+        </div>
+        <pre id="log-body" class="logbody"></pre>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
