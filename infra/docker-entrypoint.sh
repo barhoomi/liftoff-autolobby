@@ -843,6 +843,33 @@ export SteamGameId="$LIFTOFF_APP_ID"
 echo "$LIFTOFF_APP_ID" > "$LIFTOFF_INSTALL_DIR/steam_appid.txt"
 log "Set SteamAppId=$LIFTOFF_APP_ID and wrote steam_appid.txt for direct game launch."
 
+# ---------- keep the Steam client alive for the life of the container ----------
+# Hardening gap found live 2026-08-05 (third in the series): every guard above supervises the
+# graphical client only until the readiness/install gates pass. After the `exec` below this
+# script is GONE -- replaced by the orchestrator -- and nothing watches the client at all. It
+# died mid-session; the orchestrator's watchdog dutifully relaunched the GAME, but every
+# relaunch then hit `SteamAPI.Init() returned False` (steamid=0, no client to talk to) and
+# black-screened on SplashScreen, unrecoverable short of recreating the container.
+#
+# Fix: hand the same ensure_steam_client_running helper the gates use to a background
+# subshell (AGENTS.md rule 4 -- one relaunch path, one backoff policy, one log line; nothing
+# duplicated here). Backgrounded BEFORE the exec so it survives it: the subshell is reparented
+# to tini (PID 1), which reaps it, and it then runs for the life of the container. Cheap --
+# one pgrep every STEAM_SUPERVISOR_INTERVAL seconds. Set the interval to 0 to disable (e.g.
+# when deliberately debugging a dead client and you do NOT want it coming back).
+STEAM_SUPERVISOR_INTERVAL="${STEAM_SUPERVISOR_INTERVAL:-30}"
+if [[ "$STEAM_SUPERVISOR_INTERVAL" -gt 0 ]]; then
+    (
+        while sleep "$STEAM_SUPERVISOR_INTERVAL"; do
+            # Never let a hiccup in the check kill the supervisor itself (set -e is inherited).
+            ensure_steam_client_running "$STEAM_SUPERVISOR_INTERVAL" || true
+        done
+    ) &
+    log "Steam client supervisor started as pid $! (check every ${STEAM_SUPERVISOR_INTERVAL}s, relaunch backoff ${STEAM_RELAUNCH_BACKOFF}s, mode $STEAM_CLIENT_MODE) -- it outlives this script and keeps the client up for the whole container lifetime."
+else
+    log "Steam client supervisor DISABLED (STEAM_SUPERVISOR_INTERVAL=0) -- a Steam client that dies after this point stays dead, and the game will black-screen on SteamAPI_Init()."
+fi
+
 # ---------- hand off to the orchestrator ----------
 SHUFFLE_FLAG=""; [[ "${SHUFFLE,,}" == "true" ]] && SHUFFLE_FLAG="--shuffle"
 PUBLIC_FLAG=""; [[ "${PUBLIC,,}" == "true" ]] && PUBLIC_FLAG="--public"
