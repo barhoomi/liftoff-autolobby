@@ -234,5 +234,14 @@ class TestStaticUi:
         assert "Liftoff bot" in res.text
 
     def test_assets_are_served(self, anon_client):
-        assert anon_client.get("/static/app.js").status_code == 200
-        assert anon_client.get("/static/styles.css").status_code == 200
+        for asset in ("app.js", "write.js", "styles.css"):
+            assert anon_client.get("/static/" + asset).status_code == 200, asset
+
+    def test_every_referenced_asset_exists(self, anon_client):
+        # index.html is hand-written with no build step, so a typo'd <script src> would
+        # only ever surface as a silently dead tab in the browser.
+        import re
+
+        html = anon_client.get("/").text
+        for ref in re.findall(r'(?:src|href)="(/static/[^"]+)"', html):
+            assert anon_client.get(ref).status_code == 200, ref

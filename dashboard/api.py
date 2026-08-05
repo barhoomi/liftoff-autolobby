@@ -162,6 +162,11 @@ def create_app(settings=None, plugins_dir=None, log_dir=None):
         def index():
             return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
+    # Write side (playlists + controls) lives in its own module for readability, but is
+    # registered here so there is still exactly one app factory.
+    from .write_api import register as register_write_routes
+
+    register_write_routes(app, ctx, auth)
     return app
 
 

@@ -22,7 +22,7 @@ MASTER_TRACKS = {
 
 PLAYLISTS = {
     "all_official_races": [{"environment": "*", "track": "*", "mode": "Infinite Race"}],
-    "bando_only": [{"environment": "Bando City", "track": "*", "mode": "Race"}],
+    "bando_only": [{"environment": "Bando City", "track": "*", "mode": "Classic Race"}],
 }
 
 

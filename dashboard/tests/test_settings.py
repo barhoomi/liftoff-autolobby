@@ -28,6 +28,18 @@ class TestToken:
         assert "token" not in load(config={"dashboard": {"token": "s3cret"}}).public_dict()
 
 
+class TestProjectDir:
+    def test_env_override_points_at_another_checkout(self):
+        settings = load_settings(project_dir=None, env={"FPV_PROJECT_DIR": "/srv/fpv"}, config={})
+        assert settings.project_dir == "/srv/fpv"
+
+    def test_defaults_to_the_repo_root(self):
+        import os
+
+        settings = load_settings(project_dir=None, env={}, config={})
+        assert os.path.isdir(os.path.join(settings.project_dir, "dashboard"))
+
+
 class TestBind:
     def test_defaults_are_loopback(self):
         settings = load()

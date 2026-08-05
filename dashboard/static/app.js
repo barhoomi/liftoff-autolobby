@@ -29,7 +29,13 @@
     return fetch(path, options).then(function (res) {
       if (res.status === 401) { lock(); throw new Error("unauthorized"); }
       return res.json().catch(function () { return {}; }).then(function (data) {
-        if (!res.ok) throw new Error(data.detail || res.statusText);
+        if (!res.ok) {
+          // FastAPI's `detail` is a string for simple errors and an object
+          // ({message, findings}) for validation refusals; JSON-encode the latter so the
+          // caller can re-parse it instead of getting "[object Object]".
+          var detail = data.detail === undefined ? res.statusText : data.detail;
+          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        }
         return data;
       });
     });

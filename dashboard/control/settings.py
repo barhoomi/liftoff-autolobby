@@ -69,7 +69,11 @@ def load_settings(project_dir=None, env=None, config=None):
     from .paths import load_lobby_config_or_empty, repo_root
 
     env = os.environ if env is None else env
-    project_dir = project_dir or repo_root()
+    # FPV_PROJECT_DIR lets a sidecar deployment point at a checkout/config tree other than
+    # the one this package was imported from. The Docker image does not need it: its
+    # entrypoint symlinks /config/*.json into /app/config/, so the repo root already sees
+    # the mounted files.
+    project_dir = project_dir or env.get("FPV_PROJECT_DIR") or repo_root()
     if config is None:
         config = load_lobby_config_or_empty(project_dir)
     section = config.get("dashboard") or {}
