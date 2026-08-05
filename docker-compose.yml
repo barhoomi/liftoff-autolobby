@@ -7,7 +7,17 @@
 #   docker compose build
 #   docker compose up
 #
-# One-time credential priming (see docs/features/doing/docker-container.md):
+# One-time human setup (GUI-first since 2026-08-05 -- Liftoff cannot be installed through
+# steamcmd on this account, so the graphical Steam client does both jobs):
+#   1. docker compose up -d          # brings up Xvfb + x11vnc + the Steam client
+#   2. ssh -L 5900:127.0.0.1:5900 <user>@<host>    # 5900 is loopback-bound on purpose
+#   3. VNC to localhost:5900 -> log in (keep "Remember me") -> Library -> Liftoff -> Install
+#   The entrypoint waits for the login AND for the finished install, then continues on its
+#   own (BepInEx -> plugin build -> orchestrator). Runbook:
+#   docs/features/doing/bot-priming-this-host.md.
+#
+# DEFERRED (possible future Workshop use, NOT part of the boot path): the steamcmd
+# install/update stage still exists behind USE_STEAMCMD=1, with its one-time prime:
 #   docker compose run --rm -it -u botuser -e HOME=/steam --entrypoint /usr/games/steamcmd bot \
 #       +force_install_dir /steam/Liftoff +login <STEAM_ACCOUNT> +quit
 #   (full path needed: /usr/games isn't on PATH outside an interactive login shell)
