@@ -433,6 +433,53 @@ STEAM_CLIENT_ROOT="$STEAM_DIR/.steam/debian-installation"
 LOGINUSERS_VDF="$STEAM_CLIENT_ROOT/config/loginusers.vdf"
 CONNECTION_LOG="$STEAM_CLIENT_ROOT/logs/connection_log.txt"
 
+# "Waiting for network..." login screen (root-caused live 2026-08-05, quirk #5 in
+# docs/features/doing/bot-priming-this-host.md).
+#
+# The client's login UI froze on a Steam logo + "Waiting for network..." with NO username
+# field, password field or Sign in button -- so the one-time human login below was
+# impossible -- even though the container's networking was completely healthy (DNS, TLS,
+# the CM endpoints on 27017/27024, Steam's own "Connectivity test: result=Connected" and
+# its client-update manifest downloads all fine). Cause: this container has no
+# NetworkManager and no D-Bus *system* bus, so the client cannot create a NetworkManager
+# client (logs/client_networkmanager.txt: "Init: failed to create a NetworkManager
+# client") and therefore never binds SteamClient.System.Network.RegisterForDeviceChanges.
+# The SteamUI bundle calls it anyway, throws, and leaves SystemNetworkStore's
+# m_bIsAwaitingInitialNetworkState stuck at true -- which is exactly the flag the login
+# window gates on. See infra/steam_ui_network_unstick.py for the full chain of evidence.
+#
+# Fix: let the client's own CEF debugger clear that flag. The marker file below is what
+# makes steamwebhelper listen on 127.0.0.1:8080 (container-internal; the compose file
+# publishes only 5900), and the helper is poked from the two wait loops that need a usable
+# UI over VNC. Both steps are deliberately fail-soft: if the marker cannot be written or
+# the debugger is unreachable, the boot proceeds exactly as it did before.
+mkdir -p "$STEAM_CLIENT_ROOT" 2>/dev/null || true
+if touch "$STEAM_CLIENT_ROOT/.cef-enable-remote-debugging" 2>/dev/null; then
+    log "Enabled the Steam client's CEF debugger (127.0.0.1:8080, container-internal) so a stuck \"Waiting for network...\" login screen can be unstuck automatically."
+else
+    err "Could not write $STEAM_CLIENT_ROOT/.cef-enable-remote-debugging -- if the login window sticks on \"Waiting for network...\", it will need the manual workaround from the feature doc."
+fi
+
+# Poke the helper at most every ~15s (it is idempotent and prints one status word:
+# already-ok | unstuck | no-store | a failure reason). Only the transition to 'unstuck' is
+# worth a log line; everything else stays quiet so the wait loops keep their signal.
+STEAM_UI_UNSTICK="$PROJECT_DIR/infra/steam_ui_network_unstick.py"
+steam_ui_unstick_cooldown=0
+steam_ui_unstick_network() {
+    local tick="$1"
+    [[ -f "$STEAM_UI_UNSTICK" ]] || return 0
+    if (( steam_ui_unstick_cooldown > 0 )); then
+        steam_ui_unstick_cooldown=$(( steam_ui_unstick_cooldown - tick ))
+        return 0
+    fi
+    steam_ui_unstick_cooldown=15
+    local status
+    status="$(python3 "$STEAM_UI_UNSTICK" 2>/dev/null || true)"
+    if [[ "$status" == "unstuck" ]]; then
+        log "The Steam login UI was frozen on \""'Waiting for network...'"\" (no NetworkManager in this container) -- cleared SystemNetworkStore's initial-network-state flag; the login/Library UI is usable again over VNC."
+    fi
+}
+
 # Does the volume hold a cached client login to even attempt? (loginusers.vdf with an
 # account.) This decides silent auto-login vs. a visible login window -- it is NOT proof
 # the login still works: the token can be revoked server-side and this file stays behind.
@@ -603,6 +650,9 @@ while [[ "$SECONDS_WAITED" -lt "$WAIT_BUDGET" ]]; do
     # A client that died (crash, or an operator pkill while troubleshooting) used to leave
     # this loop staring at an empty desktop until the budget expired. Bring it back instead.
     ensure_steam_client_running 5
+    # ...and if the client is up but its login window is frozen on "Waiting for network...",
+    # nothing the operator does over VNC can get past it. Unfreeze it here (no-op otherwise).
+    steam_ui_unstick_network 5
     sleep 5
     SECONDS_WAITED=$((SECONDS_WAITED + 5))
 done
@@ -678,8 +728,10 @@ EOF
             log "Still waiting for the Liftoff install via the Steam Library UI (VNC localhost:5900)... ${INSTALL_WAITED}s/${GAME_INSTALL_TIMEOUT}s (downloading: ${downloaded:-none}, installed dir: ${installed:-none})"
         fi
         # The install is driven from the client's own UI, so the client dying here strands
-        # the operator exactly as it does at the login gate -- same relaunch-if-absent guard.
+        # the operator exactly as it does at the login gate -- same relaunch-if-absent guard,
+        # and the same unstick for a client that came back up with a frozen network store.
         ensure_steam_client_running 15
+        steam_ui_unstick_network 15
         sleep 15
         INSTALL_WAITED=$((INSTALL_WAITED + 15))
     done
