@@ -153,6 +153,7 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            AnnounceCalloutTiersIfDue(elapsed);
             AnnounceNextTrackIfDue(elapsed);
 
             if (skipRequested || elapsed >= GetRotationInterval())
@@ -225,6 +226,116 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // ---------------------------------------------------------------
+        // pre-rotation-callouts.md: tiered pre-rotation warnings (5m/2m/1m by default),
+        // extending the mechanism above rather than building a parallel one. The fixed final
+        // 10s warning (AnnounceNextTrackIfDue/chatWarnedAboutNextRace, above) is untouched.
+        // ---------------------------------------------------------------
+
+        // Which configured offsets have already announced for the CURRENT approach to
+        // rotation. Deliberately self-correcting instead of an explicit reset flag: every
+        // entry is dropped again the moment `elapsed` is no longer past its threshold (a new
+        // track started and elapsed fell back near zero, or /extend pushed elapsed back below
+        // it), so it can fire again next time its threshold is crossed. This sidesteps needing
+        // a reset call at every one of chatWarnedAboutNextRace's existing reset sites -- several
+        // of which live in Plugin.cs / Plugin.RoomSetup.cs, outside this feature's file
+        // partition (see the feature doc's "Design decisions" section) -- without adding a
+        // second state mechanism that must be kept in sync (AGENTS.md rule 4: this is in-memory
+        // per-tick bookkeeping, not a second persisted/derived state file).
+        private static readonly HashSet<int> calloutOffsetsFired = new HashSet<int>();
+
+        // Parses Settings.CalloutOffsetsMinutes ("5,2,1" by default) into whole seconds,
+        // largest (earliest warning) first. Unparseable/non-positive entries are dropped
+        // silently; an empty or fully-invalid result falls back to the 5/2/1 default so a
+        // typo'd cfg value never silences every callout.
+        private static List<int> GetCalloutOffsetsSeconds()
+        {
+            string raw = Settings.CalloutOffsetsMinutes;
+            var result = new List<int>();
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                foreach (var part in raw.Split(','))
+                {
+                    double minutes;
+                    if (double.TryParse(part.Trim(), System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out minutes) && minutes > 0)
+                    {
+                        int seconds = (int)Math.Round(minutes * 60.0);
+                        if (seconds > 0 && !result.Contains(seconds)) result.Add(seconds);
+                    }
+                }
+            }
+            if (result.Count == 0) result.AddRange(new[] { 300, 120, 60 }); // 5m, 2m, 1m
+            result.Sort((a, b) => b.CompareTo(a));
+            return result;
+        }
+
+        // "300" -> "5m", "90" -> "1m30s", "45" -> "45s". Kept simple on purpose: the default
+        // offsets are always whole minutes, this only has to look sane for a hand-edited cfg.
+        private static string FormatOffsetLabel(int seconds)
+        {
+            if (seconds < 60) return $"{seconds}s";
+            if (seconds % 60 == 0) return $"{seconds / 60}m";
+            return $"{seconds / 60}m{seconds % 60}s";
+        }
+
+        // Called every tick alongside AnnounceNextTrackIfDue, from both the waiting-room path
+        // (HandleGameRoom) and the client in-flight path (HandleClientInFlightRotation) -- same
+        // callout, same two call sites, per the operator's "callouts are client-critical"
+        // decision that extracted AnnounceNextTrackIfDue in the first place.
+        private static void AnnounceCalloutTiersIfDue(double elapsed)
+        {
+            double intervalSecs = GetRotationInterval();
+            foreach (int offsetSeconds in GetCalloutOffsetsSeconds())
+            {
+                // Acceptance criterion: an offset at or beyond the configured rotation interval
+                // is skipped cleanly (no negative-time threshold, no spam). Also drops any stale
+                // "fired" mark, in case the interval shrank at runtime.
+                if (offsetSeconds >= intervalSecs)
+                {
+                    calloutOffsetsFired.Remove(offsetSeconds);
+                    continue;
+                }
+
+                double threshold = intervalSecs - offsetSeconds;
+                if (elapsed < threshold)
+                {
+                    calloutOffsetsFired.Remove(offsetSeconds); // not due yet, or re-armed by /extend
+                    continue;
+                }
+                if (elapsed >= intervalSecs) continue; // rotation itself is due; HandleGameRoom takes over
+                if (!calloutOffsetsFired.Add(offsetSeconds)) continue; // already announced this approach
+
+                SendCalloutMessage(offsetSeconds);
+            }
+        }
+
+        private static void SendCalloutMessage(int offsetSeconds)
+        {
+            string nextEnv, nextMode;
+            int trackIdx;
+            string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
+            if (string.IsNullOrEmpty(nextTrackName))
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] AnnounceCalloutTiersIfDue: PeekNextTrackName returned null/empty.");
+                return;
+            }
+
+            string timeLabel = FormatOffsetLabel(offsetSeconds);
+            if (IsClientMode)
+            {
+                string body = RenderClientTemplate(Settings.CalloutTemplate, "Up next in {time}: {environment} - {track}",
+                    ("track", nextTrackName ?? ""), ("environment", nextEnv ?? ""), ("time", timeLabel));
+                SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} {body}");
+            }
+            else
+            {
+                SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} Up next in {FormatVariable(timeLabel)}: {FormatHighlight($"{nextEnv} - {nextTrackName}")}");
+            }
+
+            LogEvent("pre_rotation_callout", ("offset_seconds", offsetSeconds.ToString()), ("track", nextTrackName), ("environment", nextEnv ?? ""));
+        }
+
         // CLIENT-ONLY in-flight rotation (Plan B', code item 4). Called from HandleClientTick when
         // the player is inside a flight level and rotation is engaged. Server mode never calls this
         // — the server keeps its HandleFlightLevel exit-to-waiting-room path, untouched.
@@ -253,9 +364,10 @@ namespace LiftoffAutoLobby
 
             double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
 
-            // Same callout as the waiting-room path, same text: an in-flight track change is
+            // Same callouts as the waiting-room path, same text: an in-flight track change is
             // announced to the room exactly like a waiting-room one (conductor ruling 2026-07-26
             // from the operator's "callouts are client-critical" decision).
+            AnnounceCalloutTiersIfDue(elapsed);
             AnnounceNextTrackIfDue(elapsed);
 
             if (!skipRequested && elapsed < GetRotationInterval()) return;
