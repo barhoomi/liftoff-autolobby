@@ -28,10 +28,15 @@
 # it into the volume once); ADMIN_IDS takes precedence when both are present. Leaving both
 # unset is not an error -- it reproduces the plugin's existing fail-closed default (no
 # admins) until you configure one of them.
+# Shared image reference (bot + dashboard sidecar run from the identical built image;
+# only the entrypoint/command/volumes/user differ). Kept as an anchor so the two service
+# definitions can never drift onto two different images by accident.
+x-bot-image: &bot-image procedural-fpv-bot:local
+
 services:
   bot:
     build: .
-    image: procedural-fpv-bot:local
+    image: *bot-image
     env_file:
       - .env
     volumes:
@@ -74,6 +79,84 @@ services:
     # clear error into a silent crash loop, which the feature spec explicitly calls out to
     # avoid. Once credentials are primed and steady-state operation is verified, operators
     # may reasonably switch this to `on-failure:3` or similar.
+    restart: "no"
+
+  # docs/features/doing/bot-dashboard.md -- FastAPI monitoring/control sidecar. Same image
+  # as `bot` (see the `*bot-image` anchor above), but its ENTRYPOINT is overridden outright
+  # (not just `command:`): the image's default entrypoint is docker-entrypoint.sh, which
+  # unconditionally runs the full Xvfb/Steam/game-install/plugin-build boot sequence and
+  # ends in a hardcoded `exec` into the orchestrator -- it does not respect `command:`, so
+  # only overriding `command:` here would still boot a second, redundant Steam/game stack.
+  # `python -m dashboard` (see dashboard/__main__.py) is a plain uvicorn process with none
+  # of that -- it only needs read/write access to the same files the plugin/orchestrator
+  # already use.
+  dashboard:
+    image: *bot-image
+    entrypoint: ["/usr/bin/tini", "--", "python3", "-m", "dashboard"]
+    env_file:
+      - .env
+    environment:
+      # D1 (private on host): the dashboard must bind 0.0.0.0 *inside* the container for
+      # the `ports:` publish below to reach it at all -- same pattern as x11vnc binding
+      # container-wide while the compose `ports:` entry is what actually restricts host
+      # exposure to 127.0.0.1. Pinned here (not left to .env) so the app's listening port
+      # can never drift out of sync with the `ports:` mapping two lines down.
+      FPV_DASHBOARD_HOST: "0.0.0.0"
+      FPV_DASHBOARD_PORT: "8800"
+      # dashboard/control/settings.py: "FPV_PROJECT_DIR lets a sidecar deployment point at
+      # a checkout/config tree other than the one this package was imported from" -- exactly
+      # this deployment. Paired with the bot_config mount below at /data/config, this makes
+      # dashboard.control.paths.config_dir() resolve to /data/config, i.e. the SAME
+      # config/{lobby_config,playlists,master_tracks_list}.json the bot service reads/writes
+      # via its own /config mount + boot-time symlinks -- without needing this container to
+      # replicate the bot entrypoint's symlink-seeding step.
+      FPV_PROJECT_DIR: /data
+      # Single log-dir resolver (orchestrator/event_log.py, re-exported through
+      # dashboard.control.paths.resolve_log_dir) -- same variable name and same value the
+      # bot's entrypoint exports for the orchestrator/plugin side, so both containers agree
+      # on where the JSONL event log lives without re-deriving it.
+      FPV_LOG_DIR: /logs
+      # BepInEx plugins dir -- the plugin <-> control-plane protocol-file rendezvous point
+      # (dashboard/control/protocol.py) -- and the game dir (BepInEx/LogOutput.log,
+      # Player.log for the log browser). Hardcoded to the GUI-first install path
+      # (docker-entrypoint.sh's CLIENT_LIBRARY_INSTALL_DIR, the default since USE_STEAMCMD
+      # defaults to 0) rather than left to auto-detection: auto-detection goes through
+      # lobby_config.json's liftoff_path, which only gets rewritten to a container-correct
+      # value by the BOT service's entrypoint on ITS boot -- a dashboard-only restart (bot
+      # not yet up) would otherwise resolve against a stale or host-shaped path. If you run
+      # with USE_STEAMCMD=1 in .env, override both of these to /steam/Liftoff(/BepInEx/plugins).
+      FPV_GAME_DIR: /steam/.steam/debian-installation/steamapps/common/Liftoff
+      FPV_PLUGINS_DIR: /steam/.steam/debian-installation/steamapps/common/Liftoff/BepInEx/plugins
+    volumes:
+      # Whole volume, same as the bot service -- Compose has no way to mount only a
+      # subdirectory of a named volume -- but only BepInEx/plugins under it is actually
+      # written (protocol files); everything else here is read-only in practice even though
+      # the mount itself can't express that at the volume level.
+      - steam_data:/steam
+      # Read-only: the dashboard only tails/aggregates the JSONL event log and BepInEx's own
+      # log file, never writes into /logs.
+      - bot_logs:/logs:ro
+      # Read-write, deliberately NOT :ro: the playlist manager (dashboard/control/
+      # playlist_store.py, D5/"Phase 3 write side") saves playlists.json here via
+      # atomic temp+os.replace, and lobby_config.json's "dashboard" section is where D2's
+      # token/D3's restart flag may alternatively live. Mounted at /data/config (not
+      # /config) to line up with FPV_PROJECT_DIR=/data above.
+      - bot_config:/data/config
+    # Runs as the same uid/gid the bot's entrypoint chowns /steam, /logs and /config to
+    # (Dockerfile: `useradd -u 1000 ... botuser`). Protocol files this container writes
+    # into BepInEx/plugins/ must be owned by that uid or the plugin (running as botuser
+    # inside the bot container) may not be able to read/replace them, and playlists.json
+    # written here must stay consistent with what the orchestrator (also botuser) writes.
+    user: "botuser"
+    ports:
+      - "127.0.0.1:8800:8800"
+    # Consistent with the bot service's policy (see its comment above) rather than
+    # independently chosen. Unlike the bot, the dashboard has no fatal/human-actionable
+    # startup condition analogous to an expired Steam token EXCEPT a missing
+    # FPV_DASHBOARD_TOKEN (D2) -- which is exactly as loud and exactly as
+    # human-actionable (see dashboard/__main__.py's TOKEN_HELP), so the same reasoning for
+    # not auto-restarting applies. Operators who set the token once and want the process to
+    # survive a uvicorn crash may reasonably switch this to `on-failure:3`.
     restart: "no"
 
 volumes:
