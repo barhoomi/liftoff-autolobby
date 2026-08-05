@@ -79,6 +79,35 @@ READ_ONLY = {
 LOCK_FILENAME = ".control.lock"
 
 
+def parse_track_line(line):
+    """Parse one ``tracks_to_rotate.txt`` line ("TrackName, Environment, GameMode")
+    into ``(track, environment, mode)``.
+
+    Rightmost-split into exactly 3 fields: the last comma-separated field is the game
+    mode, the second-to-last is the environment, and everything remaining (rejoined
+    verbatim with ``,``, so any commas/spaces inside the track name survive
+    byte-for-byte) is the track name. Environments and modes are fixed vocabularies
+    that never themselves contain a comma, so this is unambiguous. For a line with 3
+    or fewer comma-separated fields this is identical to a plain ``split(",")``, so
+    every existing (comma-free-name) file parses the same as before.
+
+    Mirrors the plugin's ``ParseTrackLine`` (plugin/Plugin.Rotation.cs) -- this is the
+    Python-side twin of that fix. Fixes a live bug: a real Liftoff track named
+    "Iceberg, Right ahead!" sheared its own fields under the old left-to-right split.
+    See docs/features/doing/bug-comma-in-track-name.md.
+    """
+    parts = line.split(",")
+    if len(parts) <= 3:
+        track = parts[0].strip() if parts else ""
+        environment = parts[1].strip() if len(parts) > 1 else ""
+        mode = parts[2].strip() if len(parts) > 2 else ""
+        return track, environment, mode
+    mode = parts[-1].strip()
+    environment = parts[-2].strip()
+    track = ",".join(parts[:-2]).strip()
+    return track, environment, mode
+
+
 class ProtocolOwnershipError(RuntimeError):
     """Raised on an attempt to write a file the control plane does not own."""
 
@@ -183,11 +212,11 @@ class ProtocolDir:
         for line in self.read_lines("tracks_to_rotate.txt"):
             if line.startswith("#"):
                 continue
-            parts = [p.strip() for p in line.split(",")]
+            track, environment, mode = parse_track_line(line)
             tracks.append({
-                "track": parts[0] if parts else "",
-                "environment": parts[1] if len(parts) > 1 else "",
-                "mode": parts[2] if len(parts) > 2 else "",
+                "track": track,
+                "environment": environment,
+                "mode": mode,
             })
         return tracks
 

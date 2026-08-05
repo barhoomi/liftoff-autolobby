@@ -17,6 +17,7 @@ from dashboard.control.protocol import (
     WRITABLE,
     ProtocolDir,
     ProtocolOwnershipError,
+    parse_track_line,
 )
 
 
@@ -172,7 +173,53 @@ class TestReads:
     def test_rotation_tracks_of_a_missing_file_is_empty(self, proto):
         assert proto.read_rotation_tracks() == []
 
+    def test_rotation_tracks_preserves_a_comma_in_the_track_name(self, proto):
+        """bug-comma-in-track-name.md: the operator's live report -- a real Liftoff
+        track literally named "Iceberg, Right ahead!" (comma AND exclamation point)."""
+        proto.write_text(
+            "tracks_to_rotate.txt",
+            "# Generated from playlist: demo\n"
+            "Iceberg, Right ahead!,Bando City,Race\n",
+        )
+        assert proto.read_rotation_tracks() == [
+            {"track": "Iceberg, Right ahead!", "environment": "Bando City", "mode": "Race"},
+        ]
+
 
 def test_plugins_dir_is_required():
     with pytest.raises(ValueError):
         ProtocolDir("")
+
+
+class TestParseTrackLine:
+    """bug-comma-in-track-name.md: rightmost-split into exactly 3 fields, mirroring the
+    plugin's ParseTrackLine (plugin/Plugin.Rotation.cs)."""
+
+    def test_plain_no_comma_name(self):
+        assert parse_track_line("BC Track 0,Bando City,Race") == (
+            "BC Track 0", "Bando City", "Race",
+        )
+
+    def test_operator_reported_track_name_with_a_comma(self):
+        assert parse_track_line("Iceberg, Right ahead!,Bando City,Race") == (
+            "Iceberg, Right ahead!", "Bando City", "Race",
+        )
+
+    def test_track_name_with_a_comma_and_a_space_after_it(self):
+        # The writer's own join style ("TrackName, Environment, GameMode") -- the space
+        # after the internal comma is part of the track name and must survive verbatim.
+        assert parse_track_line("Iceberg, Right ahead!, Bando City, Race") == (
+            "Iceberg, Right ahead!", "Bando City", "Race",
+        )
+
+    def test_hypothetical_two_comma_track_name(self):
+        assert parse_track_line("A, B, C,Bando City,Race") == (
+            "A, B, C", "Bando City", "Race",
+        )
+
+    def test_missing_trailing_fields_default_to_empty(self):
+        assert parse_track_line("SoloName") == ("SoloName", "", "")
+        assert parse_track_line("Name,Env") == ("Name", "Env", "")
+
+    def test_empty_line(self):
+        assert parse_track_line("") == ("", "", "")
