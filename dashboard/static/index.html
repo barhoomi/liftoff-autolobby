@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Liftoff bot dashboard</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<div id="gate" class="gate">
+  <form id="gate-form" class="card">
+    <h1>Liftoff bot</h1>
+    <p class="muted">Enter the dashboard token.</p>
+    <input id="gate-token" type="password" autocomplete="current-password" placeholder="token" required>
+    <button type="submit">Unlock</button>
+    <p id="gate-error" class="error" hidden></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <div class="brand">
+      <span class="dot" id="conn-dot" title="event stream"></span>
+      <strong>Liftoff bot</strong>
+    </div>
+    <nav id="tabs">
+      <button data-tab="state" class="active">State</button>
+      <button data-tab="live">Live</button>
+      <button data-tab="playlists">Playlists</button>
+      <button data-tab="controls">Controls</button>
+      <button data-tab="logs">Logs</button>
+    </nav>
+    <button id="lock" class="ghost" title="Forget token">lock</button>
+  </header>
+
+  <main>
+    <section id="tab-state" class="tab active">
+      <div class="grid" id="state-cards"></div>
+      <div class="card">
+        <h2>Players <span id="player-count" class="pill"></span></h2>
+        <ul id="players" class="list"></ul>
+      </div>
+      <div class="card">
+        <h2>Rotation</h2>
+        <ol id="rotation-list" class="list numbered"></ol>
+      </div>
+      <div class="card" id="errors-card" hidden>
+        <h2>Recent errors</h2>
+        <ul id="errors" class="list"></ul>
+      </div>
+    </section>
+
+    <section id="tab-live" class="tab">
+      <div class="card">
+        <div class="row wrap">
+          <input id="filter" type="search" placeholder="filter (text or event name)">
+          <label class="check"><input type="checkbox" id="autoscroll" checked> follow</label>
+          <button id="clear-stream" class="ghost">clear</button>
+        </div>
+        <div class="row wrap" id="kind-filters"></div>
+      </div>
+      <div id="stream" class="stream"></div>
+    </section>
+
+    <section id="tab-playlists" class="tab">
+      <div class="card">
+        <h2>Playlists <span id="master-warning" class="pill" hidden>no master track list</span></h2>
+        <ul id="playlist-list" class="list"></ul>
+        <div class="row wrap" style="margin-top:.6rem">
+          <input id="new-playlist-name" type="text" placeholder="new playlist name">
+          <button id="new-playlist" class="ghost">create</button>
+        </div>
+      </div>
+      <div class="card" id="playlist-editor" hidden>
+        <h2>Editing <span id="editing-name" class="pill"></span></h2>
+        <p class="muted">
+          One entry per line: <code>environment | track pattern | mode</code>.
+          <code>*</code> is a wildcard. Modes: Infinite Race, Classic Race, Dropout Race, Survival.
+        </p>
+        <textarea id="playlist-body" rows="10" spellcheck="false"></textarea>
+        <div class="row wrap" style="margin-top:.6rem">
+          <button id="playlist-validate" class="ghost">validate</button>
+          <button id="playlist-save" class="primary">save</button>
+          <button id="playlist-activate">save &amp; activate</button>
+          <button id="playlist-delete" class="danger">delete</button>
+          <button id="playlist-cancel" class="ghost">close</button>
+        </div>
+        <ul id="playlist-findings" class="list"></ul>
+      </div>
+    </section>
+
+    <section id="tab-controls" class="tab">
+      <div class="card">
+        <h2>Rotation</h2>
+        <div class="row wrap">
+          <label class="check">interval (s)
+            <input id="ctl-interval" type="number" min="5" max="86400" step="5">
+          </label>
+          <button id="ctl-interval-save" class="ghost">set</button>
+        </div>
+        <div class="row wrap" style="margin-top:.5rem">
+          <label class="check"><input type="checkbox" id="ctl-paused"> paused</label>
+          <label class="check"><input type="checkbox" id="ctl-engaged"> engaged</label>
+          <label class="check"><input type="checkbox" id="ctl-shuffle"> shuffle</label>
+        </div>
+        <div class="row wrap" style="margin-top:.5rem">
+          <button id="ctl-skip" class="ghost" title="needs a plugin change">skip now</button>
+          <span class="muted" id="ctl-skip-note"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Lobby</h2>
+        <div class="row wrap">
+          <input id="ctl-lobby-name" type="text" placeholder="lobby name">
+          <label class="check">max players
+            <input id="ctl-max-players" type="number" min="1" max="64" style="width:5rem">
+          </label>
+          <label class="check"><input type="checkbox" id="ctl-public"> public</label>
+          <button id="ctl-lobby-save" class="ghost">apply</button>
+        </div>
+        <p class="muted">Room settings take effect on the next room update/recreate.</p>
+      </div>
+
+      <div class="card">
+        <h2>Behaviour</h2>
+        <div class="row wrap">
+          <label class="check"><input type="checkbox" id="ctl-autostart"> auto-start races</label>
+          <label class="check"><input type="checkbox" id="ctl-democracy"> democracy /skip</label>
+        </div>
+        <div class="row wrap" style="margin-top:.5rem">
+          <label class="check">force game mode
+            <select id="ctl-game-mode">
+              <option value="">per track (no override)</option>
+              <option>Infinite Race</option>
+              <option>Classic Race</option>
+              <option>Dropout Race</option>
+              <option>Survival</option>
+            </select>
+          </label>
+          <button id="ctl-game-mode-save" class="ghost">set</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Danger zone</h2>
+        <div class="row wrap">
+          <button id="ctl-maintenance" class="danger">schedule maintenance shutdown</button>
+          <button id="ctl-maintenance-cancel" class="ghost" hidden>cancel maintenance</button>
+        </div>
+        <div class="row wrap" style="margin-top:.5rem">
+          <button id="ctl-restart" class="danger">restart bot container</button>
+          <span class="muted" id="ctl-restart-note"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-logs" class="tab">
+      <div class="card">
+        <h2>Log files</h2>
+        <ul id="log-list" class="list"></ul>
+      </div>
+      <div class="card">
+        <div class="row wrap">
+          <strong id="log-title">Select a log</strong>
+          <select id="log-lines">
+            <option value="100">100 lines</option>
+            <option value="200" selected>200 lines</option>
+            <option value="1000">1000 lines</option>
+            <option value="5000">5000 lines</option>
+          </select>
+          <button id="log-refresh" class="ghost">refresh</button>
+        </div>
+        <pre id="log-body" class="logbody"></pre>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+<script src="/static/write.js"></script>
+</body>
+</html>

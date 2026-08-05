@@ -56,10 +56,14 @@ jobs:
           python3 -m venv venv
           venv/bin/pip install -q --upgrade pip
           if [ -f requirements.txt ]; then venv/bin/pip install -q -r requirements.txt; fi
-          # No repo requirements.txt exists yet (gap found while writing this workflow --
-          # see feature doc). numpy/pytest are the only third-party imports found by
-          # grepping generator/, orchestrator/, trackcheck/ for non-stdlib imports.
-          venv/bin/pip install -q pytest numpy
+          # requirements-dev.txt closes the gap this step used to work around by
+          # hardcoding "pytest numpy" (see docs bot-dashboard.md). The fallback keeps a
+          # checkout predating that file installable.
+          if [ -f requirements-dev.txt ]; then
+            venv/bin/pip install -q -r requirements-dev.txt
+          else
+            venv/bin/pip install -q pytest numpy
+          fi
 
       - name: bash scripts/run_tests.sh
         run: bash scripts/run_tests.sh
