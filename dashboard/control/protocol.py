@@ -54,6 +54,9 @@ WRITABLE = {
     "rotation_engaged.txt": "'false' = rotation disengaged (absent = engaged).",
     "admin_ids.txt": "Newline-separated Photon user IDs allowed to run admin commands.",
     "keep_alive_seconds.txt": "Idle-kick avoidance interval.",
+    "skip_now.txt": "Present = admin-requested immediate rotation; the plugin deletes it "
+                     "on consumption (bot-dashboard.md skip-now fix), so this is a "
+                     "one-shot request, not a toggled flag.",
 }
 
 # Plugin-owned runtime state. The plugin writes these; the control plane may ONLY reset
@@ -285,3 +288,15 @@ class ProtocolDir:
             self.write_text("override_game_mode.txt", str(mode))
             return True
         return self.delete("override_game_mode.txt")
+
+    def trigger_skip_now(self):
+        """One-shot immediate-rotation request (bot-dashboard.md skip-now fix).
+
+        Unlike ``set_maintenance``, there is no "cancel" side: the plugin polls for this
+        file's presence inside ``HandleGameRoom`` and deletes it itself the moment it is
+        consumed (same presence-only convention as ``maintenance_active.txt``, but
+        one-shot rather than toggled), so the control plane's only sanctioned action is
+        to create it. Content is ignored by the reader; "true" matches the flag-file
+        wording used elsewhere for a human reading the directory.
+        """
+        self.write_text("skip_now.txt", "true")

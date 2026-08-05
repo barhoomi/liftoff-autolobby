@@ -243,8 +243,7 @@
     post("/api/control/maintenance", { enabled: false }, "Maintenance cancelled");
   });
   $("ctl-skip").addEventListener("click", function () {
-    window.api("/api/control/skip", { method: "POST" })
-      .catch(function (err) { window.toast(errorDetail(err), "err"); });
+    post("/api/control/skip", {}, "Skip requested — rotating on the next tick");
   });
   $("ctl-restart").addEventListener("click", function () {
     if (!confirm("Restart the bot container? The lobby drops until it comes back.")) return;

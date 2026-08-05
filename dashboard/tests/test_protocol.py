@@ -119,6 +119,14 @@ class TestTypedSetters:
         assert not proto.exists("maintenance_active.txt")
         assert proto.set_maintenance(False) is False
 
+    def test_trigger_skip_now_writes_the_one_shot_file(self, proto):
+        # No "cancel" side by design (unlike set_maintenance): the plugin deletes the
+        # file itself once HandleGameRoom consumes it, so the control plane's only
+        # sanctioned action is to create it.
+        proto.trigger_skip_now()
+        assert proto.exists("skip_now.txt")
+        assert proto.read_text("skip_now.txt") == "true"
+
     def test_override_game_mode_clears_on_falsy(self, proto):
         proto.set_override_game_mode("Classic Race")
         assert proto.read_text("override_game_mode.txt") == "Classic Race"

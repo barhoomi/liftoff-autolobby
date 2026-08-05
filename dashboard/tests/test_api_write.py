@@ -177,15 +177,21 @@ class TestControls:
         assert not protocol.exists("maintenance_active.txt")
 
 
-class TestSkipConflict:
-    def test_skip_is_501_and_says_what_the_plugin_needs(self, client):
+class TestSkip:
+    # bot-dashboard.md SPEC CONFLICT resolution (staging): HandleGameRoom now polls for
+    # skip_now.txt and consumes it into the same skipRequested flag /skip sets, so the
+    # dashboard writes a real one-shot file instead of returning 501.
+    def test_skip_writes_the_one_shot_file(self, client, protocol):
         res = client.post("/api/control/skip")
-        assert res.status_code == 501
-        assert "skipRequested" in res.json()["detail"]
+        assert res.status_code == 200
+        assert res.json() == {"skip_requested": True}
+        assert protocol.exists("skip_now.txt")
 
-    def test_control_info_advertises_the_gap(self, client):
+    def test_control_info_advertises_support(self, client):
         body = client.get("/api/control/info").json()
-        assert body["skip_supported"] is False
+        assert body["skip_supported"] is True
+        assert body["skip_reason"] is None
+        assert "skip_now.txt" in body["writable_files"]
         assert "rotation_state.txt" in body["plugin_owned_files"]
 
 

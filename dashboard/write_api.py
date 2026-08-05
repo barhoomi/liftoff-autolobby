@@ -18,19 +18,11 @@ from .control import playlist_store, restart
 from .control.playlists import MasterTracksMissingError, PlaylistError, resolve_and_write_playlist
 from .control.protocol import RESET_ONLY, WRITABLE
 
-# The one v1 control that cannot be implemented from the file protocol. See the feature
-# doc's "Spec conflict" section: /skip sets an in-memory `skipRequested` flag inside the
-# plugin and there is no file it polls for it, so any endpoint here would either lie
-# (write a file nothing reads) or race (temporarily shrink rotation_interval.txt and hope
-# the tick lands in the window). The honest answer is 501 plus the exact plugin change
-# that would fix it.
-SKIP_NOT_IMPLEMENTED = (
-    "Skip-now needs a plugin change and is not implemented. The plugin's /skip sets an "
-    "in-memory flag (skipRequested in Plugin.Commands/SkipCommand.cs); no protocol file "
-    "carries it, so the dashboard cannot request one without the plugin polling for it. "
-    "Fix: have HandleGameRoom check for a `skip_now.txt` in the plugins dir, set "
-    "skipRequested and delete the file. Until then, use /skip in game chat."
-)
+# Resolved on `staging` (bot-dashboard.md SPEC CONFLICT record, plugin fix landed
+# alongside this): HandleGameRoom (Plugin.GameRoom.cs) now polls for `skip_now.txt` every
+# tick, deletes it and sets the same skipRequested flag the in-game /skip command sets --
+# so skip-now is a real one-shot file write, not a lie or a race. Left in place as
+# documentation of the "why" for anyone reading the history; skip_supported is now True.
 
 
 class PlaylistBody(BaseModel):
@@ -171,8 +163,8 @@ def register(app, ctx, auth):
     def control_info():
         return {
             "settings": ctx.settings.public_dict(),
-            "skip_supported": False,
-            "skip_reason": SKIP_NOT_IMPLEMENTED,
+            "skip_supported": True,
+            "skip_reason": None,
             "writable_files": WRITABLE,
             "plugin_owned_files": RESET_ONLY,
         }
@@ -253,7 +245,8 @@ def register(app, ctx, auth):
 
     @app.post("/api/control/skip", dependencies=auth)
     def skip_now():
-        raise HTTPException(status_code=501, detail=SKIP_NOT_IMPLEMENTED)
+        ctx.protocol().trigger_skip_now()
+        return {"skip_requested": True}
 
     @app.post("/api/control/restart", dependencies=auth)
     def restart_container():
