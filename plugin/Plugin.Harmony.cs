@@ -254,6 +254,13 @@ namespace LiftoffAutoLobby
                 {
                     UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Inactivity watchdog patching failed: {ex.Message}");
                 }
+
+                // lifecycle-event-logging.md Phase 2 (spec: player-telemetry-spike.md): system
+                // chat capture + the RPCRaceFinished race_end anchor. Implemented in
+                // Plugin.Telemetry.cs, which owns its own Harmony instance and swallows its own
+                // failures — a telemetry patch that cannot be applied must never prevent the
+                // patches above from working.
+                ApplyTelemetryPatches(asm);
             }
             catch (Exception ex)
             {
@@ -409,6 +416,20 @@ namespace LiftoffAutoLobby
                 else if (methodName == "OnPlayerLeftRoom" && __args != null && __args.Length >= 1)
                 {
                     LogPlayerPresenceEvent("player_leave", __args[0]);
+                }
+                // player-telemetry-spike.md / lifecycle-event-logging.md Phase 2: the two
+                // property-update callbacks are the single anchor for all gameplay telemetry.
+                // Arg shapes confirmed by decompile of Photon.Realtime.InRoomCallbacksContainer:
+                //   OnPlayerPropertiesUpdate(Player targetPlayer, Hashtable changedProp)
+                //   OnRoomPropertiesUpdate(Hashtable propertiesThatChanged)
+                // Handlers live in Plugin.Telemetry.cs and never throw.
+                else if (methodName == "OnPlayerPropertiesUpdate" && __args != null && __args.Length >= 2)
+                {
+                    HandlePlayerPropertiesUpdate(__args[0], __args[1]);
+                }
+                else if (methodName == "OnRoomPropertiesUpdate" && __args != null && __args.Length >= 1)
+                {
+                    HandleRoomPropertiesUpdate(__args[0]);
                 }
 
                 System.Collections.IList list = __instance as System.Collections.IList;
