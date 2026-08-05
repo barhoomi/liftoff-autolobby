@@ -70,6 +70,10 @@ RESET_ONLY = {
 # Plugin-produced data the control plane reads and must never write.
 READ_ONLY = {
     "track_mode_availability.json": "Ground-truth (environment, mode) -> tracks dump from the game UI.",
+    "ui_tracks_dump.json": "Flat environment -> tracks dump from the game UI. The only way "
+                           "official (asset-bundled) tracks are ever discovered, so it is what "
+                           "gather_tracks.py reconciles master_tracks_list.json from, and what "
+                           "the first-run bootstrap waits for (control/bootstrap.py).",
 }
 
 LOCK_FILENAME = ".control.lock"

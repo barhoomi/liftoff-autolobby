@@ -20,10 +20,15 @@ if _PROJECT_ROOT not in sys.path:
 
 from dashboard.control import (  # noqa: E402  (import needs the bootstrap above)
     EVENT_LOG_AVAILABLE,
+    MasterTracksMissingError,
     PlaylistError,
     ProtocolDir,
+    TrackBootstrap,
+    bootstrap_timeout,
     load_lobby_config,
     make_event_logger,
+    master_list_has_tracks,
+    master_tracks_path,
     resolve_and_write_playlist,
     resolve_liftoff_path,
     resolve_log_dir,
@@ -211,9 +216,34 @@ def main():
 
     # Set up tracks_to_rotate.txt
     tracks_file = protocol.path("tracks_to_rotate.txt")
+
+    # First-run track bootstrap (docs/features/doing/fresh-install-track-bootstrap-deadlock.md,
+    # option 3). On a genuinely fresh install the step-2 gather above finds nothing --
+    # official tracks are baked into Unity asset bundles, so they are only ever discovered
+    # by reconciling the dump the *plugin* writes while driving the settings popup. Detect
+    # that state HERE, before resolution, and switch from "fail/serve an empty rotation
+    # forever" to "launch the game, wait for the dump, then redo gather + resolve".
+    # `bootstrap_timeout() <= 0` opts out and keeps the historical fail-fast behaviour.
+    bootstrap = None
+    bootstrap_seconds = bootstrap_timeout()
+    bootstrap_needed = (args.playlist is not None and bootstrap_seconds > 0
+                        and not master_list_has_tracks(master_tracks_path(project_dir)))
+
     if args.playlist:
         try:
             resolve_and_write_playlist(args.playlist, args.shuffle, tracks_file, logger=logger)
+        except MasterTracksMissingError as e:
+            # Absent (not merely empty) master list. Historically fatal; now fatal only
+            # when the bootstrap is unavailable / opted out of, since the bootstrap exists
+            # precisely to fill this file in.
+            if not bootstrap_needed:
+                print(f"ERROR: {e}")
+                logger.error(str(e), context="playlist_resolution", playlist=args.playlist)
+                sys.exit(1)
+            print(f"[Host] {e} — deferring playlist resolution to the first-run bootstrap.")
+            if not os.path.exists(tracks_file):
+                protocol.write_text(os.path.basename(tracks_file),
+                                    "# Format: TrackName,EnvironmentName,GameModeName\n")
         except (ValueError, PlaylistError) as e:
             # PlaylistError covers the master_tracks_list.json-missing case, which used to
             # sys.exit(1) from inside the resolver itself. Same message, same exit code --
@@ -221,6 +251,11 @@ def main():
             print(f"ERROR: {e}")
             logger.error(str(e), context="playlist_resolution", playlist=args.playlist)
             sys.exit(1)
+
+        if bootstrap_needed:
+            bootstrap = TrackBootstrap(plugins_dir, args.playlist, tracks_file,
+                                       shuffle=args.shuffle, logger=logger,
+                                       timeout=bootstrap_seconds)
     else:
         # Copy tracks_to_rotate.txt from current directory if it exists, otherwise create/keep existing
         local_tracks_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracks_to_rotate.txt")
@@ -317,6 +352,22 @@ def main():
                 except Exception as e:
                     print(f"[Host] Error checking playlist change: {e}")
 
+            # 1b. First-run track bootstrap: once the game is up, watch for the plugin's
+            # Environment x GameMode dump and, the moment it lands, regenerate
+            # master_tracks_list.json and re-resolve the playlist. Self-rate-limiting, so
+            # calling it every tick is free; it retires itself (active -> False) on
+            # completion, timeout or failure, and the loop keeps servicing everything else
+            # throughout -- deliberately not a blocking wait.
+            if bootstrap is not None and bootstrap.active:
+                bootstrap.poll()
+                if bootstrap.state == TrackBootstrap.COMPLETED:
+                    # The bootstrap resolved whatever playlist was active when it armed.
+                    # Pointing active_playlist back at that name (rather than assuming it
+                    # is still current) means an operator who switched playlists mid-boot
+                    # simply gets picked up by check 1 above on the very next tick, now
+                    # that the master list is populated -- no special case needed.
+                    active_playlist = bootstrap.playlist_name
+
             # 2. Check process state and handle relaunch (every 15 seconds)
             if current_time - last_process_check >= 15.0:
                 last_process_check = current_time
@@ -327,6 +378,11 @@ def main():
                 
                 if pids:
                     print(f"[Host] Liftoff is running (PIDs: {', '.join(pids)}). Monitoring...")
+                    # A game we did not launch ourselves (adopted from a previous
+                    # orchestrator run) still produces the dump, so start the clock here
+                    # too -- otherwise the bootstrap would sit idle forever.
+                    if bootstrap is not None:
+                        bootstrap.note_game_started()
                 else:
                     # Check if maintenance mode is active
                     if protocol.exists("maintenance_active.txt"):
@@ -352,6 +408,10 @@ def main():
                     print(f"[Host] Started Liftoff server process (PID: {proc.pid}).")
                     logger.game_start(proc.pid, playlist=active_playlist,
                                       width=args.width, height=args.height)
+                    # The bootstrap's timeout budget starts here, not at orchestrator
+                    # startup: everything it waits on is produced by this process.
+                    if bootstrap is not None:
+                        bootstrap.note_game_started()
             
             time.sleep(1)
 
