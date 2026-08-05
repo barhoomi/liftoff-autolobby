@@ -2,12 +2,16 @@
 
 The derivation rules worth pinning down are the ones where being wrong would put a
 confident lie on the operator's screen: a stale player roster after a disconnect, a
-countdown that keeps ticking while rotation is paused, and a "next track" guess while
-the plugin is walking a shuffled order this process deliberately does not model.
+countdown that keeps ticking while rotation is paused, and (bug-comma-in-track-name.md,
+Bug 3) a "next track"/rotation-list guess while shuffle mode is on but no trustworthy
+persisted shuffle_order.txt deal exists yet to reflect (this process still must not
+fabricate one -- see dashboard.control.shuffle_order).
 """
 
+import os
 from datetime import datetime, timezone
 
+from dashboard.control import shuffle_order as shuffle_order_mod
 from dashboard.control import state as state_mod
 from dashboard.control.protocol import ProtocolDir
 
@@ -183,13 +187,49 @@ class TestSnapshot:
         snapshot = state_mod.build_snapshot(proto, None, event_list=[], now=NOW)
         assert snapshot["rotation"]["next_track"]["track"] == "A"
 
-    def test_next_track_is_withheld_while_shuffling(self, tmp_path):
-        # shuffle_order.txt is plugin-owned; guessing the next track from the static file
-        # would be a second, wrong copy of rotation order (AGENTS.md rule 4).
+    def test_next_track_is_withheld_while_shuffling_with_no_persisted_deal(self, tmp_path):
+        # No shuffle_order.txt on disk yet -- guessing the next track from the static
+        # file would be a second, wrong copy of rotation order (AGENTS.md rule 4).
         proto = self._protocol(tmp_path, shuffle_mode__txt="true",
                                tracks_to_rotate__txt="A,Bando City,Race\nB,The Green,Race\n")
         proto.reset_rotation_state()
         snapshot = state_mod.build_snapshot(proto, None, event_list=[], now=NOW)
+        assert snapshot["rotation"]["next_track"] is None
+        assert snapshot["config"]["shuffled"] is False
+
+    def _write_shuffle_order(self, proto, static_lines, order):
+        sig = shuffle_order_mod.compute_tracks_signature(static_lines)
+        content = "# signature:{}\n".format(sig) + "\n".join(str(i) for i in order) + "\n"
+        os.makedirs(proto.plugins_dir, exist_ok=True)
+        with open(proto.path("shuffle_order.txt"), "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def test_tracks_and_next_track_follow_the_persisted_shuffle_order(self, tmp_path):
+        """bug-comma-in-track-name.md, Bug 3: with a trustworthy shuffle_order.txt on
+        disk, the rotation panel must show the ACTUAL play order, not file order."""
+        proto = self._protocol(
+            tmp_path, shuffle_mode__txt="true",
+            tracks_to_rotate__txt="A,Bando City,Race\nB,The Green,Race\nC,Hannover,Race\n")
+        self._write_shuffle_order(
+            proto, ["A,Bando City,Race", "B,The Green,Race", "C,Hannover,Race"], [2, 0, 1])
+        proto.reset_rotation_state()
+        snapshot = state_mod.build_snapshot(proto, None, event_list=[], now=NOW)
+        cfg = snapshot["config"]
+        assert cfg["shuffled"] is True
+        assert [t["track"] for t in cfg["tracks"]] == ["C", "A", "B"]
+        assert snapshot["rotation"]["next_track"]["track"] == "C"
+
+    def test_stale_shuffle_order_falls_back_to_file_order(self, tmp_path):
+        proto = self._protocol(
+            tmp_path, shuffle_mode__txt="true",
+            tracks_to_rotate__txt="A,Bando City,Race\nB,The Green,Race\n")
+        # Dealt against different (older) content -- signature won't match.
+        self._write_shuffle_order(proto, ["A,Bando City,Race"], [0])
+        proto.reset_rotation_state()
+        snapshot = state_mod.build_snapshot(proto, None, event_list=[], now=NOW)
+        cfg = snapshot["config"]
+        assert cfg["shuffled"] is False
+        assert [t["track"] for t in cfg["tracks"]] == ["A", "B"]
         assert snapshot["rotation"]["next_track"] is None
 
     def test_snapshot_survives_a_completely_empty_plugins_dir(self, tmp_path):

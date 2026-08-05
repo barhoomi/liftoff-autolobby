@@ -47,6 +47,7 @@ from .playlists import (
     round_robin_shuffle_by_environment,
 )
 from .protocol import READ_ONLY, RESET_ONLY, WRITABLE, ProtocolDir, ProtocolOwnershipError
+from .shuffle_order import compute_tracks_signature, read_active_order
 
 __all__ = [
     "BOOTSTRAP_DEFAULT_TIMEOUT_SECONDS",
@@ -64,6 +65,7 @@ __all__ = [
     "bepinex_log_path",
     "bootstrap_timeout",
     "config_dir",
+    "compute_tracks_signature",
     "cross_validate_tracks",
     "lobby_config_path",
     "load_lobby_config",
@@ -75,6 +77,7 @@ __all__ = [
     "player_log_candidates",
     "player_log_path",
     "playlists_path",
+    "read_active_order",
     "repo_root",
     "resolve_and_write_playlist",
     "resolve_game_dir",

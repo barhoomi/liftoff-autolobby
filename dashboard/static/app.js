@@ -185,6 +185,17 @@
       players.appendChild(li);
     });
 
+    // bug-comma-in-track-name.md, Bug 3: cfg.tracks is already in the order that will
+    // actually play (definition order, or the plugin's persisted shuffled walk order
+    // when cfg.shuffled is true -- see dashboard/control/state.py's read_config_state).
+    // Label which one so "shuffle on but list looks unshuffled" isn't ambiguous.
+    var orderPill = $("rotation-order-pill");
+    if (cfg.shuffle_mode) {
+      orderPill.textContent = cfg.shuffled ? "shuffled order" : "shuffle pending…";
+    } else {
+      orderPill.textContent = "";
+    }
+
     var list = $("rotation-list");
     list.textContent = "";
     cfg.tracks.slice(0, 200).forEach(function (t, i) {

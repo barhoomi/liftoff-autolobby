@@ -185,6 +185,25 @@ class TestReads:
             {"track": "Iceberg, Right ahead!", "environment": "Bando City", "mode": "Race"},
         ]
 
+    def test_read_static_track_lines_skips_headers_and_blanks_but_keeps_raw_lines(self, proto):
+        proto.write_text(
+            "tracks_to_rotate.txt",
+            "# Generated from playlist: demo\n"
+            "\n"
+            "BC Track 0, Bando City, Race\n"
+            "Green Track 1,The Green,Infinite Race\n",
+        )
+        # Note the exact whitespace difference between the two lines is preserved --
+        # shuffle_order.py's signature check needs the plugin's own byte-identical
+        # trimmed lines, not a reconstruction from parsed fields.
+        assert proto.read_static_track_lines() == [
+            "BC Track 0, Bando City, Race",
+            "Green Track 1,The Green,Infinite Race",
+        ]
+
+    def test_read_static_track_lines_of_a_missing_file_is_empty(self, proto):
+        assert proto.read_static_track_lines() == []
+
 
 def test_plugins_dir_is_required():
     with pytest.raises(ValueError):

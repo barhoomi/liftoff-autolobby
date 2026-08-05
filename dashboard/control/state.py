@@ -17,6 +17,7 @@ bot that has been up for 10 minutes but hasn't rotated yet has no current track)
 from datetime import datetime, timezone
 
 from . import events as events_mod
+from . import shuffle_order as shuffle_order_mod
 
 # Events that mean "whatever roster we had is gone": the game process restarted, or the
 # bot left/lost the room. Without these a disconnect would leave ghosts in the player
@@ -151,6 +152,25 @@ def fold_events(event_list, now=None):
 def read_config_state(protocol):
     """The configuration half: the protocol files exactly as the plugin reads them."""
     tracks = protocol.read_rotation_tracks()
+    shuffle_mode = protocol.read_flag("shuffle_mode.txt")
+
+    # bug-comma-in-track-name.md, Bug 3 (operator live report): with shuffle mode on,
+    # the ACTUAL play order is a permutation of tracks_to_rotate.txt held in the
+    # plugin-owned shuffle_order.txt (see dashboard.control.shuffle_order's docstring
+    # for the ownership/self-healing rules this must respect -- read-only, never
+    # written here). When a trustworthy permutation is on disk, present `tracks` in
+    # that order and set `shuffled` so the UI can label it; otherwise (shuffle off, or
+    # the deal is missing/stale/invalid) fall back to tracks_to_rotate.txt's own
+    # definition order with `shuffled: False` -- exactly what the plugin itself falls
+    # back to before it has (re)dealt.
+    shuffled = False
+    if shuffle_mode:
+        static_lines = protocol.read_static_track_lines()
+        if len(static_lines) == len(tracks):
+            order, shuffled = shuffle_order_mod.read_active_order(protocol, static_lines)
+            if shuffled:
+                tracks = [tracks[i] for i in order]
+
     return {
         "plugins_dir": protocol.plugins_dir,
         "lobby_name": protocol.read_text("lobby_name.txt"),
@@ -159,7 +179,11 @@ def read_config_state(protocol):
         "rotation_interval_s": protocol.read_int("rotation_interval.txt"),
         "room_private": protocol.read_flag("room_private.txt", None),
         "auto_start": protocol.read_flag("auto_start.txt"),
-        "shuffle_mode": protocol.read_flag("shuffle_mode.txt"),
+        "shuffle_mode": shuffle_mode,
+        # Whether `tracks` below is actually presented in the plugin's shuffled walk
+        # order (as opposed to shuffle_mode being on but no trustworthy deal being
+        # available yet to reflect it) -- see the shuffled-order note above.
+        "shuffled": shuffled,
         "democracy_mode": protocol.read_flag("democracy_mode.txt"),
         "max_players": protocol.read_int("max_players.txt"),
         "override_game_mode": protocol.read_text("override_game_mode.txt"),
@@ -170,6 +194,10 @@ def read_config_state(protocol):
         "rotation_paused": protocol.read_flag("rotation_paused.txt", False),
         "rotation_cursor": protocol.read_int("rotation_state.txt"),
         "track_count": len(tracks),
+        # In definition order when `shuffled` is False, in the plugin's actual walk
+        # order when it is True -- either way, index i here is the i-th track that will
+        # actually play (which is also what makes the next_track derivation below a
+        # single formula for both modes now).
         "tracks": tracks,
     }
 
@@ -197,11 +225,16 @@ def build_snapshot(protocol, log_dir, limit=500, now=None, event_list=None):
     tracks = config_state["tracks"]
     cursor = config_state["rotation_cursor"]
     if tracks and isinstance(cursor, int):
-        # rotation_state.txt is the cursor of the NEXT track to be served, and is a index
-        # into the static file only while shuffle is off -- with shuffle on the plugin
-        # walks a permutation we deliberately do not duplicate here (shuffle_order.txt is
-        # plugin-owned; re-deriving it would be exactly the stale-copy bug rule 4 bans).
-        if not config_state["shuffle_mode"]:
+        # rotation_state.txt is the cursor of the NEXT track to be served, as a position
+        # in the WALK order -- which `tracks` above now already IS, in both modes: file
+        # (definition) order when `shuffled` is False, the plugin's persisted permutation
+        # order when True. So this one formula is correct either way; when shuffle is on
+        # but no trustworthy shuffle_order.txt is available yet (`shuffled` is False for
+        # that reason too), `tracks` is still file order and the cursor does NOT index
+        # into it correctly, so next_track is deliberately withheld rather than guessed
+        # (AGENTS.md rule 4 -- re-deriving the plugin's own derived state here would be
+        # exactly the stale-copy bug shape that bit the original shuffle bug).
+        if not config_state["shuffle_mode"] or config_state["shuffled"]:
             next_track = tracks[cursor % len(tracks)]
 
     return {

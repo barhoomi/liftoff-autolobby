@@ -202,6 +202,17 @@ class ProtocolDir:
             return []
         return [line.strip() for line in raw.splitlines() if line.strip()]
 
+    def read_static_track_lines(self):
+        """The raw, trimmed, non-blank, non-``#`` lines of ``tracks_to_rotate.txt`` --
+        byte-identical to what the plugin's own ``ReadStaticTracks`` (Plugin.Rotation.cs)
+        returns. Used by ``dashboard.control.shuffle_order`` to recompute the same
+        content signature the plugin guards ``shuffle_order.txt`` with; deliberately NOT
+        the parsed ``{track, environment, mode}`` dicts from ``read_rotation_tracks()``
+        below, whose reconstruction (rejoined with a plain ``,``) loses whatever exact
+        whitespace the original line had and would make the signature never match.
+        """
+        return [line for line in self.read_lines("tracks_to_rotate.txt") if not line.startswith("#")]
+
     def read_rotation_tracks(self):
         """Parse ``tracks_to_rotate.txt`` into ``[{track, environment, mode}]``.
 
