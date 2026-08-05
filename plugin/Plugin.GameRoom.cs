@@ -114,14 +114,29 @@ namespace LiftoffAutoLobby
                 if (startBtn == null) startBtn = FindButtonByTextOrName("START", startNames);
                 if (startBtn != null && startBtn.gameObject.activeInHierarchy && startBtn.interactable)
                 {
-                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Auto-start: clicking START button.");
-                    lastStartGameClickedTime = DateTime.Now;
-                    if (firstStartGameClickTime == DateTime.MinValue)
+                    // bug-auto-start-joins-running-race.md: buttonStartGame is dual-purpose —
+                    // "Start game" with no race running, "Join game" while one is — and the
+                    // lookup above matches it by NAME, so the label alone never gated the click.
+                    // Auto-start must fire ONLY when clicking would START a race. Suppression
+                    // deliberately falls through instead of returning: rotation, callouts and
+                    // keep-alive have to keep running for the whole race.
+                    string suppressKind, suppressDetail;
+                    if (ShouldSuppressAutoStart(startBtn, out suppressKind, out suppressDetail))
                     {
-                        firstStartGameClickTime = DateTime.Now;
+                        NoteAutoStartSuppressed(suppressKind, suppressDetail);
                     }
-                    startBtn.onClick.Invoke();
-                    return;
+                    else
+                    {
+                        autoStartSuppressedKind = null; // episode over — the next one logs again
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Auto-start: clicking START button (label='{GetButtonText(startBtn)}', {suppressDetail}).");
+                        lastStartGameClickedTime = DateTime.Now;
+                        if (firstStartGameClickTime == DateTime.MinValue)
+                        {
+                            firstStartGameClickTime = DateTime.Now;
+                        }
+                        startBtn.onClick.Invoke();
+                        return;
+                    }
                 }
             }
 
@@ -198,6 +213,74 @@ namespace LiftoffAutoLobby
             }
 
             HandleKeepAlive();
+        }
+
+        // ---------------------------------------------------------------
+        // bug-auto-start-joins-running-race.md: the auto-start guard.
+        // ---------------------------------------------------------------
+
+        // Which suppression is currently being reported, so the JSONL `decision` event is emitted
+        // once per EPISODE rather than once per tick. Keyed on the coarse kind (not the detail
+        // text, which carries a racer count that changes mid-race). In-memory only: an episode is
+        // meaningless across a game restart, and it is bookkeeping, not state anyone else reads
+        // (AGENTS.md rules 4-5). Cleared the moment a tick finds the guard open again.
+        private static string autoStartSuppressedKind;
+
+        // True when clicking the waiting-room start button would JOIN a running race instead of
+        // starting a new one — or when we cannot tell.
+        //
+        // FAIL-CLOSED on an unreadable signal, deliberately: a missed auto-start is small and
+        // recoverable (the decompile shows the button is gated only on the LOCAL player's content
+        // status, with no master-client gate, so any ready player can press Start themselves),
+        // while a wrong click is the live-confirmed room-churn bug this fixes. The failure is
+        // loud — LogError at resolution time plus a `decision` event per episode — never silent.
+        //
+        // The button-label check is belt-and-braces only, never the primary signal: the label is
+        // a localized, encrypted string, so it is evidence in English and nothing elsewhere. It
+        // can only ADD suppression, so a non-English client degrades to "the Photon signal
+        // decides" rather than to a wrong click.
+        private static bool ShouldSuppressAutoStart(Button startBtn, out string kind, out string detail)
+        {
+            bool raceInProgress;
+            string signalDetail;
+            if (!TryDetectRaceInProgress(out raceInProgress, out signalDetail))
+            {
+                kind = "signal_unreadable";
+                detail = $"race state unreadable ({signalDetail})";
+                return true;
+            }
+
+            string label = GetButtonText(startBtn);
+            if (raceInProgress)
+            {
+                kind = "race_in_progress";
+                detail = $"race in progress: {signalDetail}; button label '{label}'";
+                return true;
+            }
+
+            if (!string.IsNullOrEmpty(label) && label.IndexOf("join", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                kind = "join_label";
+                detail = $"button label '{label}' says clicking would JOIN, not start, although {signalDetail}";
+                return true;
+            }
+
+            kind = null;
+            detail = signalDetail;
+            return false;
+        }
+
+        private static void NoteAutoStartSuppressed(string kind, string detail)
+        {
+            if (string.Equals(autoStartSuppressedKind, kind, StringComparison.Ordinal)) return;
+            autoStartSuppressedKind = kind;
+
+            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Auto-start SUPPRESSED ({kind}): {detail}");
+            // Same envelope and `kind`/`detail` shape as the existing track_blacklist decision
+            // event above, so both group as "an autonomous plugin decision" in the JSONL.
+            LogJsonEvent("decision",
+                ("kind", "auto_start_suppressed"),
+                ("detail", $"{kind}: {detail}"));
         }
 
         // ---------------------------------------------------------------
@@ -543,11 +626,53 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // bug-auto-start-joins-running-race.md, briefing item 3 — what the exit path actually
+        // does, from the decompile (recorded here because the code below reads like a direct
+        // "leave the level" call and is not one):
+        //     private void OnToWaitingRoom() { <GameManager>.QuitGameWithConfirm(new <ToWaitingRoomAction>()); }
+        //     public void QuitGameWithConfirm(<QuitAction> a) {
+        //         <PopupManager>.<ShowConfirm>(a.<Title>, a.<Body>, a.<OnConfirm>,
+        //                                      delegate { isQuitShowing = false; }, <"yes">, <"no">);
+        //         isQuitShowing = true; }
+        // It OPENS A CONFIRMATION POPUP; the level is only left once that popup is confirmed, and
+        // nothing here confirms it. What completes the exit today is the unrelated global
+        // DismissPopups() safety net in RunTick (Plugin.UiToolkit.cs), which clicks any
+        // Confirm/OK/Close button in PopupCanvas(Clone) on the next tick. So the exit works by
+        // accident, and the observed 10-120s is genuine llvmpipe scene-load time on both ends,
+        // not a failing invoke. The game has no `if (isQuitShowing) return;` guard, so the old
+        // once-per-tick invoke stacked a fresh confirm popup EVERY SECOND for the whole load —
+        // hence the retry throttle below. Making the exit self-confirming (click the popup here
+        // and verify the scene actually changed) is recorded as a follow-up in the feature doc:
+        // it changes a path that currently works, which this bug does not own.
+        private const double FlightExitRetrySeconds = 10.0;
+        private const double FlightExitWarnSeconds = 30.0;
+        private static DateTime flightExitRequestedTime = DateTime.MinValue;
+        private static bool flightExitWarned;
+
         private static void HandleFlightLevel()
         {
             double elapsed = (DateTime.Now - sceneLoadTime).TotalSeconds;
             if (elapsed >= 5.0)
             {
+                // The scene-change block in RunTick resets sceneLoadTime, so a stale request from
+                // a previous flight-level entry can never throttle this one.
+                if (flightExitRequestedTime != DateTime.MinValue && flightExitRequestedTime < sceneLoadTime)
+                {
+                    flightExitRequestedTime = DateTime.MinValue;
+                    flightExitWarned = false;
+                }
+                if (flightExitRequestedTime != DateTime.MinValue)
+                {
+                    double sinceRequest = (DateTime.Now - flightExitRequestedTime).TotalSeconds;
+                    if (!flightExitWarned && sinceRequest >= FlightExitWarnSeconds)
+                    {
+                        flightExitWarned = true;
+                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Still in the flight level {sinceRequest:F0}s after requesting the exit to the waiting room — the confirm popup may not have been dismissed.");
+                    }
+                    if (sinceRequest < FlightExitRetrySeconds) return;
+                }
+                flightExitRequestedTime = DateTime.Now;
+
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Level loaded for {elapsed:F1}s. Exiting flight level to waiting room.");
 
                 // 1. Try invoking InGameMenuMainPanel.OnToWaitingRoom directly via reflection
