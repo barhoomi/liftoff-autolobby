@@ -192,7 +192,18 @@ async def sse_event_source(log_dir, poll_interval, backlog, is_disconnected,
         yield _sse({"event": "_dashboard", "message": "No log directory resolved."})
         return
 
-    for event in events_mod.read_recent(log_dir, limit=backlog):
+    # Off the event loop thread, like tail.poll() below: read_recent() does synchronous
+    # file I/O (open + readlines() over up to `days` daily files), and this generator is
+    # driven directly on the asyncio event loop by StreamingResponse. A synchronous call
+    # here blocks *every* connection's first byte for its duration -- not just this one --
+    # because asyncio is cooperative single-threaded. A tiny fixture file in a smoke test
+    # reads instantly and never surfaces this; a real deployment (slower/contended disk
+    # under the Docker volume, a backlog near the 1000 cap, a busy host) can stall it long
+    # enough that a client seeing "held open, zero bytes" is exactly what this looks like
+    # from the outside. See docs/features/doing/bot-dashboard.md "known issues" for the
+    # live repro that found this.
+    backlog_events = await asyncio.to_thread(events_mod.read_recent, log_dir, limit=backlog)
+    for event in backlog_events:
         yield _sse(event)
 
     tail = events_mod.EventTail(log_dir).seek_to_end()

@@ -143,6 +143,61 @@ class TestSseEventSource:
         write_event("chat", msg="hello")
         assert self._collect(project["log_dir"], backlog=0, polls=0) == []
 
+    def test_backlog_replay_does_not_block_the_event_loop(self, project, write_event,
+                                                           monkeypatch):
+        # Regression test for a live bug: the backlog replay used to call
+        # events_mod.read_recent() synchronously, directly on the coroutine driving this
+        # generator. A tiny fixture file (as in a build-time smoke test) reads instantly
+        # and never surfaces this; a real deployment (slower/contended disk under a
+        # Docker volume, a large backlog) can make that read slow enough to stall the
+        # *whole* event loop -- since asyncio is cooperative single-threaded, that starves
+        # every other connection's first byte too, not just this one. From the outside
+        # that looks exactly like "connects, holds the socket open, zero bytes" until a
+        # client-side timeout fires. Assert the read now runs off-thread: a concurrently
+        # scheduled task must keep making progress while a (simulated slow) backlog read
+        # is in flight.
+        import asyncio
+        import time as time_mod
+
+        from dashboard.api import sse_event_source
+        from dashboard.control import events as events_mod
+
+        write_event("chat", msg="hello")
+        real_read_recent = events_mod.read_recent
+
+        def slow_read_recent(*args, **kwargs):
+            time_mod.sleep(0.3)
+            return real_read_recent(*args, **kwargs)
+
+        monkeypatch.setattr(events_mod, "read_recent", slow_read_recent)
+
+        ticks = {"count": 0}
+
+        async def ticker():
+            while True:
+                ticks["count"] += 1
+                await asyncio.sleep(0.02)
+
+        async def is_disconnected():
+            return True  # stop right after the backlog replay, no live-tail loop needed
+
+        async def run():
+            task = asyncio.create_task(ticker())
+            chunks = []
+            async for chunk in sse_event_source(project["log_dir"], 0.0, 50,
+                                                is_disconnected):
+                chunks.append(chunk)
+            task.cancel()
+            return chunks
+
+        chunks = asyncio.run(run())
+        assert len(chunks) == 1
+        # ~0.3s of blocking sleep at a 0.02s tick would allow ~15 ticks if the loop
+        # stayed free throughout; a blocked loop lets the ticker task run zero or almost
+        # zero times before the generator finishes. A handful is enough to prove the read
+        # ran off the event loop thread rather than freezing it for the full 0.3s.
+        assert ticks["count"] >= 5
+
     def test_streams_lines_appended_after_connect(self, project, write_event):
         write_event("chat", msg="old")
         # One poll happens before the new line exists, one after -- the second must pick
