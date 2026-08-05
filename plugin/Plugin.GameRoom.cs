@@ -162,6 +162,22 @@ namespace LiftoffAutoLobby
             AnnounceCalloutTiersIfDue(elapsed);
             AnnounceNextTrackIfDue(elapsed);
 
+            // bot-dashboard.md SPEC CONFLICT resolution: skip_now.txt is an externally
+            // (dashboard/orchestrator) written, plugin-consumed presence-only file, same
+            // convention as maintenance_active.txt -- the plugin owns deleting it, which
+            // makes it a one-shot request rather than a second piece of state that must be
+            // kept in sync (AGENTS.md rule 4). Reuses the exact skipRequested mechanism the
+            // admin /skip command already sets (SkipCommand.cs) -- this is another writer of
+            // the same flag, not a new skip path.
+            string skipNowPath = Path.Combine(pluginPath, "skip_now.txt");
+            if (File.Exists(skipNowPath))
+            {
+                try { File.Delete(skipNowPath); }
+                catch (Exception ex) { UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to delete skip_now.txt: {ex.Message}"); }
+                skipRequested = true;
+                UnityEngine.Debug.Log("[AutoLobbyPlugin] skip_now.txt observed — forcing rotation.");
+            }
+
             if (skipRequested || elapsed >= GetRotationInterval())
             {
                 if (skipRequested)
