@@ -11,7 +11,6 @@
 # volumes, the Steam client, steamcmd, or the container entrypoint.
 set -euo pipefail
 
-CONTAINER="procedural-fpv-bot-1"
 PLAYER_LOG="/steam/.config/unity3d/LuGus Studios/Liftoff/Player.log"
 TIMEOUT_S=$((10 * 60))
 AUTO_RECOVER=0
@@ -34,6 +33,26 @@ fi
 
 echo "Starting bot container via docker compose up -d ..."
 docker compose up -d
+
+# Resolve the actual container name instead of hardcoding it: it's derived
+# from the compose project name, which the operator's .env can override via
+# COMPOSE_PROJECT_NAME (see docs/features/doing/bot-priming-this-host.md
+# §10) -- a hardcoded "procedural-fpv-bot-1" silently targets a nonexistent
+# container whenever that differs from the repo dirname default. Precedence
+# matches bot-down.sh's CONTAINER= override convention:
+#   1. explicit CONTAINER env override
+#   2. derived from `docker compose ps` (run above `cd "$REPO_ROOT"`, which
+#      reads .env -- and thus COMPOSE_PROJECT_NAME -- itself). Resolved only
+#      now, after `up -d`, so the container is guaranteed to already exist
+#      even on a first-ever boot.
+#   3. the old literal, as a last-resort fallback with a warning
+if [[ -z "${CONTAINER:-}" ]]; then
+  CONTAINER="$(docker compose ps -a --format '{{.Name}}' bot 2>/dev/null | head -n1)"
+  if [[ -z "$CONTAINER" ]]; then
+    CONTAINER="procedural-fpv-bot-1"
+    echo "WARNING: could not derive the bot container name from 'docker compose ps'; falling back to the literal '${CONTAINER}'. Set CONTAINER=<name> to override." >&2
+  fi
+fi
 
 recover_once_done=0
 

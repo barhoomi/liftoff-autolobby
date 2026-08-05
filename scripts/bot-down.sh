@@ -11,8 +11,23 @@
 # only stops the container; it never touches volumes.
 set -euo pipefail
 
-# Override via env var for testing against a non-existent container name.
-CONTAINER="${CONTAINER:-procedural-fpv-bot-1}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve the actual container name instead of hardcoding it -- see
+# bot-up.sh for the full rationale (COMPOSE_PROJECT_NAME in .env changes the
+# real container name away from the repo-dirname default). Precedence:
+#   1. explicit CONTAINER env override (also usable for testing against a
+#      non-existent container name -- unchanged from before)
+#   2. derived from `docker compose ps` (run from the repo root, which reads
+#      .env -- and thus COMPOSE_PROJECT_NAME -- itself)
+#   3. the old literal, as a last-resort fallback with a warning
+if [[ -z "${CONTAINER:-}" ]]; then
+  CONTAINER="$(cd "$REPO_ROOT" && docker compose ps -a --format '{{.Name}}' bot 2>/dev/null | head -n1)"
+  if [[ -z "$CONTAINER" ]]; then
+    CONTAINER="procedural-fpv-bot-1"
+    echo "WARNING: could not derive the bot container name from 'docker compose ps'; falling back to the literal '${CONTAINER}'. Set CONTAINER=<name> to override." >&2
+  fi
+fi
 
 if ! docker ps >/dev/null 2>&1; then
   echo "ERROR: cannot talk to the Docker daemon as $(whoami)." >&2
