@@ -121,6 +121,16 @@ namespace LiftoffAutoLobby
             string RotationStartedTemplate { get; } // /start (client-only wording). {track} {environment}
             string ExtendTemplate { get; }          // /extend (client-only wording). {seconds} {time} {track} {environment}
             string UpNextTemplate { get; }          // "Up next" rotation announcement. {track} {environment}
+
+            // pre-rotation-callouts.md: the tiered pre-rotation warnings (5m/2m/1m by default),
+            // in addition to the fixed final 10s warning above (UpNextTemplate/chatWarnedAboutNextRace,
+            // untouched by this feature). CalloutOffsetsMinutes is a comma-separated list of
+            // minutes-before-rotation; offsets at or beyond the current rotation interval are
+            // skipped cleanly (see AnnounceCalloutTiersIfDue). Both members are literal defaults
+            // (not file-backed) on FileSettingsSource -- server-mode customization is out of scope
+            // for v1, same non-goal as every other *Template entry above.
+            string CalloutOffsetsMinutes { get; }   // e.g. "5,2,1"
+            string CalloutTemplate { get; }         // {time} {track} {environment}
         }
 
         // Server source: the orchestrator's plain-text protocol files in BepInEx/plugins/, read
@@ -216,6 +226,15 @@ namespace LiftoffAutoLobby
             public string ExtendTemplate => "Extended by {seconds}s. Next rotation in {time}s.";
             public string UpNextTemplate => "Up next: {environment} - {track}";
 
+            // pre-rotation-callouts.md: literal defaults, never file-backed (server-mode
+            // customization is out of scope for v1 -- see the ISettingsSource comment above).
+            // No server call site reads CalloutTemplate (server hardcodes its own wording,
+            // matching the UpNextTemplate precedent); CalloutOffsetsMinutes IS read by shared
+            // code (AnnounceCalloutTiersIfDue) so the server bot gets the same 5m/2m/1m default
+            // tiers as client mode, just not configurable without a code change.
+            public string CalloutOffsetsMinutes => "5,2,1";
+            public string CalloutTemplate => "Up next in {time}: {environment} - {track}";
+
             private static bool FileFlag(string fileName)
             {
                 try
@@ -266,6 +285,8 @@ namespace LiftoffAutoLobby
             private readonly ConfigEntry<string> rotationStartedTemplate;
             private readonly ConfigEntry<string> extendTemplate;
             private readonly ConfigEntry<string> upNextTemplate;
+            private readonly ConfigEntry<string> calloutOffsetsMinutes;
+            private readonly ConfigEntry<string> calloutTemplate;
 
             public ConfigSettingsSource(ConfigFile config)
             {
@@ -301,6 +322,16 @@ namespace LiftoffAutoLobby
                     "Chat message when rotation is extended. Placeholders: {seconds}, {time}, {track}, {environment}");
                 upNextTemplate = config.Bind("Messages", "UpNext", "Up next: {environment} - {track}",
                     "Chat message announcing the next track in rotation. Placeholders: {track}, {environment}");
+                // pre-rotation-callouts.md: tiered pre-rotation warnings, in their own [Callouts]
+                // section per the feature doc's suggested shape (distinct from the single-shot
+                // [Messages] templates above, since this one pairs a message with a schedule).
+                calloutOffsetsMinutes = config.Bind("Callouts", "OffsetsMinutes", "5,2,1",
+                    "Comma-separated minutes-before-rotation for pre-rotation warnings, in addition " +
+                    "to the fixed 10-second final warning. Example: '5,2,1'. An offset at or beyond " +
+                    "the current rotation interval is skipped automatically (no negative-time spam).");
+                calloutTemplate = config.Bind("Callouts", "Message", "Up next in {time}: {environment} - {track}",
+                    "Chat message for the tiered pre-rotation warnings above. Placeholders: {time} " +
+                    "(e.g. '5m', '90s'), {track}, {environment}");
             }
 
             public double RotationIntervalSeconds => rotationInterval.Value;
@@ -319,6 +350,8 @@ namespace LiftoffAutoLobby
             public string RotationStartedTemplate => rotationStartedTemplate.Value;
             public string ExtendTemplate => extendTemplate.Value;
             public string UpNextTemplate => upNextTemplate.Value;
+            public string CalloutOffsetsMinutes => calloutOffsetsMinutes.Value;
+            public string CalloutTemplate => calloutTemplate.Value;
         }
 
         private static void LoadAdminIds()

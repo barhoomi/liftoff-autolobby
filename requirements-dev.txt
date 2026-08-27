@@ -1,0 +1,27 @@
+# Python dependencies for developing, testing and running the non-game halves of this
+# repo (orchestrator, generator, trackcheck, dashboard). The game side is C#/BepInEx and
+# needs none of this.
+#
+# Install into the repo venv:
+#     python3 -m venv venv && venv/bin/pip install -r requirements-dev.txt
+#
+# Why "-dev" and why it did not exist before: nothing here is needed to *run* the bot in
+# production -- the orchestrator, gather_tracks and the control plane are pure stdlib on
+# purpose, which is what lets the Docker image ship without a pip install step. This file
+# exists because the test suite and the dashboard DO have third-party dependencies, and
+# until now they were only implied (pytest + numpy were installed in the dev venv and
+# hardcoded in .github/workflows/ci.yml, declared nowhere).
+
+# --- Test suite (generator/tests, orchestrator/tests, trackcheck/tests, dashboard/tests) ---
+pytest>=8
+
+# --- generator/src + trackcheck/geometry (vector math for procedural tracks) ---
+numpy>=1.24
+
+# --- dashboard (docs/features/doing/bot-dashboard.md, decision D4: FastAPI + SSE + ---
+# --- vanilla JS, no frontend build step) ---
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# --- dashboard tests only: fastapi.testclient requires httpx ---
+httpx>=0.27

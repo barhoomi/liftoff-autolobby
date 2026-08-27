@@ -160,14 +160,41 @@ def restore_orchestrator_script(backup_bytes):
 
 def deploy_orchestrator_script():
     """Deploys this worktree's run_headless_lobby.py (with --log-file support) to
-    fpv_bot's project copy so the 'server bot' launch can actually use it. Only this one
-    file is touched -- gather_tracks.py and the JSON configs already there (from
-    infra/setup_bot.sh) are untouched and unmodified by this branch."""
-    print("[Harness] Deploying orchestrator script (run_headless_lobby.py + event_log.py) for the test run...")
+    fpv_bot's project copy so the 'server bot' launch can actually use it. Only the
+    orchestrator's own modules and the control-plane package are touched -- gather_tracks.py
+    and the JSON configs already there (from infra/setup_bot.sh) are untouched and
+    unmodified by this branch."""
+    print("[Harness] Deploying orchestrator script (run_headless_lobby.py + event_log.py "
+          "+ dashboard/control/) for the test run...")
     with open(LOCAL_ORCHESTRATOR_SCRIPT, "rb") as f:
         write_fpv_binary(ORCHESTRATOR_SCRIPT_REMOTE, f.read())
     with open(LOCAL_EVENT_LOG_MODULE, "rb") as f:
         write_fpv_binary(EVENT_LOG_MODULE_REMOTE, f.read())
+    deploy_control_package()
+
+
+def deploy_control_package():
+    """Deploy dashboard/control/ (plus dashboard/__init__.py) alongside the orchestrator.
+
+    run_headless_lobby.py imports the control plane at module load since bot-dashboard.md's
+    D5 extraction, so deploying the script without this package ImportErrors on start --
+    exactly the failure mode the event_log.py deploy above already exists to prevent.
+    Directories are created as fpv_bot first: `tee` cannot create a missing parent."""
+    for rel_dir in ("dashboard", "dashboard/control"):
+        res = _sudo_fpv(["mkdir", "-p", f"{BOT_PROJECT_DIR}/{rel_dir}"], stderr=subprocess.PIPE)
+        if res.returncode != 0:
+            raise HarnessError(f"Failed to create {rel_dir} in fpv_bot's project copy: "
+                               f"{res.stderr.decode(errors='replace')}")
+
+    local_pkg = os.path.join(THIS_REPO_DIR, "dashboard")
+    rel_paths = ["__init__.py"] + [
+        os.path.join("control", name)
+        for name in sorted(os.listdir(os.path.join(local_pkg, "control")))
+        if name.endswith(".py")
+    ]
+    for rel_path in rel_paths:
+        with open(os.path.join(local_pkg, rel_path), "rb") as f:
+            write_fpv_binary(f"{BOT_PROJECT_DIR}/dashboard/{rel_path}", f.read())
 
 
 def build_plugin():

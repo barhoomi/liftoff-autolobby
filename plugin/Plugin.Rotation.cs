@@ -45,6 +45,32 @@ namespace LiftoffAutoLobby
             skipVotes.Clear();
         }
 
+        // Parses one tracks_to_rotate.txt line ("TrackName, Environment, GameMode") using a
+        // RIGHTMOST split into exactly 3 fields: the last comma-separated field is the game
+        // mode, the second-to-last is the environment, and everything remaining (rejoined
+        // verbatim with the same ',' delimiter, so any commas/spaces inside the track name
+        // survive byte-for-byte) is the track name. Environments and modes are fixed
+        // vocabularies that never themselves contain a comma, so this is unambiguous. For a
+        // line with 3 or fewer comma-separated fields this is identical to the old plain
+        // Split(',')[0]/[1]/[2] behavior, so every existing (comma-free-name) file parses the
+        // same as before. Fixes a live bug: a real Liftoff track named "Iceberg, Right ahead!"
+        // sheared its own fields under the old left-to-right split. See
+        // docs/features/doing/bug-comma-in-track-name.md.
+        private static void ParseTrackLine(string line, out string trackName, out string environment, out string gameMode)
+        {
+            string[] parts = line.Split(',');
+            if (parts.Length <= 3)
+            {
+                trackName = parts.Length > 0 ? parts[0].Trim() : "";
+                environment = parts.Length > 1 ? parts[1].Trim() : "";
+                gameMode = parts.Length > 2 ? parts[2].Trim() : "";
+                return;
+            }
+            gameMode = parts[parts.Length - 1].Trim();
+            environment = parts[parts.Length - 2].Trim();
+            trackName = string.Join(",", parts, 0, parts.Length - 2).Trim();
+        }
+
         private static string PeekNextTrackName(out string environment, out string gameMode, out int trackIndex)
         {
             environment = "The Drawing Board";
@@ -109,10 +135,10 @@ namespace LiftoffAutoLobby
                     int candidateIndex = activeOrder[walkPos];
 
                     string selectedLine = validTracks[candidateIndex];
-                    string[] parts = selectedLine.Split(',');
-                    string candidateTrackName = parts[0].Trim();
-                    string candidateEnv = parts.Length > 1 ? parts[1].Trim() : environment;
-                    string candidateMode = parts.Length > 2 ? parts[2].Trim() : gameMode;
+                    string candidateTrackName, candidateEnv, candidateMode;
+                    ParseTrackLine(selectedLine, out candidateTrackName, out candidateEnv, out candidateMode);
+                    if (string.IsNullOrEmpty(candidateEnv)) candidateEnv = environment;
+                    if (string.IsNullOrEmpty(candidateMode)) candidateMode = gameMode;
                     if (!string.IsNullOrEmpty(overrideMode)) candidateMode = overrideMode;
 
                     string key = $"{candidateEnv}|{candidateTrackName}|{candidateMode}";
@@ -258,11 +284,12 @@ namespace LiftoffAutoLobby
                 lastRotationIndex = index; // captured for the structured "rotation" file event
                 string selectedLine = validTracks[index];
 
-                // Parse line: TrackName,EnvironmentName,GameModeName
-                string[] parts = selectedLine.Split(',');
-                string trackName = parts[0].Trim();
-                if (parts.Length > 1) environment = parts[1].Trim();
-                if (parts.Length > 2) gameMode = parts[2].Trim();
+                // Parse line: TrackName,EnvironmentName,GameModeName (rightmost-split -- see
+                // ParseTrackLine)
+                string trackName, parsedEnv, parsedMode;
+                ParseTrackLine(selectedLine, out trackName, out parsedEnv, out parsedMode);
+                if (!string.IsNullOrEmpty(parsedEnv)) environment = parsedEnv;
+                if (!string.IsNullOrEmpty(parsedMode)) gameMode = parsedMode;
 
                 string overrideMode = GetOverrideGameMode();
                 if (!string.IsNullOrEmpty(overrideMode))
@@ -429,8 +456,8 @@ namespace LiftoffAutoLobby
             var envOrder = new List<string>();
             for (int i = 0; i < validTracks.Count; i++)
             {
-                string[] parts = validTracks[i].Split(',');
-                string env = parts.Length > 1 ? parts[1].Trim() : "";
+                string ignoredName, env, ignoredMode;
+                ParseTrackLine(validTracks[i], out ignoredName, out env, out ignoredMode);
                 if (!groups.ContainsKey(env))
                 {
                     groups[env] = new List<int>();

@@ -61,9 +61,9 @@ namespace LiftoffAutoLobby
                             int staticIdx = activeOrder[prevIndex];
                             if (staticIdx >= 0 && staticIdx < validTracks.Count)
                             {
-                                string[] parts = validTracks[staticIdx].Split(',');
-                                prevTrackName = parts[0].Trim();
-                                prevEnv = parts.Length > 1 ? parts[1].Trim() : "";
+                                // Rightmost-split (bug-comma-in-track-name.md).
+                                string prevMode;
+                                ParseTrackLine(validTracks[staticIdx], out prevTrackName, out prevEnv, out prevMode);
                             }
                         }
                         string body = RenderClientTemplate(Settings.PrevTrackTemplate, "Rotating to the previous track: {track} ({environment})",
