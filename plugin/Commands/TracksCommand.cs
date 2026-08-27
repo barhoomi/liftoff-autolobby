@@ -49,10 +49,13 @@ namespace LiftoffAutoLobby
                     var allTracks = new List<SearchResult>();
                     for (int i = 0; i < staticTracks.Count; i++)
                     {
-                        string[] parts = staticTracks[i].Split(',');
-                        string trackName = parts[0].Trim();
-                        string environment = parts.Length > 1 ? parts[1].Trim() : "The Drawing Board";
-                        string gameMode = parts.Length > 2 ? parts[2].Trim() : "Classic Race";
+                        // Rightmost-split (bug-comma-in-track-name.md) -- same parser the
+                        // rotation engine uses, so a track name containing a comma (e.g.
+                        // "Iceberg, Right ahead!") never shears its own fields.
+                        string trackName, environment, gameMode;
+                        ParseTrackLine(staticTracks[i], out trackName, out environment, out gameMode);
+                        if (string.IsNullOrEmpty(environment)) environment = "The Drawing Board";
+                        if (string.IsNullOrEmpty(gameMode)) gameMode = "Classic Race";
 
                         allTracks.Add(new SearchResult
                         {

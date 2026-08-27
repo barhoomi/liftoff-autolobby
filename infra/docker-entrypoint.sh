@@ -2,12 +2,26 @@
 # docker-entrypoint.sh — container startup for the procedural-fpv bot.
 #
 # Reproduces, inside the container, the same flow scripts/run_bot.sh / infra/setup_bot.sh drive on the
-# host (see AGENTS.md): steamcmd installs/updates the paid game into a persistent volume,
-# BepInEx gets deployed into it, the plugin is compiled against that install's Managed
-# DLLs, a real (graphical, Xvfb-hosted) Steam client is started and logged in — the game
-# binary needs a live Steam client process for its Steamworks IPC pipe, not just steamcmd
-# (see the "Spec conflict" section in docs/features/doing/docker-container.md) — and only
-# then is the Python orchestrator handed off to.
+# host (see AGENTS.md): the paid game is installed into a persistent volume, BepInEx gets
+# deployed into it, the plugin is compiled against that install's Managed DLLs, a real
+# (graphical, Xvfb-hosted) Steam client is started and logged in — the game binary needs a
+# live Steam client process for its Steamworks IPC pipe (see the "Spec conflict" section in
+# docs/features/done/docker-container.md) — and only then is the Python orchestrator handed
+# off to.
+#
+# BOOT ORDER (changed 2026-08-05, operator directive: Liftoff can't be installed via
+# steamcmd, so the GUI client installs it). The display stack and the Steam client now come
+# UP FIRST, before anything that needs the game on disk:
+#
+#   seed /config  ->  [steamcmd stage, only if USE_STEAMCMD=1]  ->  graphics defaults
+#     ->  Xvfb  ->  x11vnc  ->  graphical Steam client  ->  Steam readiness/login gate
+#     ->  WAIT for a completed Liftoff install (human installs it from the Library UI)
+#     ->  lobby_config rewrite -> BepInEx -> admin_ids -> plugin build -> Pro credentials
+#     ->  orchestrator (exec)
+#
+# The two human steps (log the client in; install the game) therefore happen back-to-back in
+# ONE VNC session, and every stage after them is unattended. Both waits are bounded and
+# resumable: nothing that a restart cannot pick up again, since all state lives in /steam.
 #
 # Design: root does one-time volume/ownership prep, then re-execs itself as the
 # unprivileged `botuser` (Steam refuses to run as root) for everything else, ending in an
@@ -66,12 +80,79 @@ fi
 # ============================================================================
 # Stage 2 (botuser): everything else.
 # ============================================================================
-: "${STEAM_ACCOUNT:?STEAM_ACCOUNT env var is required -- the Steam login name whose \
-session was primed into the /steam volume. See the human-dependency section of \
-docs/features/doing/docker-container.md for the one-time interactive login step.}"
-
 LIFTOFF_APP_ID="410340"
-LIFTOFF_INSTALL_DIR="${LIFTOFF_INSTALL_DIR:-$STEAM_DIR/Liftoff}"
+
+# ---------------------------------------------------------------------------
+# Install-source mode (operator directive 2026-08-05: GUI-first).
+#
+# Liftoff is not installable through steamcmd on this account/host, so the boot flow no
+# longer depends on it: the operator logs the GRAPHICAL Steam client in over VNC and
+# installs the game from the client's own Library UI. steamcmd is kept in the image and
+# in this script behind USE_STEAMCMD (default 0) rather than deleted -- it may come back
+# for Workshop tooling (docs/features/backlog/workshop-auto-install.md). Set
+# USE_STEAMCMD=1 to restore the old install/update-at-boot behavior verbatim.
+# ---------------------------------------------------------------------------
+USE_STEAMCMD="${USE_STEAMCMD:-0}"
+case "${USE_STEAMCMD,,}" in
+    1|true|yes|on) USE_STEAMCMD=1 ;;
+    *)             USE_STEAMCMD=0 ;;
+esac
+
+# STEAM_ACCOUNT is only load-bearing for steamcmd's non-interactive `+login`. In GUI-first
+# mode nothing authenticates on the account's behalf -- a human types the credentials into
+# the client -- so it degrades to a label used in log/banner text and is no longer required.
+if [[ "$USE_STEAMCMD" -eq 1 ]]; then
+    : "${STEAM_ACCOUNT:?STEAM_ACCOUNT env var is required when USE_STEAMCMD=1 -- the Steam \
+login name whose session was primed into the /steam volume. See the human-dependency section \
+of docs/features/done/docker-container.md for the one-time interactive login step.}"
+fi
+STEAM_ACCOUNT_LABEL="${STEAM_ACCOUNT:-<the bot Steam account>}"
+
+# Where the game lives depends on WHO installed it, so this is detected, not assumed:
+#   - the graphical client installs into its own default library
+#     ($STEAM_DIR/.steam/debian-installation/steamapps/common/Liftoff), which is also where
+#     the bare-metal fpv_bot host has it -- and, unlike the steamcmd location, it is inside
+#     the library the client itself knows about;
+#   - steamcmd (USE_STEAMCMD=1) installs into $STEAM_DIR/Liftoff via +force_install_dir.
+# An explicit LIFTOFF_INSTALL_DIR always wins (escape hatch for an alternate library).
+LIFTOFF_INSTALL_DIR_EXPLICIT="${LIFTOFF_INSTALL_DIR:-}"
+CLIENT_LIBRARY_INSTALL_DIR="$STEAM_DIR/.steam/debian-installation/steamapps/common/Liftoff"
+STEAMCMD_INSTALL_DIR="$STEAM_DIR/Liftoff"
+APPMANIFEST="$STEAM_DIR/.steam/debian-installation/steamapps/appmanifest_${LIFTOFF_APP_ID}.acf"
+
+# Prints the install dir if a launchable game binary exists there, else prints nothing.
+resolve_install_dir() {
+    if [[ -n "$LIFTOFF_INSTALL_DIR_EXPLICIT" ]]; then
+        echo "$LIFTOFF_INSTALL_DIR_EXPLICIT"
+        return 0
+    fi
+    local d
+    for d in "$CLIENT_LIBRARY_INSTALL_DIR" "$STEAMCMD_INSTALL_DIR"; do
+        [[ -x "$d/Liftoff.x86_64" ]] && { echo "$d"; return 0; }
+    done
+    return 1
+}
+
+# Is the game FULLY installed (not mid-download)? The binary alone is not proof: Steam
+# creates the common/ dir and populates it while the download is still running, so a
+# binary-only check can (and on a slow link will) fire mid-download and send the plugin
+# build + game launch at an incomplete install. When the client wrote an appmanifest,
+# trust its StateFlags: bit 4 = StateFullyInstalled, bit 2 = StateUpdateRequired,
+# bit 1024 = StateUpdateRunning -- so "installed and idle" is (flags & 4) with neither of
+# the other two set. steamcmd installs into a force_install_dir with no manifest of their
+# own alongside; in that case fall back to the binary check (what this script always did).
+game_install_ready() {
+    local dir
+    dir="$(resolve_install_dir)" || return 1
+    [[ -n "$dir" ]] || return 1
+    [[ -f "$APPMANIFEST" ]] || return 0
+    local flags
+    flags="$(sed -n 's/.*"StateFlags"[^"]*"\([0-9]*\)".*/\1/p' "$APPMANIFEST" | head -n1)"
+    [[ -n "$flags" ]] || return 0
+    (( (flags & 4) != 0 && (flags & 2) == 0 && (flags & 1024) == 0 ))
+}
+
+LIFTOFF_INSTALL_DIR="$(resolve_install_dir || true)"
 
 PLAYLIST="${PLAYLIST:-all_official_races}"
 INTERVAL="${INTERVAL:-90}"
@@ -84,7 +165,7 @@ HEIGHT="${HEIGHT:-480}"
 MAX_PLAYERS="${MAX_PLAYERS:-}"
 STEAMCMD_TIMEOUT="${STEAMCMD_TIMEOUT:-900}"
 
-log "STEAM_ACCOUNT=$STEAM_ACCOUNT  LIFTOFF_INSTALL_DIR=$LIFTOFF_INSTALL_DIR  DISPLAY=$DISPLAY_NUM"
+log "STEAM_ACCOUNT=$STEAM_ACCOUNT_LABEL  USE_STEAMCMD=$USE_STEAMCMD  LIFTOFF_INSTALL_DIR=${LIFTOFF_INSTALL_DIR:-<not installed yet>}  DISPLAY=$DISPLAY_NUM"
 
 # ---------- seed persistent config from image defaults on first run ----------
 # The orchestrator (run_headless_lobby.py / gather_tracks.py) only ever reads
@@ -106,21 +187,6 @@ for f in lobby_config.json playlists.json master_tracks_list.json; do
     ln -sf "$CONFIG_DIR/$f" "$PROJECT_DIR/config/$f"
 done
 
-# lobby_config.json's liftoff_path/display must point at *this* container's install dir
-# and display, not whatever the image's baked-in default says. Rewrite in place
-# (idempotent) -- lobby_name is intentionally left alone since run_headless_lobby.py's
-# --lobby-name CLI flag (passed below, from $LOBBY_NAME) always wins over the config
-# value anyway.
-python3 - "$CONFIG_DIR/lobby_config.json" "$LIFTOFF_INSTALL_DIR/Liftoff.x86_64" "$DISPLAY_NUM" <<'PYEOF'
-import json, sys
-path, liftoff_path, display = sys.argv[1:4]
-with open(path) as f:
-    data = json.load(f)
-data["liftoff_path"] = liftoff_path
-data["display"] = display
-with open(path, "w") as f:
-    json.dump(data, f, indent=4)
-PYEOF
 
 # ---------- steamcmd install/update ----------
 # No separate "is a login cached?" pre-check: an earlier version of this script looked for
@@ -160,55 +226,535 @@ script; both need it).
 EOF
 }
 
-log "Running steamcmd install/update for app $LIFTOFF_APP_ID -> $LIFTOFF_INSTALL_DIR (timeout ${STEAMCMD_TIMEOUT}s)..."
-set +e
-STEAMCMD_OUT="$(timeout "$STEAMCMD_TIMEOUT" steamcmd \
-    +@NoPromptForPassword 1 \
-    +force_install_dir "$LIFTOFF_INSTALL_DIR" \
-    +login "$STEAM_ACCOUNT" \
-    +app_update "$LIFTOFF_APP_ID" validate \
-    +quit 2>&1)"
-STEAMCMD_STATUS=$?
-set -e
-echo "$STEAMCMD_OUT" | tail -n 60
+if [[ "$USE_STEAMCMD" -eq 0 ]]; then
+    log "steamcmd stage SKIPPED (USE_STEAMCMD=0). GUI-first flow: the game is installed by a
+            human from the graphical Steam client's Library, over VNC -- see the install-wait stage below."
+else
+    # steamcmd installs to its own force_install_dir, which is NOT a library the graphical
+    # client knows about. Point the stage at it when nothing is installed yet; the detected
+    # value (if any) wins so an existing install is updated in place.
+    LIFTOFF_INSTALL_DIR="${LIFTOFF_INSTALL_DIR:-${LIFTOFF_INSTALL_DIR_EXPLICIT:-$STEAMCMD_INSTALL_DIR}}"
 
-# Degraded-mode boot (see docker-container.md "Eleventh incident"): the steamcmd token and
-# the graphical client's token live in separate stores that MUTUALLY INVALIDATE each other
-# -- re-priming one revokes the other, so sequential manual priming can never get both
-# valid at once. steamcmd's token is only needed to install/update the game; the game
-# itself only needs the graphical client's token (checked much later, at the readiness
-# gate) for SteamAPI_Init. So a dead steamcmd token should not be fatal when a usable
-# install already exists -- fail loud, skip the update check for this boot, and continue.
-# Still hard-fail with no install: there is nothing to run in that case.
-usable_install_present() {
-    [[ -x "$LIFTOFF_INSTALL_DIR/Liftoff.x86_64" ]]
-}
+    log "Running steamcmd install/update for app $LIFTOFF_APP_ID -> $LIFTOFF_INSTALL_DIR (timeout ${STEAMCMD_TIMEOUT}s)..."
+    set +e
+    STEAMCMD_OUT="$(timeout "$STEAMCMD_TIMEOUT" steamcmd \
+        +@NoPromptForPassword 1 \
+        +force_install_dir "$LIFTOFF_INSTALL_DIR" \
+        +login "$STEAM_ACCOUNT" \
+        +app_update "$LIFTOFF_APP_ID" validate \
+        +quit 2>&1)"
+    STEAMCMD_STATUS=$?
+    set -e
+    echo "$STEAMCMD_OUT" | tail -n 60
 
-if [[ $STEAMCMD_STATUS -eq 124 ]]; then
-    if usable_install_present; then
-        log "WARNING: DEGRADED BOOT -- steamcmd timed out after ${STEAMCMD_TIMEOUT}s (likely stuck on an interactive prompt: expired/invalid cached token, a new-device Steam Guard re-check, or a rate limit); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Re-prime steamcmd credentials soon -- see the priming instructions below -- so this boot doesn't run a version-drifted game client indefinitely."
-        print_priming_instructions
-    else
-        print_priming_instructions
-        fatal "steamcmd timed out after ${STEAMCMD_TIMEOUT}s -- almost certainly stuck on an interactive prompt (expired/invalid cached token, a new-device Steam Guard re-check, or a rate limit), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Re-prime credentials as shown above. Not retrying automatically -- fix this before restarting the container."
-    fi
-elif [[ $STEAMCMD_STATUS -ne 0 ]]; then
-    if echo "$STEAMCMD_OUT" | grep -qiE "Invalid Password|Login Failure|Two-factor|Steam Guard|Access Denied|InvalidSignature|Rate Limit"; then
+    # Degraded-mode boot (see docker-container.md "Eleventh incident"): the steamcmd token and
+    # the graphical client's token live in separate stores that MUTUALLY INVALIDATE each other
+    # -- re-priming one revokes the other, so sequential manual priming can never get both
+    # valid at once. steamcmd's token is only needed to install/update the game; the game
+    # itself only needs the graphical client's token (checked much later, at the readiness
+    # gate) for SteamAPI_Init. So a dead steamcmd token should not be fatal when a usable
+    # install already exists -- fail loud, skip the update check for this boot, and continue.
+    # Still hard-fail with no install: there is nothing to run in that case.
+    usable_install_present() {
+        [[ -x "$LIFTOFF_INSTALL_DIR/Liftoff.x86_64" ]]
+    }
+
+    if [[ $STEAMCMD_STATUS -eq 124 ]]; then
         if usable_install_present; then
-            log "WARNING: DEGRADED BOOT -- steamcmd auth failed (cached token expired, revoked, or needs re-verification; see steamcmd output above); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Re-prime steamcmd credentials soon -- see the priming instructions below -- so this boot doesn't run a version-drifted game client indefinitely."
+            log "WARNING: DEGRADED BOOT -- steamcmd timed out after ${STEAMCMD_TIMEOUT}s (likely stuck on an interactive prompt: expired/invalid cached token, a new-device Steam Guard re-check, or a rate limit); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Re-prime steamcmd credentials soon -- see the priming instructions below -- so this boot doesn't run a version-drifted game client indefinitely."
             print_priming_instructions
         else
             print_priming_instructions
-            fatal "steamcmd login failed -- the cached Steam token has expired, was revoked, or needs re-verification (see steamcmd output above), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Re-prime credentials as shown above. Not retrying automatically."
+            fatal "steamcmd timed out after ${STEAMCMD_TIMEOUT}s -- almost certainly stuck on an interactive prompt (expired/invalid cached token, a new-device Steam Guard re-check, or a rate limit), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Re-prime credentials as shown above. Not retrying automatically -- fix this before restarting the container."
         fi
-    elif usable_install_present; then
-        log "WARNING: DEGRADED BOOT -- steamcmd exited with status $STEAMCMD_STATUS (see output above); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Investigate the steamcmd failure soon so this boot doesn't run a version-drifted game client indefinitely."
+    elif [[ $STEAMCMD_STATUS -ne 0 ]]; then
+        if echo "$STEAMCMD_OUT" | grep -qiE "Invalid Password|Login Failure|Two-factor|Steam Guard|Access Denied|InvalidSignature|Rate Limit"; then
+            if usable_install_present; then
+                log "WARNING: DEGRADED BOOT -- steamcmd auth failed (cached token expired, revoked, or needs re-verification; see steamcmd output above); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Re-prime steamcmd credentials soon -- see the priming instructions below -- so this boot doesn't run a version-drifted game client indefinitely."
+                print_priming_instructions
+            else
+                print_priming_instructions
+                fatal "steamcmd login failed -- the cached Steam token has expired, was revoked, or needs re-verification (see steamcmd output above), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Re-prime credentials as shown above. Not retrying automatically."
+            fi
+        elif usable_install_present; then
+            log "WARNING: DEGRADED BOOT -- steamcmd exited with status $STEAMCMD_STATUS (see output above); existing install present at $LIFTOFF_INSTALL_DIR, skipping update check and continuing. Investigate the steamcmd failure soon so this boot doesn't run a version-drifted game client indefinitely."
+        else
+            fatal "steamcmd exited with status $STEAMCMD_STATUS (see output above), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Not retrying automatically."
+        fi
     else
-        fatal "steamcmd exited with status $STEAMCMD_STATUS (see output above), and no usable install exists at $LIFTOFF_INSTALL_DIR to fall back on. Not retrying automatically."
+        log "steamcmd install/update complete."
+    fi
+fi
+
+
+# ---------- low-resource graphics defaults (first run only) ----------
+# Independent of the game install (these live under the Steam HOME, not the install dir),
+# so they are seeded here, before the display/Steam stages, and are in place whenever the
+# game does eventually launch.
+UNITY_CFG_DIR="$STEAM_DIR/.config/unity3d/LuGus Studios/Liftoff/Config"
+if [[ ! -f "$UNITY_CFG_DIR/System.xml" ]]; then
+    log "Seeding low-resource graphics defaults (first run only; edit the files under $STEAM_DIR/.config/unity3d/... directly to change them later)..."
+    mkdir -p "$UNITY_CFG_DIR"
+    cat > "$UNITY_CFG_DIR/System.xml" <<'XMLEOF'
+<?xml version="1.0" encoding="UTF-8" ?>
+<Config>
+	<ShowStartupGuide>False</ShowStartupGuide>
+	<InformAboutDragBakedSkin>False</InformAboutDragBakedSkin>
+	<FieldOfView>109.584</FieldOfView>
+	<PreferNightFeverEnvironments>True</PreferNightFeverEnvironments>
+	<PreferSlipstreamAssets>False</PreferSlipstreamAssets>
+	<VolumeMusic>0</VolumeMusic>
+	<VolumeMaster>0</VolumeMaster>
+	<OSDDefault>True</OSDDefault>
+	<DontShowPerformancePopupAgain>True</DontShowPerformancePopupAgain>
+	<ResolutionWidth>1280</ResolutionWidth>
+	<ResolutionHeight>720</ResolutionHeight>
+	<QualitySetting>0</QualitySetting>
+	<ShadowDistance>0</ShadowDistance>
+	<VSyncMode>0</VSyncMode>
+	<UseCustomMusicPlaylist>False</UseCustomMusicPlaylist>
+	<CustomMusicPlaylistPath></CustomMusicPlaylistPath>
+	<Fisheye>False</Fisheye>
+	<RefreshRateNumerator>60</RefreshRateNumerator>
+	<RefreshRateDenominator>1</RefreshRateDenominator>
+	<ShowGameTriggers>False</ShowGameTriggers>
+	<ShowFestivityItems>False</ShowFestivityItems>
+	<ShowFlyCage>False</ShowFlyCage>
+	<ShowRaceLines>False</ShowRaceLines>
+	<FullscreenMode>1</FullscreenMode>
+	<LimitFramerate>True</LimitFramerate>
+	<FramerateLimit>30</FramerateLimit>
+	<ShowRaceGateTriggers>True</ShowRaceGateTriggers>
+	<Motion_Blur_On>False</Motion_Blur_On>
+	<UseVoiceChat>False</UseVoiceChat>
+	<AmplifyBloom.AmplifyBloomEffect_On>False</AmplifyBloom.AmplifyBloomEffect_On>
+	<AmplifyOcclusionEffect_On>False</AmplifyOcclusionEffect_On>
+	<Depth_Of_Field_On>False</Depth_Of_Field_On>
+	<Anti_Aliasing_On>False</Anti_Aliasing_On>
+	<FisheyeLetterbox>False</FisheyeLetterbox>
+	<FisheyeEnabled>False</FisheyeEnabled>
+	<AcceptedDjiFpvEndUserAgreement>True</AcceptedDjiFpvEndUserAgreement>
+</Config>
+XMLEOF
+    cat > "$STEAM_DIR/.config/unity3d/LuGus Studios/Liftoff/prefs" <<'PREFSEOF'
+<unity_prefs version_major="1" version_minor="1">
+	<pref name="Screenmanager Fullscreen mode" type="int">0</pref>
+	<pref name="Screenmanager Fullscreen mode Default" type="int">0</pref>
+	<pref name="Screenmanager Resolution Height" type="int">720</pref>
+	<pref name="Screenmanager Resolution Height Default" type="int">768</pref>
+	<pref name="Screenmanager Resolution Use Native" type="int">0</pref>
+	<pref name="Screenmanager Resolution Use Native Default" type="int">1</pref>
+	<pref name="Screenmanager Resolution Width" type="int">1280</pref>
+	<pref name="Screenmanager Resolution Width Default" type="int">1024</pref>
+	<pref name="Screenmanager Window Position X" type="int">0</pref>
+	<pref name="Screenmanager Window Position Y" type="int">0</pref>
+	<pref name="UnityGraphicsQuality" type="int">0</pref>
+	<pref name="UnitySelectMonitor" type="int">0</pref>
+</unity_prefs>
+PREFSEOF
+fi
+
+# ---------- Xvfb ----------
+# Stale-lock cleanup, found live 2026-08-05: `docker compose restart` (unlike `up -d
+# --force-recreate`) REUSES the container filesystem, so /tmp survives. Xvfb's own
+# /tmp/.X<N>-lock and /tmp/.X11-unix/X<N> socket from the previous run are then still there,
+# Xvfb refuses to start ("Server is already active for display 99"), and the entrypoint died
+# at the fatal below -- with no display, no VNC, and no way in for the operator. Removing the
+# lock unconditionally would be worse (it would let a SECOND Xvfb stomp a live display), so
+# gate on the PID the lock file itself records: X writes the owning server's PID there, so a
+# lock whose PID is gone -- or belongs to something that is not an X server -- is provably
+# stale and safe to clear.
+DISPLAY_INDEX="${DISPLAY_NUM#:}"      # ":99" -> "99"
+DISPLAY_INDEX="${DISPLAY_INDEX%%.*}"  # ":99.0" -> "99" (screen suffix)
+X_LOCK="/tmp/.X${DISPLAY_INDEX}-lock"
+X_SOCKET="/tmp/.X11-unix/X${DISPLAY_INDEX}"
+if [[ -e "$X_LOCK" ]]; then
+    LOCK_PID="$(tr -dc '0-9' < "$X_LOCK" 2>/dev/null || true)"
+    if [[ -n "$LOCK_PID" ]] && kill -0 "$LOCK_PID" 2>/dev/null \
+        && ps -p "$LOCK_PID" -o comm= 2>/dev/null | grep -qiE 'x(vfb|org)|^X'; then
+        log "An X server (pid $LOCK_PID) already owns display $DISPLAY_NUM -- reusing it instead of starting a second Xvfb."
+        XVFB_ALREADY_RUNNING=1
+    else
+        log "Removing stale X lock $X_LOCK (recorded pid '${LOCK_PID:-none}' is not a live X server -- leftover from a previous run in this container filesystem)."
+        rm -f "$X_LOCK" "$X_SOCKET"
+        XVFB_ALREADY_RUNNING=0
     fi
 else
-    log "steamcmd install/update complete."
+    XVFB_ALREADY_RUNNING=0
 fi
+
+if [[ "$XVFB_ALREADY_RUNNING" -eq 0 ]]; then
+    log "Starting Xvfb on display $DISPLAY_NUM ..."
+    Xvfb "$DISPLAY_NUM" -screen 0 1280x720x24 &
+    XVFB_PID=$!
+    sleep 2
+    if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+        fatal "Xvfb failed to start on display $DISPLAY_NUM. If this says the server is already active, a stale lock survived (see the cleanup above) -- \`docker compose up -d --force-recreate\` gives the container a fresh /tmp and always clears it."
+    fi
+fi
+
+# ---------- x11vnc (one-time interactive Steam login + observation) ----------
+# No password (-nopw) is acceptable ONLY because docker-compose.yml binds the host side to
+# 127.0.0.1 -- see docs/features/backlog/docker-steam-sandbox-hardening.md for the broader
+# hardening pass.
+log "Starting x11vnc on $DISPLAY_NUM (host: connect a VNC viewer to localhost:5900)..."
+if ! x11vnc -display "$DISPLAY_NUM" -forever -shared -nopw -quiet -bg -o /tmp/x11vnc.log; then
+    err "x11vnc failed to start (see /tmp/x11vnc.log) -- continuing, but the display won't be observable and a first-time Steam login cannot be performed."
+fi
+
+# ---------- graphical Steam client ----------
+# The game binary calls SteamAPI_Init, which talks to a *running, logged-in Steam client*
+# process over a local IPC pipe -- steamcmd (above) is a separate, short-lived content
+# tool and does not provide this. This matches how the bot already runs on the host
+# (scripts/run_bot.sh starts `dbus-run-session /usr/games/steam`, not steamcmd, before launching
+# the game) and the documented "steamid=0 -> SteamAPI_Init False" black-screen failure
+# mode when Steam isn't signed in. See the feature doc's "Spec conflict" section.
+# Steam's Linux compat layer (Pressure Vessel/bubblewrap) needs container privileges Docker
+# doesn't grant by default -- see docker-compose.yml's cap_add/security_opt comments for the
+# escalating bwrap failures found live 2026-07-12 (namespace creation -> mount-slave
+# propagation -> pivot_root). STEAM_RUNTIME=0 was tried as a way to skip the sandbox
+# entirely but made things worse: steam.sh's own steam-runtime-check-requirements script
+# runs regardless of that variable, and on failure prints an interactive "Press enter to
+# continue:" prompt that hangs forever with no TTY attached (worse than the errors-but-
+# continues behavior without it). Reverted -- fixing this via docker-compose.yml's
+# cap_add/security_opt instead.
+#
+# LOGIN STATE (found live 2026-07-12): the graphical client's login is SEPARATE from
+# steamcmd's. The steamcmd prime caches a token under $STEAM_DIR/Steam/config/config.vdf,
+# but that token is machine-scoped (JWT aud:["machine"] + an encrypted ConnectCache blob)
+# and the graphical client cannot use it -- it keeps its own refresh token, recorded in
+# $STEAM_DIR/.steam/debian-installation/config/loginusers.vdf after a successful UI login.
+# Without that, the client runs logged OUT (every steamwebhelper carries -steamid=0, the
+# connection log shows [U:1:0]) and the game's SteamAPI_Init() returns False forever even
+# though IsSteamRunning()=True and steamclient.so loads fine. So: a human must log in
+# through the client's own UI once, via the x11vnc session started above; the client's
+# token then persists in the /steam volume and later boots auto-login silently.
+STEAM_CLIENT_ROOT="$STEAM_DIR/.steam/debian-installation"
+LOGINUSERS_VDF="$STEAM_CLIENT_ROOT/config/loginusers.vdf"
+CONNECTION_LOG="$STEAM_CLIENT_ROOT/logs/connection_log.txt"
+
+# "Waiting for network..." login screen (root-caused live 2026-08-05, quirk #5 in
+# docs/features/doing/bot-priming-this-host.md).
+#
+# The client's login UI froze on a Steam logo + "Waiting for network..." with NO username
+# field, password field or Sign in button -- so the one-time human login below was
+# impossible -- even though the container's networking was completely healthy (DNS, TLS,
+# the CM endpoints on 27017/27024, Steam's own "Connectivity test: result=Connected" and
+# its client-update manifest downloads all fine). Cause: this container has no
+# NetworkManager and no D-Bus *system* bus, so the client cannot create a NetworkManager
+# client (logs/client_networkmanager.txt: "Init: failed to create a NetworkManager
+# client") and therefore never binds SteamClient.System.Network.RegisterForDeviceChanges.
+# The SteamUI bundle calls it anyway, throws, and leaves SystemNetworkStore's
+# m_bIsAwaitingInitialNetworkState stuck at true -- which is exactly the flag the login
+# window gates on. See infra/steam_ui_network_unstick.py for the full chain of evidence.
+#
+# Fix: let the client's own CEF debugger clear that flag. The marker file below is what
+# makes steamwebhelper listen on 127.0.0.1:8080 (container-internal; the compose file
+# publishes only 5900), and the helper is poked from the two wait loops that need a usable
+# UI over VNC. Both steps are deliberately fail-soft: if the marker cannot be written or
+# the debugger is unreachable, the boot proceeds exactly as it did before.
+mkdir -p "$STEAM_CLIENT_ROOT" 2>/dev/null || true
+if touch "$STEAM_CLIENT_ROOT/.cef-enable-remote-debugging" 2>/dev/null; then
+    log "Enabled the Steam client's CEF debugger (127.0.0.1:8080, container-internal) so a stuck \"Waiting for network...\" login screen can be unstuck automatically."
+else
+    err "Could not write $STEAM_CLIENT_ROOT/.cef-enable-remote-debugging -- if the login window sticks on \"Waiting for network...\", it will need the manual workaround from the feature doc."
+fi
+
+# Poke the helper at most every ~15s (it is idempotent and prints one status word:
+# already-ok | unstuck | no-store | a failure reason). Only the transition to 'unstuck' is
+# worth a log line; everything else stays quiet so the wait loops keep their signal.
+STEAM_UI_UNSTICK="$PROJECT_DIR/infra/steam_ui_network_unstick.py"
+steam_ui_unstick_cooldown=0
+steam_ui_unstick_network() {
+    local tick="$1"
+    [[ -f "$STEAM_UI_UNSTICK" ]] || return 0
+    if (( steam_ui_unstick_cooldown > 0 )); then
+        steam_ui_unstick_cooldown=$(( steam_ui_unstick_cooldown - tick ))
+        return 0
+    fi
+    steam_ui_unstick_cooldown=15
+    local status
+    status="$(python3 "$STEAM_UI_UNSTICK" 2>/dev/null || true)"
+    if [[ "$status" == "unstuck" ]]; then
+        log "The Steam login UI was frozen on \""'Waiting for network...'"\" (no NetworkManager in this container) -- cleared SystemNetworkStore's initial-network-state flag; the login/Library UI is usable again over VNC."
+    fi
+}
+
+# Does the volume hold a cached client login to even attempt? (loginusers.vdf with an
+# account.) This decides silent auto-login vs. a visible login window -- it is NOT proof
+# the login still works: the token can be revoked server-side and this file stays behind.
+client_has_cached_login() {
+    [[ -f "$LOGINUSERS_VDF" ]] && grep -q '"AccountName"' "$LOGINUSERS_VDF"
+}
+
+# Is the client ACTUALLY authenticated to Steam right now? Two independent positive signals;
+# EITHER is sufficient. loginusers.vdf existence alone is NOT proof -- it fooled the gate on
+# 2026-07-13 when a steamcmd password re-prime revoked the client's separate token
+# ("Access Denied", see below) yet left the file behind, racing the game into a permanent
+# SplashScreen SteamAPI_Init failure.
+#
+# Signal 1 -- a running steamwebhelper carries -steamid=<N>, N>0 (N==0 == logged OUT, bug
+#   eight). Fires on the human-login UI path.
+# Signal 2 (authoritative for the -silent auto-login path) -- the connection log's MOST
+#   RECENT client logon completed 'OK' for a NON-ZERO steamid and was not subsequently
+#   rejected. On the silent path the steamwebhelper is spawned during the connecting phase
+#   and keeps -steamid=0 for the WHOLE session even after a fully successful 'OK' logon, so
+#   signal 1 alone false-negatives and fatal-times-out a perfectly valid login. Found live
+#   2026-07-13 (twelfth incident): connection_log showed a JWT logon 'OK' as [U:1:722984222]
+#   at 12:12:03, yet every steamwebhelper stayed -steamid=0 for the full 600s readiness
+#   budget, and the gate (which only had signal 1 at the time) killed a server-side-valid
+#   login. The CM-level 'OK' logon -- not the CEF UI webhelper's cmdline -- is what actually
+#   reflects the login the game's SteamAPI_Init depends on. Take the last of {OK-logon,
+#   Access-Denied, Do-not-reconnect} in the recent tail; authenticated iff that last one is
+#   the OK logon (revoked -> Access Denied is last -> FALSE; logged-out anonymous -> no
+#   OK-for-non-zero line -> FALSE).
+client_authenticated() {
+    if pgrep -af -- '-steamid=' 2>/dev/null | grep -qE -- '-steamid=[1-9][0-9]*'; then
+        return 0
+    fi
+    [[ -f "$CONNECTION_LOG" ]] || return 1
+    tail -n 40 "$CONNECTION_LOG" 2>/dev/null \
+        | grep -E "RecvMsgClientLogOnResponse\(\) : \[U:1:[1-9][0-9]*\] 'OK'|Access Denied|Do not reconnect" \
+        | tail -n 1 | grep -q "'OK'"
+}
+
+# Did the client's cached-token auto-login get REJECTED server-side (revoked, not expired)?
+# Signature: "Access Denied" / "Do not reconnect" in the connection log -- the client gives
+# up and will not self-recover. Distinct from a slow cold boot (still logging in). Tail-only
+# so a stale denial from a much-earlier boot doesn't dominate; used to pick the right fatal
+# message, and (silent path only) to fail fast instead of burning the whole timeout.
+client_auth_revoked() {
+    [[ -f "$CONNECTION_LOG" ]] && tail -n 40 "$CONNECTION_LOG" 2>/dev/null \
+        | grep -qE 'Access Denied|Do not reconnect'
+}
+
+# Is any part of the graphical client still alive? Same process set the readiness gate keys
+# off, so "alive" means the same thing in both places (AGENTS.md rule 4).
+steam_client_alive() {
+    pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1
+}
+
+# Single launch path, so a relaunch is byte-identical to the original invocation.
+STEAM_CLIENT_MODE="windowed"
+launch_steam_client() {
+    if [[ "$STEAM_CLIENT_MODE" == "silent" ]]; then
+        dbus-run-session -- steam -silent &
+    else
+        dbus-run-session -- steam &
+    fi
+}
+
+# Relaunch-if-absent, called from inside the two wait loops below. Found live 2026-08-05: the
+# operator pkill'd the Steam client while troubleshooting and the entrypoint sat at the login
+# gate against an EMPTY desktop until the timeout expired -- the client was started exactly
+# once and never supervised. This is deliberately not a supervisor: one check per loop tick,
+# a backoff so a client that crashes instantly can't be respawned in a tight loop, and a log
+# line so the relaunch is visible in `docker compose logs`.
+STEAM_RELAUNCH_BACKOFF="${STEAM_RELAUNCH_BACKOFF:-60}"
+steam_relaunch_cooldown=0
+ensure_steam_client_running() {
+    local tick="$1"   # seconds since the previous call (this loop's sleep interval)
+    if steam_client_alive; then
+        steam_relaunch_cooldown=0
+        return 0
+    fi
+    if (( steam_relaunch_cooldown > 0 )); then
+        steam_relaunch_cooldown=$(( steam_relaunch_cooldown - tick ))
+        return 0
+    fi
+    log "Graphical Steam client is NOT running (crashed, or was killed) -- relaunching it ($STEAM_CLIENT_MODE) so the login/Library UI stays reachable over VNC. Next check in ${STEAM_RELAUNCH_BACKOFF}s."
+    launch_steam_client
+    steam_relaunch_cooldown="$STEAM_RELAUNCH_BACKOFF"
+}
+
+if client_has_cached_login && game_install_ready; then
+    log "Graphical Steam client has a cached login ($LOGINUSERS_VDF) -- starting silent."
+    STEAM_LOGIN_PENDING=0
+    STEAM_CLIENT_MODE="silent"
+    launch_steam_client
+elif client_has_cached_login; then
+    # Cached login, but no finished game install yet: the operator still has to drive the
+    # client's Library UI over VNC to install (or finish installing) Liftoff, and `-silent`
+    # starts the client with no visible window -- there is no window manager or tray in this
+    # container to un-hide it from, so a silent client here would look like an empty desktop
+    # and strand the install step. Start it windowed instead; the next boot (install present)
+    # goes back to silent automatically.
+    log "Graphical Steam client has a cached login, but no completed Liftoff install was found -- starting it WITH a window so the Library UI is usable over VNC."
+    STEAM_LOGIN_PENDING=0
+    launch_steam_client
+else
+    STEAM_LOGIN_PENDING=1
+    cat >&2 <<EOF
+
+================================================================================
+The graphical Steam client in this /steam volume has never been logged in.
+(A steamcmd credential prime would NOT be enough even if you did one -- its token
+is machine-scoped and the graphical client cannot use it.) ONE-TIME manual step:
+
+    1. On the host, connect a VNC viewer to  localhost:5900
+       (e.g.  vncviewer localhost:5900  , or Remmina -> VNC). The host port is
+       bound to 127.0.0.1, so tunnel first if you are remote:
+           ssh -L 5900:127.0.0.1:5900 <user>@<this host>
+    2. Log in to Steam as '$STEAM_ACCOUNT_LABEL' in the window that appears
+       (password + Steam Guard). LEAVE "Remember me" ENABLED so the token
+       is cached.
+    3. That's it -- this script waits (default 30 min; STEAM_LOGIN_TIMEOUT to
+       change) and continues automatically once the login lands. Future
+       container starts skip this step (the token persists in the volume).
+    4. If Liftoff is not installed yet, STAY in that VNC session: the next
+       stage asks you to install it from the client's own Library UI, and
+       this script waits for that too.
+================================================================================
+
+EOF
+    log "Starting graphical Steam client WITH visible login window (no -silent)..."
+    launch_steam_client
+fi
+
+# Readiness = ALL of: (a) the steamclient.so the game will dlopen exists (on a first-ever
+# cold boot Steam's self-update/first-run setup takes minutes before the
+# ~/.steam/{sdk32,sdk64} symlink chain exists -- a process-existence check alone raced this
+# and the game died with "Failed to load module '.../sdk64/steamclient.so'"), (b) a Steam
+# process is alive, and (c) the client is ACTUALLY AUTHENTICATED this session
+# (client_authenticated: steamwebhelper -steamid != 0). A running-but-logged-out client
+# loads steamclient.so fine yet SteamAPI_Init() still returns False (steamid=0), stuck on
+# SplashScreen forever. Condition (c) originally checked only loginusers.vdf existence, but
+# that persists across a revoked token: on 2026-07-13 a steamcmd re-prime revoked the
+# client's session token server-side, the file stayed, the gate passed on a dead login, and
+# the game black-screened -- so (c) now requires a live non-zero steamid, not just the file.
+# Each gate condition here was added after a boot that satisfied all prior ones yet still
+# wasn't truly ready (bug four: process alive; bug eight: file present; this: really logged in).
+STEAM_READY_TIMEOUT="${STEAM_READY_TIMEOUT:-600}"
+STEAM_LOGIN_TIMEOUT="${STEAM_LOGIN_TIMEOUT:-1800}"
+# When a human still has to VNC in and type a password, give them the longer budget.
+WAIT_BUDGET="$STEAM_READY_TIMEOUT"
+[[ "$STEAM_LOGIN_PENDING" -eq 1 ]] && WAIT_BUDGET="$STEAM_LOGIN_TIMEOUT"
+STEAMCLIENT_SO="$STEAM_DIR/.steam/sdk64/steamclient.so"
+STEAM_READY=0
+SECONDS_WAITED=0
+while [[ "$SECONDS_WAITED" -lt "$WAIT_BUDGET" ]]; do
+    if [[ -e "$STEAMCLIENT_SO" ]] && pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1 && client_authenticated; then
+        STEAM_READY=1
+        break
+    fi
+    # Silent auto-login path only: if the cached token was rejected server-side it will not
+    # self-recover ("Do not reconnect") -- fail fast rather than burn the whole timeout.
+    # Never on the human-login path, where a stale denial could pre-empt a login being typed.
+    if [[ "$STEAM_LOGIN_PENDING" -eq 0 ]] && ! client_authenticated && client_auth_revoked; then
+        log "Cached Steam client token was rejected server-side (Access Denied) -- aborting the readiness wait early; it will not self-recover."
+        break
+    fi
+    if [[ "$STEAM_LOGIN_PENDING" -eq 1 && $((SECONDS_WAITED % 60)) -eq 0 && "$SECONDS_WAITED" -gt 0 ]]; then
+        log "Still waiting for the one-time Steam login via VNC (localhost:5900)... ${SECONDS_WAITED}s/${WAIT_BUDGET}s"
+    fi
+    # A client that died (crash, or an operator pkill while troubleshooting) used to leave
+    # this loop staring at an empty desktop until the budget expired. Bring it back instead.
+    ensure_steam_client_running 5
+    # ...and if the client is up but its login window is frozen on "Waiting for network...",
+    # nothing the operator does over VNC can get past it. Unfreeze it here (no-op otherwise).
+    steam_ui_unstick_network 5
+    sleep 5
+    SECONDS_WAITED=$((SECONDS_WAITED + 5))
+done
+if [[ "$STEAM_READY" -ne 1 ]]; then
+    if [[ "$STEAM_LOGIN_PENDING" -eq 1 ]]; then
+        fatal "No Steam login landed within ${WAIT_BUDGET}s. Connect a VNC viewer to localhost:5900 and log in as '$STEAM_ACCOUNT_LABEL' (see the banner above), then restart the container -- or raise STEAM_LOGIN_TIMEOUT if you just need more time."
+    fi
+    if client_auth_revoked && ! client_authenticated; then
+        fatal "Graphical Steam client auto-login was REJECTED server-side ('Access Denied' in $CONNECTION_LOG): the cached client session token was REVOKED (this is NOT a time-expiry -- the JWT can still be years from expiring). This typically happens after a steamcmd password re-prime, which rotates the account credential and invalidates the graphical client's SEPARATE session token. The client will not self-recover. Remediation: connect a VNC viewer to localhost:5900, log in to Steam as '$STEAM_ACCOUNT_LABEL' (password + Steam Guard) with 'Remember me' ENABLED, then restart the container so a fresh game process runs SteamAPI_Init against the now-logged-in client."
+    fi
+    fatal "Steam client did not become ready within ${WAIT_BUDGET}s ($STEAMCLIENT_SO missing, Steam process gone, or the client never authenticated this session -- steamwebhelper still -steamid=0). If the cached token was revoked, log in again via VNC (localhost:5900) with 'Remember me' on; otherwise increase STEAM_READY_TIMEOUT if this is just a slow cold boot."
+fi
+log "Steam readiness confirmed after ${SECONDS_WAITED}s: steamclient.so present, client process alive, client authenticated (steamwebhelper -steamid != 0, or a CM 'OK' logon for a non-zero steamid in the connection log)."
+# Logged in just now via the UI? Give the client a moment to finish post-login init
+# (friends/IPC services settle) before the game tries SteamAPI_Init against it.
+[[ "$STEAM_LOGIN_PENDING" -eq 1 ]] && { log "Fresh interactive login detected -- settling 15s before game launch."; sleep 15; }
+
+# ---------- wait for the game install (GUI-first flow) ----------
+# Everything below this point needs the game on disk: BepInEx is deployed INTO the install,
+# the plugin is compiled against that install's Managed DLLs, and the orchestrator launches
+# its binary. With USE_STEAMCMD=0 nothing in this script installs the game -- a human does
+# it from the Steam client Library over the VNC session started above -- so this is where
+# the boot parks until the install shows up, instead of failing.
+#
+# Deliberately a WAIT, not a fatal: the operator is already attached to this container's
+# display when they get here (they just logged the client in), so exiting would make them
+# re-run `docker compose up -d` and re-do the readiness dance for no reason. The wait is
+# bounded by GAME_INSTALL_TIMEOUT so a container can never hang forever unattended; on
+# timeout it exits loudly and a plain restart resumes exactly here (the install progress
+# itself lives in the /steam volume and is never lost).
+GAME_INSTALL_TIMEOUT="${GAME_INSTALL_TIMEOUT:-14400}"   # 4h: ~22.5G over a slow link + operator lag
+if game_install_ready; then
+    LIFTOFF_INSTALL_DIR="$(resolve_install_dir)"
+    log "Liftoff install detected at $LIFTOFF_INSTALL_DIR -- skipping the install-wait stage."
+else
+    cat >&2 <<EOF
+
+================================================================================
+No completed Liftoff install found in this /steam volume.
+  looked in: $CLIENT_LIBRARY_INSTALL_DIR
+             $STEAMCMD_INSTALL_DIR
+             (override with LIFTOFF_INSTALL_DIR if you use another library)
+
+steamcmd is disabled (USE_STEAMCMD=$USE_STEAMCMD) -- install the game by hand,
+ONCE, in the VNC session you are already connected to (localhost:5900):
+
+    1. In the Steam client window, open  Library  -> Liftoff  -> Install.
+       Accept the default install location (the client's own library, inside
+       this container's /steam volume -- do NOT pick a path outside it, it
+       would not survive container recreation).
+    2. Let the ~22.5G download finish. You can close the VNC viewer while it
+       runs; the download is the client's, not the viewer's.
+    3. Nothing else to do -- this script polls for the install and continues
+       on its own (BepInEx deploy -> plugin build -> game launch -> lobby).
+
+Waiting up to ${GAME_INSTALL_TIMEOUT}s. If that runs out, the container exits;
+just start it again and it resumes here with the download progress intact.
+================================================================================
+
+EOF
+    INSTALL_WAITED=0
+    while [[ "$INSTALL_WAITED" -lt "$GAME_INSTALL_TIMEOUT" ]]; do
+        if game_install_ready; then
+            LIFTOFF_INSTALL_DIR="$(resolve_install_dir)"
+            log "Liftoff install detected at $LIFTOFF_INSTALL_DIR after ${INSTALL_WAITED}s -- continuing."
+            break
+        fi
+        # Progress ping every 5 min, with a size readout so a stalled download is visible
+        # in `docker compose logs` without anyone opening a VNC viewer.
+        if [[ $((INSTALL_WAITED % 300)) -eq 0 && "$INSTALL_WAITED" -gt 0 ]]; then
+            downloaded="$(du -sh "$STEAM_DIR/.steam/debian-installation/steamapps/downloading/$LIFTOFF_APP_ID" 2>/dev/null | cut -f1)"
+            installed="$(du -sh "$CLIENT_LIBRARY_INSTALL_DIR" 2>/dev/null | cut -f1)"
+            log "Still waiting for the Liftoff install via the Steam Library UI (VNC localhost:5900)... ${INSTALL_WAITED}s/${GAME_INSTALL_TIMEOUT}s (downloading: ${downloaded:-none}, installed dir: ${installed:-none})"
+        fi
+        # The install is driven from the client's own UI, so the client dying here strands
+        # the operator exactly as it does at the login gate -- same relaunch-if-absent guard,
+        # and the same unstick for a client that came back up with a frozen network store.
+        ensure_steam_client_running 15
+        steam_ui_unstick_network 15
+        sleep 15
+        INSTALL_WAITED=$((INSTALL_WAITED + 15))
+    done
+    if ! game_install_ready; then
+        fatal "No completed Liftoff install appeared within ${GAME_INSTALL_TIMEOUT}s. Nothing was lost -- Steam's partial download lives in the /steam volume. Reconnect to VNC (localhost:5900), make sure the Library download is actually running, and restart the container (or raise GAME_INSTALL_TIMEOUT) to resume waiting here."
+    fi
+fi
+
+# lobby_config.json's liftoff_path/display must point at *this* container's install dir
+# and display, not whatever the image's baked-in default says. Rewrite in place
+# (idempotent) -- lobby_name is intentionally left alone since run_headless_lobby.py's
+# --lobby-name CLI flag (passed below, from $LOBBY_NAME) always wins over the config
+# value anyway.
+python3 - "$CONFIG_DIR/lobby_config.json" "$LIFTOFF_INSTALL_DIR/Liftoff.x86_64" "$DISPLAY_NUM" <<'PYEOF'
+import json, sys
+path, liftoff_path, display = sys.argv[1:4]
+with open(path) as f:
+    data = json.load(f)
+data["liftoff_path"] = liftoff_path
+data["display"] = display
+with open(path, "w") as f:
+    json.dump(data, f, indent=4)
+PYEOF
 
 # ---------- BepInEx ----------
 if [[ ! -d "$LIFTOFF_INSTALL_DIR/BepInEx/core" ]]; then
@@ -274,7 +820,7 @@ dotnet build "$PROJECT_DIR/plugin" -c Debug -p:LiftoffPath="$LIFTOFF_INSTALL_DIR
     || fatal "Plugin build failed against $LIFTOFF_INSTALL_DIR -- see dotnet output above. This is a build problem, not a Steam auth problem; the game install/BepInEx deploy above succeeded. Investigate before retrying."
 log "Plugin build complete; LiftoffAutoLobby.dll deployed via the csproj's PostBuild copy."
 
-# ---------- Liftoff Pro credentials + low-resource graphics defaults (first run only) ---
+# ---------- Liftoff Pro credentials (needs the install dir) ----------
 BOT_CREDENTIALS_SRC="$STEAM_DIR/.config/unity3d/LuGus Studios/Liftoff/Credentials/Credentials.xml"
 BOT_CREDENTIALS_DEST="$LIFTOFF_INSTALL_DIR/Liftoff_Data/Credentials/Credentials.xml"
 if [[ -f "$BOT_CREDENTIALS_SRC" ]]; then
@@ -282,247 +828,6 @@ if [[ -f "$BOT_CREDENTIALS_SRC" ]]; then
     cp -u "$BOT_CREDENTIALS_SRC" "$BOT_CREDENTIALS_DEST"
     log "Synced Liftoff Pro credentials into the game data dir."
 fi
-
-UNITY_CFG_DIR="$STEAM_DIR/.config/unity3d/LuGus Studios/Liftoff/Config"
-if [[ ! -f "$UNITY_CFG_DIR/System.xml" ]]; then
-    log "Seeding low-resource graphics defaults (first run only; edit the files under $STEAM_DIR/.config/unity3d/... directly to change them later)..."
-    mkdir -p "$UNITY_CFG_DIR"
-    cat > "$UNITY_CFG_DIR/System.xml" <<'XMLEOF'
-<?xml version="1.0" encoding="UTF-8" ?>
-<Config>
-	<ShowStartupGuide>False</ShowStartupGuide>
-	<InformAboutDragBakedSkin>False</InformAboutDragBakedSkin>
-	<FieldOfView>109.584</FieldOfView>
-	<PreferNightFeverEnvironments>True</PreferNightFeverEnvironments>
-	<PreferSlipstreamAssets>False</PreferSlipstreamAssets>
-	<VolumeMusic>0</VolumeMusic>
-	<VolumeMaster>0</VolumeMaster>
-	<OSDDefault>True</OSDDefault>
-	<DontShowPerformancePopupAgain>True</DontShowPerformancePopupAgain>
-	<ResolutionWidth>1280</ResolutionWidth>
-	<ResolutionHeight>720</ResolutionHeight>
-	<QualitySetting>0</QualitySetting>
-	<ShadowDistance>0</ShadowDistance>
-	<VSyncMode>0</VSyncMode>
-	<UseCustomMusicPlaylist>False</UseCustomMusicPlaylist>
-	<CustomMusicPlaylistPath></CustomMusicPlaylistPath>
-	<Fisheye>False</Fisheye>
-	<RefreshRateNumerator>60</RefreshRateNumerator>
-	<RefreshRateDenominator>1</RefreshRateDenominator>
-	<ShowGameTriggers>False</ShowGameTriggers>
-	<ShowFestivityItems>False</ShowFestivityItems>
-	<ShowFlyCage>False</ShowFlyCage>
-	<ShowRaceLines>False</ShowRaceLines>
-	<FullscreenMode>1</FullscreenMode>
-	<LimitFramerate>True</LimitFramerate>
-	<FramerateLimit>30</FramerateLimit>
-	<ShowRaceGateTriggers>True</ShowRaceGateTriggers>
-	<Motion_Blur_On>False</Motion_Blur_On>
-	<UseVoiceChat>False</UseVoiceChat>
-	<AmplifyBloom.AmplifyBloomEffect_On>False</AmplifyBloom.AmplifyBloomEffect_On>
-	<AmplifyOcclusionEffect_On>False</AmplifyOcclusionEffect_On>
-	<Depth_Of_Field_On>False</Depth_Of_Field_On>
-	<Anti_Aliasing_On>False</Anti_Aliasing_On>
-	<FisheyeLetterbox>False</FisheyeLetterbox>
-	<FisheyeEnabled>False</FisheyeEnabled>
-	<AcceptedDjiFpvEndUserAgreement>True</AcceptedDjiFpvEndUserAgreement>
-</Config>
-XMLEOF
-    cat > "$STEAM_DIR/.config/unity3d/LuGus Studios/Liftoff/prefs" <<'PREFSEOF'
-<unity_prefs version_major="1" version_minor="1">
-	<pref name="Screenmanager Fullscreen mode" type="int">0</pref>
-	<pref name="Screenmanager Fullscreen mode Default" type="int">0</pref>
-	<pref name="Screenmanager Resolution Height" type="int">720</pref>
-	<pref name="Screenmanager Resolution Height Default" type="int">768</pref>
-	<pref name="Screenmanager Resolution Use Native" type="int">0</pref>
-	<pref name="Screenmanager Resolution Use Native Default" type="int">1</pref>
-	<pref name="Screenmanager Resolution Width" type="int">1280</pref>
-	<pref name="Screenmanager Resolution Width Default" type="int">1024</pref>
-	<pref name="Screenmanager Window Position X" type="int">0</pref>
-	<pref name="Screenmanager Window Position Y" type="int">0</pref>
-	<pref name="UnityGraphicsQuality" type="int">0</pref>
-	<pref name="UnitySelectMonitor" type="int">0</pref>
-</unity_prefs>
-PREFSEOF
-fi
-
-# ---------- Xvfb ----------
-log "Starting Xvfb on display $DISPLAY_NUM ..."
-Xvfb "$DISPLAY_NUM" -screen 0 1280x720x24 &
-XVFB_PID=$!
-sleep 2
-if ! kill -0 "$XVFB_PID" 2>/dev/null; then
-    fatal "Xvfb failed to start on display $DISPLAY_NUM."
-fi
-
-# ---------- x11vnc (one-time interactive Steam login + observation) ----------
-# No password (-nopw) is acceptable ONLY because docker-compose.yml binds the host side to
-# 127.0.0.1 -- see docs/features/backlog/docker-steam-sandbox-hardening.md for the broader
-# hardening pass.
-log "Starting x11vnc on $DISPLAY_NUM (host: connect a VNC viewer to localhost:5900)..."
-if ! x11vnc -display "$DISPLAY_NUM" -forever -shared -nopw -quiet -bg -o /tmp/x11vnc.log; then
-    err "x11vnc failed to start (see /tmp/x11vnc.log) -- continuing, but the display won't be observable and a first-time Steam login cannot be performed."
-fi
-
-# ---------- graphical Steam client ----------
-# The game binary calls SteamAPI_Init, which talks to a *running, logged-in Steam client*
-# process over a local IPC pipe -- steamcmd (above) is a separate, short-lived content
-# tool and does not provide this. This matches how the bot already runs on the host
-# (scripts/run_bot.sh starts `dbus-run-session /usr/games/steam`, not steamcmd, before launching
-# the game) and the documented "steamid=0 -> SteamAPI_Init False" black-screen failure
-# mode when Steam isn't signed in. See the feature doc's "Spec conflict" section.
-# Steam's Linux compat layer (Pressure Vessel/bubblewrap) needs container privileges Docker
-# doesn't grant by default -- see docker-compose.yml's cap_add/security_opt comments for the
-# escalating bwrap failures found live 2026-07-12 (namespace creation -> mount-slave
-# propagation -> pivot_root). STEAM_RUNTIME=0 was tried as a way to skip the sandbox
-# entirely but made things worse: steam.sh's own steam-runtime-check-requirements script
-# runs regardless of that variable, and on failure prints an interactive "Press enter to
-# continue:" prompt that hangs forever with no TTY attached (worse than the errors-but-
-# continues behavior without it). Reverted -- fixing this via docker-compose.yml's
-# cap_add/security_opt instead.
-#
-# LOGIN STATE (found live 2026-07-12): the graphical client's login is SEPARATE from
-# steamcmd's. The steamcmd prime caches a token under $STEAM_DIR/Steam/config/config.vdf,
-# but that token is machine-scoped (JWT aud:["machine"] + an encrypted ConnectCache blob)
-# and the graphical client cannot use it -- it keeps its own refresh token, recorded in
-# $STEAM_DIR/.steam/debian-installation/config/loginusers.vdf after a successful UI login.
-# Without that, the client runs logged OUT (every steamwebhelper carries -steamid=0, the
-# connection log shows [U:1:0]) and the game's SteamAPI_Init() returns False forever even
-# though IsSteamRunning()=True and steamclient.so loads fine. So: a human must log in
-# through the client's own UI once, via the x11vnc session started above; the client's
-# token then persists in the /steam volume and later boots auto-login silently.
-STEAM_CLIENT_ROOT="$STEAM_DIR/.steam/debian-installation"
-LOGINUSERS_VDF="$STEAM_CLIENT_ROOT/config/loginusers.vdf"
-CONNECTION_LOG="$STEAM_CLIENT_ROOT/logs/connection_log.txt"
-
-# Does the volume hold a cached client login to even attempt? (loginusers.vdf with an
-# account.) This decides silent auto-login vs. a visible login window -- it is NOT proof
-# the login still works: the token can be revoked server-side and this file stays behind.
-client_has_cached_login() {
-    [[ -f "$LOGINUSERS_VDF" ]] && grep -q '"AccountName"' "$LOGINUSERS_VDF"
-}
-
-# Is the client ACTUALLY authenticated to Steam right now? Two independent positive signals;
-# EITHER is sufficient. loginusers.vdf existence alone is NOT proof -- it fooled the gate on
-# 2026-07-13 when a steamcmd password re-prime revoked the client's separate token
-# ("Access Denied", see below) yet left the file behind, racing the game into a permanent
-# SplashScreen SteamAPI_Init failure.
-#
-# Signal 1 -- a running steamwebhelper carries -steamid=<N>, N>0 (N==0 == logged OUT, bug
-#   eight). Fires on the human-login UI path.
-# Signal 2 (authoritative for the -silent auto-login path) -- the connection log's MOST
-#   RECENT client logon completed 'OK' for a NON-ZERO steamid and was not subsequently
-#   rejected. On the silent path the steamwebhelper is spawned during the connecting phase
-#   and keeps -steamid=0 for the WHOLE session even after a fully successful 'OK' logon, so
-#   signal 1 alone false-negatives and fatal-times-out a perfectly valid login. Found live
-#   2026-07-13 (twelfth incident): connection_log showed a JWT logon 'OK' as [U:1:722984222]
-#   at 12:12:03, yet every steamwebhelper stayed -steamid=0 for the full 600s readiness
-#   budget, and the gate (which only had signal 1 at the time) killed a server-side-valid
-#   login. The CM-level 'OK' logon -- not the CEF UI webhelper's cmdline -- is what actually
-#   reflects the login the game's SteamAPI_Init depends on. Take the last of {OK-logon,
-#   Access-Denied, Do-not-reconnect} in the recent tail; authenticated iff that last one is
-#   the OK logon (revoked -> Access Denied is last -> FALSE; logged-out anonymous -> no
-#   OK-for-non-zero line -> FALSE).
-client_authenticated() {
-    if pgrep -af -- '-steamid=' 2>/dev/null | grep -qE -- '-steamid=[1-9][0-9]*'; then
-        return 0
-    fi
-    [[ -f "$CONNECTION_LOG" ]] || return 1
-    tail -n 40 "$CONNECTION_LOG" 2>/dev/null \
-        | grep -E "RecvMsgClientLogOnResponse\(\) : \[U:1:[1-9][0-9]*\] 'OK'|Access Denied|Do not reconnect" \
-        | tail -n 1 | grep -q "'OK'"
-}
-
-# Did the client's cached-token auto-login get REJECTED server-side (revoked, not expired)?
-# Signature: "Access Denied" / "Do not reconnect" in the connection log -- the client gives
-# up and will not self-recover. Distinct from a slow cold boot (still logging in). Tail-only
-# so a stale denial from a much-earlier boot doesn't dominate; used to pick the right fatal
-# message, and (silent path only) to fail fast instead of burning the whole timeout.
-client_auth_revoked() {
-    [[ -f "$CONNECTION_LOG" ]] && tail -n 40 "$CONNECTION_LOG" 2>/dev/null \
-        | grep -qE 'Access Denied|Do not reconnect'
-}
-
-if client_has_cached_login; then
-    log "Graphical Steam client has a cached login ($LOGINUSERS_VDF) -- starting silent."
-    STEAM_LOGIN_PENDING=0
-    dbus-run-session -- steam -silent &
-else
-    STEAM_LOGIN_PENDING=1
-    cat >&2 <<EOF
-
-================================================================================
-The graphical Steam client in this /steam volume has never been logged in.
-(The steamcmd credential prime is NOT enough -- its token is machine-scoped and
-the graphical client cannot use it.) ONE-TIME manual step:
-
-    1. On the host, connect a VNC viewer to  localhost:5900
-       (e.g.  vncviewer localhost:5900  , or Remmina -> VNC).
-    2. Log in to Steam as '$STEAM_ACCOUNT' in the window that appears
-       (password + Steam Guard). LEAVE "Remember me" ENABLED so the token
-       is cached.
-    3. That's it -- this script waits (default 30 min; STEAM_LOGIN_TIMEOUT to
-       change) and continues automatically once the login lands. Future
-       container starts skip this step (the token persists in the volume).
-================================================================================
-
-EOF
-    log "Starting graphical Steam client WITH visible login window (no -silent)..."
-    dbus-run-session -- steam &
-fi
-
-# Readiness = ALL of: (a) the steamclient.so the game will dlopen exists (on a first-ever
-# cold boot Steam's self-update/first-run setup takes minutes before the
-# ~/.steam/{sdk32,sdk64} symlink chain exists -- a process-existence check alone raced this
-# and the game died with "Failed to load module '.../sdk64/steamclient.so'"), (b) a Steam
-# process is alive, and (c) the client is ACTUALLY AUTHENTICATED this session
-# (client_authenticated: steamwebhelper -steamid != 0). A running-but-logged-out client
-# loads steamclient.so fine yet SteamAPI_Init() still returns False (steamid=0), stuck on
-# SplashScreen forever. Condition (c) originally checked only loginusers.vdf existence, but
-# that persists across a revoked token: on 2026-07-13 a steamcmd re-prime revoked the
-# client's session token server-side, the file stayed, the gate passed on a dead login, and
-# the game black-screened -- so (c) now requires a live non-zero steamid, not just the file.
-# Each gate condition here was added after a boot that satisfied all prior ones yet still
-# wasn't truly ready (bug four: process alive; bug eight: file present; this: really logged in).
-STEAM_READY_TIMEOUT="${STEAM_READY_TIMEOUT:-600}"
-STEAM_LOGIN_TIMEOUT="${STEAM_LOGIN_TIMEOUT:-1800}"
-# When a human still has to VNC in and type a password, give them the longer budget.
-WAIT_BUDGET="$STEAM_READY_TIMEOUT"
-[[ "$STEAM_LOGIN_PENDING" -eq 1 ]] && WAIT_BUDGET="$STEAM_LOGIN_TIMEOUT"
-STEAMCLIENT_SO="$STEAM_DIR/.steam/sdk64/steamclient.so"
-STEAM_READY=0
-SECONDS_WAITED=0
-while [[ "$SECONDS_WAITED" -lt "$WAIT_BUDGET" ]]; do
-    if [[ -e "$STEAMCLIENT_SO" ]] && pgrep -f "steamwebhelper|steam\.sh|/steam$" >/dev/null 2>&1 && client_authenticated; then
-        STEAM_READY=1
-        break
-    fi
-    # Silent auto-login path only: if the cached token was rejected server-side it will not
-    # self-recover ("Do not reconnect") -- fail fast rather than burn the whole timeout.
-    # Never on the human-login path, where a stale denial could pre-empt a login being typed.
-    if [[ "$STEAM_LOGIN_PENDING" -eq 0 ]] && ! client_authenticated && client_auth_revoked; then
-        log "Cached Steam client token was rejected server-side (Access Denied) -- aborting the readiness wait early; it will not self-recover."
-        break
-    fi
-    if [[ "$STEAM_LOGIN_PENDING" -eq 1 && $((SECONDS_WAITED % 60)) -eq 0 && "$SECONDS_WAITED" -gt 0 ]]; then
-        log "Still waiting for the one-time Steam login via VNC (localhost:5900)... ${SECONDS_WAITED}s/${WAIT_BUDGET}s"
-    fi
-    sleep 5
-    SECONDS_WAITED=$((SECONDS_WAITED + 5))
-done
-if [[ "$STEAM_READY" -ne 1 ]]; then
-    if [[ "$STEAM_LOGIN_PENDING" -eq 1 ]]; then
-        fatal "No Steam login landed within ${WAIT_BUDGET}s. Connect a VNC viewer to localhost:5900 and log in as '$STEAM_ACCOUNT' (see the banner above), then restart the container -- or raise STEAM_LOGIN_TIMEOUT if you just need more time."
-    fi
-    if client_auth_revoked && ! client_authenticated; then
-        fatal "Graphical Steam client auto-login was REJECTED server-side ('Access Denied' in $CONNECTION_LOG): the cached client session token was REVOKED (this is NOT a time-expiry -- the JWT can still be years from expiring). This typically happens after a steamcmd password re-prime, which rotates the account credential and invalidates the graphical client's SEPARATE session token. The client will not self-recover. Remediation: connect a VNC viewer to localhost:5900, log in to Steam as '$STEAM_ACCOUNT' (password + Steam Guard) with 'Remember me' ENABLED, then restart the container so a fresh game process runs SteamAPI_Init against the now-logged-in client."
-    fi
-    fatal "Steam client did not become ready within ${WAIT_BUDGET}s ($STEAMCLIENT_SO missing, Steam process gone, or the client never authenticated this session -- steamwebhelper still -steamid=0). If the cached token was revoked, log in again via VNC (localhost:5900) with 'Remember me' on; otherwise increase STEAM_READY_TIMEOUT if this is just a slow cold boot."
-fi
-log "Steam readiness confirmed after ${SECONDS_WAITED}s: steamclient.so present, client process alive, client authenticated (steamwebhelper -steamid != 0, or a CM 'OK' logon for a non-zero steamid in the connection log)."
-# Logged in just now via the UI? Give the client a moment to finish post-login init
-# (friends/IPC services settle) before the game tries SteamAPI_Init against it.
-[[ "$STEAM_LOGIN_PENDING" -eq 1 ]] && { log "Fresh interactive login detected -- settling 15s before game launch."; sleep 15; }
 
 # ---------- AppID identification for direct launch ----------
 # The game is launched directly (run_bepinex.sh), not through the Steam client UI, and the
@@ -537,6 +842,33 @@ export SteamAppId="$LIFTOFF_APP_ID"
 export SteamGameId="$LIFTOFF_APP_ID"
 echo "$LIFTOFF_APP_ID" > "$LIFTOFF_INSTALL_DIR/steam_appid.txt"
 log "Set SteamAppId=$LIFTOFF_APP_ID and wrote steam_appid.txt for direct game launch."
+
+# ---------- keep the Steam client alive for the life of the container ----------
+# Hardening gap found live 2026-08-05 (third in the series): every guard above supervises the
+# graphical client only until the readiness/install gates pass. After the `exec` below this
+# script is GONE -- replaced by the orchestrator -- and nothing watches the client at all. It
+# died mid-session; the orchestrator's watchdog dutifully relaunched the GAME, but every
+# relaunch then hit `SteamAPI.Init() returned False` (steamid=0, no client to talk to) and
+# black-screened on SplashScreen, unrecoverable short of recreating the container.
+#
+# Fix: hand the same ensure_steam_client_running helper the gates use to a background
+# subshell (AGENTS.md rule 4 -- one relaunch path, one backoff policy, one log line; nothing
+# duplicated here). Backgrounded BEFORE the exec so it survives it: the subshell is reparented
+# to tini (PID 1), which reaps it, and it then runs for the life of the container. Cheap --
+# one pgrep every STEAM_SUPERVISOR_INTERVAL seconds. Set the interval to 0 to disable (e.g.
+# when deliberately debugging a dead client and you do NOT want it coming back).
+STEAM_SUPERVISOR_INTERVAL="${STEAM_SUPERVISOR_INTERVAL:-30}"
+if [[ "$STEAM_SUPERVISOR_INTERVAL" -gt 0 ]]; then
+    (
+        while sleep "$STEAM_SUPERVISOR_INTERVAL"; do
+            # Never let a hiccup in the check kill the supervisor itself (set -e is inherited).
+            ensure_steam_client_running "$STEAM_SUPERVISOR_INTERVAL" || true
+        done
+    ) &
+    log "Steam client supervisor started as pid $! (check every ${STEAM_SUPERVISOR_INTERVAL}s, relaunch backoff ${STEAM_RELAUNCH_BACKOFF}s, mode $STEAM_CLIENT_MODE) -- it outlives this script and keeps the client up for the whole container lifetime."
+else
+    log "Steam client supervisor DISABLED (STEAM_SUPERVISOR_INTERVAL=0) -- a Steam client that dies after this point stays dead, and the game will black-screen on SteamAPI_Init()."
+fi
 
 # ---------- hand off to the orchestrator ----------
 SHUFFLE_FLAG=""; [[ "${SHUFFLE,,}" == "true" ]] && SHUFFLE_FLAG="--shuffle"

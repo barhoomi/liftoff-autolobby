@@ -577,6 +577,239 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // ---------------------------------------------------------------
+        // bug-auto-start-joins-running-race.md: "is a race currently running in this room?"
+        //
+        // WHY THIS SIGNAL. The waiting-room start button is dual-purpose: it reads "Start game"
+        // when no race is running and "Join game" while one is. The plugin finds it by NAME
+        // (buttonStartGame), so the label never gated the click and every auto-start fired
+        // during a race JOINED the bot into it. Decompile of Assembly-CSharp (Liftoff 1.7.4)
+        // shows what actually drives that label — the waiting-room panel does
+        //     btnStartGame.GetComponentInChildren<Text>().text =
+        //         (LugusSingletonExisting<<MpManager>>.use.<IsGameInProgress> ? <"Join game">
+        //                                                                     : <"Start game">);
+        // and
+        //     public bool <IsGameInProgress> => <Ctx>.<CurrentGame>.<Players>
+        //         .Any(<PlayerWrapper> p => p.<RoomStatus> == <RoomStatusEnum>.InGamePlaying);
+        // i.e. the label switch IS "any player in the room has an in-game room status". Reading
+        // that same underlying state — rather than the obfuscated singleton property, whose type
+        // name is not stable across game patches — is what this code does.
+        //
+        // WHERE THE STATE LIVES. The wrapper reads it straight off the Photon player:
+        //     public <RoomStatusEnum> <RoomStatus> => <GetProp><<RoomStatusEnum>>(<PropKey>.PlayerRoomStatus);
+        //     public T <GetProp><T>(<PropKey> k) { if (<IsUnset>(k)) return (T)<Defaults>[k].<Value>;
+        //                                          return (T)<Player>.CustomProperties[<KeyString>(k)]; }
+        // and the setter pins the wire format and the key type:
+        //     private void <SetProp>(<PropKey> key, object value) {
+        //         string k = <PlayerWrapper>.<KeyString>(key);                       // STRING key
+        //         if (value is Enum) value = Convert.ChangeType(value,
+        //                 value.GetType().GetEnumUnderlyingType());                  // INT value
+        //         if (!object.Equals(value, <GetPropObject>(key))) <Props>[k] = value;
+        //         else if (<Props>.ContainsKey(k)) <Props>.Remove(k); }              // default => key REMOVED
+        // The default for PlayerRoomStatus is <RoomStatusEnum>.None, so an absent key means
+        // "not in game" and is safe to skip. Because the value crosses the wire as the enum's
+        // UNDERLYING INT, shape-detecting it as an enum (the trick Plugin.Telemetry.cs uses for
+        // GameModeState) would not have worked here — the numeric values have to be resolved
+        // from the enum type and compared as numbers.
+        //
+        // WHAT SURVIVED OBFUSCATION (and is therefore safe to key off, AGENTS.md rule 1):
+        //   - <RoomStatusEnum>'s members: None/DroneOverview/InWaitingRoom/InGamePlaying/
+        //     InGameSpectating/InGameDroneSelection;
+        //   - <PropKey>'s members: Ping/PlayerVoiceId/…/PlayerRoomStatus/GameModeState/…;
+        //   - the game's own `public static string <KeyString>(<PropKey>)`, which returns
+        //     string.Empty when it cannot resolve a key — a reliable failure signal.
+        // Type and member NAMES of the classes themselves did not, so none is named here.
+        //
+        // The in-game set is the game's own per-player predicate (line 531234 of the dump):
+        //     public bool <IsInGame> { get { var s = <RoomStatus>;
+        //         return s == InGamePlaying || s == InGameSpectating || s == InGameDroneSelection; } }
+        // — a superset of the label's InGamePlaying-only test, chosen deliberately: drone
+        // selection immediately precedes playing, so suppressing there costs nothing and closes
+        // the window where a click would land the bot in a race that is about to run.
+        //
+        // No state file, no cached "a race is open" flag: this is recomputed from live Photon
+        // data on every call, so it self-corrects the instant a race ends (AGENTS.md rules 4-5).
+        // ---------------------------------------------------------------
+        private static readonly string[] InGameRoomStatusNames =
+            { "InGamePlaying", "InGameSpectating", "InGameDroneSelection" };
+
+        // Resolution is attempted exactly once per session: a failure here means a game symbol
+        // moved, which retrying every tick cannot fix and would only spam the log with.
+        private static bool raceInProgressReflectionAttempted;
+        private static string playerRoomStatusPropertyKey;
+        private static readonly HashSet<long> inGameRoomStatusValues = new HashSet<long>();
+
+        private static void ResolveRaceInProgressReflection()
+        {
+            if (raceInProgressReflectionAttempted) return;
+            raceInProgressReflectionAttempted = true;
+            try
+            {
+                Assembly asm = Assembly.Load("Assembly-CSharp");
+                if (asm == null)
+                {
+                    UnityEngine.Debug.LogError("[AutoLobbyPlugin] Race-in-progress signal could NOT be resolved: Assembly-CSharp not loadable.");
+                    return;
+                }
+
+                Type[] types;
+                try { types = asm.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t != null).ToArray(); }
+
+                Type roomStatusEnum = null;
+                Type propKeyEnum = null;
+                foreach (Type t in types)
+                {
+                    if (t == null || !t.IsEnum) continue;
+                    string[] names;
+                    try { names = Enum.GetNames(t); }
+                    catch { continue; }
+                    if (roomStatusEnum == null && names.Contains("InWaitingRoom") && names.Contains("InGamePlaying")
+                        && names.Contains("InGameSpectating") && names.Contains("InGameDroneSelection"))
+                    {
+                        roomStatusEnum = t;
+                    }
+                    if (propKeyEnum == null && names.Contains("PlayerRoomStatus") && names.Contains("GameModeState")
+                        && names.Contains("DroneConfiguration"))
+                    {
+                        propKeyEnum = t;
+                    }
+                    if (roomStatusEnum != null && propKeyEnum != null) break;
+                }
+
+                if (roomStatusEnum == null || propKeyEnum == null)
+                {
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Race-in-progress signal could NOT be resolved: roomStatusEnum={(roomStatusEnum == null ? "MISSING" : roomStatusEnum.FullName)}, playerPropertyKeyEnum={(propKeyEnum == null ? "MISSING" : propKeyEnum.FullName)}. Auto-start stays suppressed this session.");
+                    return;
+                }
+
+                // The Hashtable key comes from the game's own mapping function, never from a
+                // literal: it is looked up in an encrypted-string table, so it is unreadable in
+                // IL and not stable across patches. A resolvable MethodInfo is NOT success here
+                // (AGENTS.md rule 2) — only a non-empty returned key is, and string.Empty is
+                // precisely what the game returns when it cannot resolve the key itself.
+                object propKeyValue = Enum.Parse(propKeyEnum, "PlayerRoomStatus");
+                string resolvedKey = null;
+                foreach (Type t in types)
+                {
+                    if (t == null) continue;
+                    MethodInfo mapper;
+                    try
+                    {
+                        mapper = t.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                                  .FirstOrDefault(m => m.ReturnType == typeof(string)
+                                                       && m.GetParameters().Length == 1
+                                                       && m.GetParameters()[0].ParameterType == propKeyEnum);
+                    }
+                    catch { continue; }
+                    if (mapper == null) continue;
+                    try { resolvedKey = mapper.Invoke(null, new object[] { propKeyValue }) as string; }
+                    catch { resolvedKey = null; }
+                    if (!string.IsNullOrEmpty(resolvedKey)) break;
+                }
+
+                if (string.IsNullOrEmpty(resolvedKey))
+                {
+                    UnityEngine.Debug.LogError("[AutoLobbyPlugin] Race-in-progress signal could NOT be resolved: no game function returned a custom-property key for PlayerRoomStatus. Auto-start stays suppressed this session.");
+                    return;
+                }
+
+                inGameRoomStatusValues.Clear();
+                foreach (string name in InGameRoomStatusNames)
+                {
+                    inGameRoomStatusValues.Add(Convert.ToInt64(Enum.Parse(roomStatusEnum, name)));
+                }
+
+                playerRoomStatusPropertyKey = resolvedKey;
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Race-in-progress signal resolved: property key '{resolvedKey}', in-game status values [{string.Join(",", inGameRoomStatusValues.Select(v => v.ToString()).ToArray())}] from {roomStatusEnum.FullName}.");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Race-in-progress signal could NOT be resolved: {ex.Message}. Auto-start stays suppressed this session.");
+            }
+        }
+
+        // Returns TRUE when a determination was possible, with raceInProgress carrying it.
+        // Returns FALSE for "unknown" — callers must never read that as "no race" (AGENTS.md
+        // rule 2). `detail` is always populated and is what the suppression decision event and
+        // the click log line report, so a live log always says WHY, not just what.
+        private static bool TryDetectRaceInProgress(out bool raceInProgress, out string detail)
+        {
+            raceInProgress = false;
+            detail = "";
+
+            ResolveRaceInProgressReflection();
+            if (string.IsNullOrEmpty(playerRoomStatusPropertyKey) || inGameRoomStatusValues.Count == 0)
+            {
+                detail = "player room-status property is not resolvable in this game build";
+                return false;
+            }
+
+            try
+            {
+                Type networkType = Type.GetType("Photon.Pun.PhotonNetwork, PhotonUnityNetworking") ??
+                                   Type.GetType("PhotonNetwork, Assembly-CSharp");
+                PropertyInfo playerListProp = networkType?.GetProperty("PlayerList", BindingFlags.Public | BindingFlags.Static);
+                Array players = playerListProp?.GetValue(null) as Array;
+                if (players == null || players.Length == 0)
+                {
+                    detail = "Photon PlayerList is empty or unreadable";
+                    return false;
+                }
+
+                int inGameCount = 0;
+                string firstInGameNick = null;
+                for (int i = 0; i < players.Length; i++)
+                {
+                    object playerObj = players.GetValue(i);
+                    if (playerObj == null) continue;
+
+                    var props = playerObj.GetType().GetProperty("CustomProperties",
+                        BindingFlags.Public | BindingFlags.Instance)?.GetValue(playerObj, null)
+                        as System.Collections.IDictionary;
+                    if (props == null) continue;
+
+                    // Iterated rather than indexed: the same DictionaryEntry walk
+                    // GetRoomPropertiesSnapshot uses, so no assumption is made about how
+                    // ExitGames' Hashtable implements key lookup for a string key.
+                    object raw = null;
+                    foreach (System.Collections.DictionaryEntry entry in props)
+                    {
+                        if (entry.Key != null && string.Equals(entry.Key.ToString(), playerRoomStatusPropertyKey, StringComparison.Ordinal))
+                        {
+                            raw = entry.Value;
+                            break;
+                        }
+                    }
+                    if (raw == null) continue; // absent/null => the default, <RoomStatusEnum>.None
+
+                    long status;
+                    try { status = Convert.ToInt64(raw); }
+                    catch { continue; }
+                    if (!inGameRoomStatusValues.Contains(status)) continue;
+
+                    inGameCount++;
+                    if (firstInGameNick == null)
+                    {
+                        string nick, userId;
+                        ReadPhotonPlayerInfo(playerObj, out nick, out userId);
+                        firstInGameNick = string.IsNullOrEmpty(nick) ? "?" : nick;
+                    }
+                }
+
+                raceInProgress = inGameCount > 0;
+                detail = raceInProgress
+                    ? $"{inGameCount} of {players.Length} player(s) are in the flight level (first: {firstInGameNick})"
+                    : $"none of {players.Length} player(s) are in the flight level";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                detail = $"read failed: {ex.Message}";
+                return false;
+            }
+        }
+
         private static bool GetPhotonBoolProperty(string propertyName)
         {
             try

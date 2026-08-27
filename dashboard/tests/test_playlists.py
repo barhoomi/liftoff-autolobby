@@ -1,12 +1,21 @@
+"""Tests for the playlist half of the control plane (``dashboard.control.playlists``).
+
+These moved verbatim from ``orchestrator/tests/test_run_headless_lobby.py`` when
+bot-dashboard.md's decision D5 moved the code under test out of the orchestrator; only
+the imports changed. Keeping them as-is is the point -- they are the evidence that the
+extraction was behaviour-preserving.
+"""
+
 import json
+import os
 import random
 
-import run_headless_lobby as rhl
-from run_headless_lobby import (
-    _NullLogger,
+import pytest
+
+from dashboard.control import playlists as rhl
+from dashboard.control.playlists import (
     cross_validate_tracks,
     load_track_mode_availability,
-    make_event_logger,
     round_robin_shuffle_by_environment,
 )
 
@@ -168,8 +177,8 @@ def _write_fixture_catalog(tmp_path, tracks_per_env=3):
     the real repo's playlists.json/master_tracks_list.json (the latter is gitignored and
     only exists on a machine that has run gather_tracks.py against a live game install --
     see AGENTS.md -- so it is routinely ABSENT in a fresh checkout or CI, and
-    resolve_and_write_playlist() sys.exit(1)s outright when it's missing, which would
-    otherwise abort the whole pytest run)."""
+    resolve_and_write_playlist() raises MasterTracksMissingError outright when it's
+    missing)."""
     playlists_path = tmp_path / "playlists.json"
     master_list_path = tmp_path / "master_tracks_list.json"
     playlists_path.write_text(json.dumps({
@@ -252,23 +261,89 @@ class TestLoadTrackModeAvailability:
         assert load_track_mode_availability(str(tmp_path)) == data
 
 
-class TestNullLogger:
-    def test_any_method_is_a_callable_noop(self):
-        logger = _NullLogger()
-        assert logger.game_start(1234, playlist="all") is None
-        assert logger.error("boom", context="anything") is None
-        assert logger.some_method_invented_next_year("x", key="y") is None
+class TestResolverErrorContract:
+    """The two failure modes the D5 extraction re-shaped: they used to be a ValueError
+    and a bare sys.exit(1) inside the library. Both are now exceptions the caller
+    classifies -- the orchestrator still turns them into `ERROR: <msg>` + exit 1, while a
+    web request handler can turn them into a 4xx instead of killing its own process."""
+
+    def test_unknown_playlist_raises_playlist_not_found(self, tmp_path):
+        playlists_path, master_list_path = _write_fixture_catalog(tmp_path)
+        with pytest.raises(rhl.PlaylistNotFoundError) as exc:
+            rhl.resolve_and_write_playlist("nope", False, str(tmp_path / "tracks_to_rotate.txt"),
+                                           playlists_path=playlists_path,
+                                           master_list_path=master_list_path)
+        assert "nope" in str(exc.value)
+
+    def test_playlist_not_found_is_still_a_valueerror(self, tmp_path):
+        # run_headless_lobby has always caught ValueError at this call site; keeping the
+        # subclass relationship means the extraction did not silently widen that catch.
+        playlists_path, master_list_path = _write_fixture_catalog(tmp_path)
+        with pytest.raises(ValueError):
+            rhl.resolve_and_write_playlist("nope", False, str(tmp_path / "tracks_to_rotate.txt"),
+                                           playlists_path=playlists_path,
+                                           master_list_path=master_list_path)
+
+    def test_missing_master_list_raises_instead_of_exiting(self, tmp_path):
+        playlists_path, _ = _write_fixture_catalog(tmp_path)
+        with pytest.raises(rhl.MasterTracksMissingError) as exc:
+            rhl.resolve_and_write_playlist("demo", False, str(tmp_path / "tracks_to_rotate.txt"),
+                                           playlists_path=playlists_path,
+                                           master_list_path=str(tmp_path / "absent.json"))
+        # Message shape is load-bearing: the orchestrator prints "ERROR: {e}", which must
+        # stay byte-identical to what it printed before the move.
+        assert str(exc.value).startswith("master_tracks_list.json not found at ")
+
+    def test_missing_playlists_file_is_a_no_op(self, tmp_path, capsys):
+        # Historical behaviour, deliberately preserved: warn and leave the existing
+        # rotation file alone rather than blanking a working rotation.
+        out = tmp_path / "tracks_to_rotate.txt"
+        assert rhl.resolve_and_write_playlist("demo", False, str(out),
+                                              playlists_path=str(tmp_path / "absent.json"),
+                                              master_list_path=str(tmp_path / "absent2.json")) is None
+        assert not out.exists()
+        assert "Playlists file not found" in capsys.readouterr().out
 
 
-class TestMakeEventLogger:
-    def test_falls_back_to_null_logger_when_module_unavailable(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(rhl, "_EVENT_LOG_AVAILABLE", False)
-        logger = make_event_logger({"log_dir": str(tmp_path)}, str(tmp_path))
-        assert isinstance(logger, _NullLogger)
+class TestResolverWriteBehaviour:
+    def test_returns_the_resolved_tuples_it_wrote(self, tmp_path):
+        playlists_path, master_list_path = _write_fixture_catalog(tmp_path, tracks_per_env=2)
+        out = tmp_path / "plugins" / "tracks_to_rotate.txt"
+        out.parent.mkdir()
+        resolved = rhl.resolve_and_write_playlist("demo", False, str(out),
+                                                  playlists_path=playlists_path,
+                                                  master_list_path=master_list_path)
+        assert len(resolved) == 4
+        assert resolved[0] == ("BC Track 0", "Bando City", "Race")
 
-    def test_builds_working_logger_against_config_log_dir(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("FPV_LOG_DIR", raising=False)
-        logger = make_event_logger({"log_dir": str(tmp_path)}, str(tmp_path))
-        rec = logger.emit("game_start", pid=1)
-        assert rec["event"] == "game_start"
-        assert any(p.suffix == ".jsonl" for p in tmp_path.iterdir())
+    def test_falls_back_to_all_official_races_when_a_playlist_resolves_empty(self, tmp_path):
+        playlists_path = tmp_path / "playlists.json"
+        master_list_path = tmp_path / "master.json"
+        playlists_path.write_text(json.dumps({
+            "typo": [{"environment": "Bando City", "track": "no such track", "mode": "Race"}],
+            "all_official_races": [{"environment": "*", "track": "*", "mode": "Race"}],
+        }))
+        master_list_path.write_text(json.dumps({"Bando City": {"official": ["BC Track 0"]}}))
+        out = tmp_path / "plugins" / "tracks_to_rotate.txt"
+        out.parent.mkdir()
+
+        resolved = rhl.resolve_and_write_playlist("typo", False, str(out),
+                                                  playlists_path=str(playlists_path),
+                                                  master_list_path=str(master_list_path))
+        assert resolved == [("BC Track 0", "Bando City", "Race")]
+        assert "# Generated from playlist: all_official_races" in out.read_text()
+
+    def test_write_goes_through_the_ownership_guarded_protocol_writer(self, tmp_path):
+        # Regression guard for the rule the extraction exists to enforce: the resolver
+        # resets rotation_state.txt via the sanctioned reset path, and never
+        # content-writes it. A stray "5" here would mean someone reintroduced a direct
+        # open() on plugin-owned state.
+        playlists_path, master_list_path = _write_fixture_catalog(tmp_path)
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+        (plugins_dir / "rotation_state.txt").write_text("5")
+        rhl.resolve_and_write_playlist("demo", False, str(plugins_dir / "tracks_to_rotate.txt"),
+                                       playlists_path=playlists_path,
+                                       master_list_path=master_list_path)
+        assert (plugins_dir / "rotation_state.txt").read_text() == "0"
+        assert not any(".tmp." in n for n in os.listdir(plugins_dir))

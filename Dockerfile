@@ -51,6 +51,19 @@ RUN wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsof
     && apt-get install -y --no-install-recommends dotnet-sdk-8.0 \
     && rm -rf /var/lib/apt/lists/*
 
+# --- Dashboard runtime dependencies (RUNTIME only -- not requirements-dev.txt) ---
+# The `dashboard` compose service runs `python3 -m dashboard` from THIS image, so fastapi +
+# uvicorn + pydantic have to be installed here; without them the sidecar dies immediately
+# with `ModuleNotFoundError: No module named 'uvicorn'` (hit live 2026-08-05). Deliberately
+# a separate, runtime-only requirements file rather than requirements-dev.txt: the dev file
+# also carries pytest/numpy/httpx, and a production image has no business shipping the test
+# stack. Copied on its own, before the source COPY below, so editing the repo doesn't
+# invalidate this layer and every rebuild stays a ~1 minute source-only re-cut.
+# The bot service itself remains pure-stdlib Python -- this pip layer exists for the sidecar.
+COPY requirements-dashboard.txt /tmp/requirements-dashboard.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements-dashboard.txt \
+    && rm /tmp/requirements-dashboard.txt
+
 # --- Unprivileged bot user. Steam refuses to run as root, and running the whole stack as
 # root inside the container is unnecessary. /steam doubles as this user's $HOME so the
 # Debian Steam client's own `~/.steam/...` / `~/.local/share/Steam/...` paths land on the

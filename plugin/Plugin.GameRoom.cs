@@ -63,6 +63,12 @@ namespace LiftoffAutoLobby
             {
                 UnityEngine.Debug.Log("[AutoLobbyPlugin] Entered GameRoom. Starting room timer.");
                 LogEvent("room_entered");
+                // lifecycle-event-logging.md: JSONL twin. The enclosing branch is entered on both
+                // sentinels; MinValue means a genuinely new room (bot startup / post-disconnect
+                // recreate, set by Plugin.Navigation's leave paths and PhotonContainerPrefix's
+                // disconnect branch), MaxValue means the timer was frozen for an in-place settings
+                // update. Must be evaluated BEFORE the assignment below clears the sentinel.
+                LogJsonEvent("room_entered", ("fresh", roomCreatedTime == DateTime.MinValue));
                 roomCreatedTime = DateTime.Now;
                 lastActivityTime = DateTime.UtcNow;
                 chatWarnedAboutNextRace = false;
@@ -108,14 +114,29 @@ namespace LiftoffAutoLobby
                 if (startBtn == null) startBtn = FindButtonByTextOrName("START", startNames);
                 if (startBtn != null && startBtn.gameObject.activeInHierarchy && startBtn.interactable)
                 {
-                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Auto-start: clicking START button.");
-                    lastStartGameClickedTime = DateTime.Now;
-                    if (firstStartGameClickTime == DateTime.MinValue)
+                    // bug-auto-start-joins-running-race.md: buttonStartGame is dual-purpose —
+                    // "Start game" with no race running, "Join game" while one is — and the
+                    // lookup above matches it by NAME, so the label alone never gated the click.
+                    // Auto-start must fire ONLY when clicking would START a race. Suppression
+                    // deliberately falls through instead of returning: rotation, callouts and
+                    // keep-alive have to keep running for the whole race.
+                    string suppressKind, suppressDetail;
+                    if (ShouldSuppressAutoStart(startBtn, out suppressKind, out suppressDetail))
                     {
-                        firstStartGameClickTime = DateTime.Now;
+                        NoteAutoStartSuppressed(suppressKind, suppressDetail);
                     }
-                    startBtn.onClick.Invoke();
-                    return;
+                    else
+                    {
+                        autoStartSuppressedKind = null; // episode over — the next one logs again
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Auto-start: clicking START button (label='{GetButtonText(startBtn)}', {suppressDetail}).");
+                        lastStartGameClickedTime = DateTime.Now;
+                        if (firstStartGameClickTime == DateTime.MinValue)
+                        {
+                            firstStartGameClickTime = DateTime.Now;
+                        }
+                        startBtn.onClick.Invoke();
+                        return;
+                    }
                 }
             }
 
@@ -153,7 +174,24 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            AnnounceCalloutTiersIfDue(elapsed);
             AnnounceNextTrackIfDue(elapsed);
+
+            // bot-dashboard.md SPEC CONFLICT resolution: skip_now.txt is an externally
+            // (dashboard/orchestrator) written, plugin-consumed presence-only file, same
+            // convention as maintenance_active.txt -- the plugin owns deleting it, which
+            // makes it a one-shot request rather than a second piece of state that must be
+            // kept in sync (AGENTS.md rule 4). Reuses the exact skipRequested mechanism the
+            // admin /skip command already sets (SkipCommand.cs) -- this is another writer of
+            // the same flag, not a new skip path.
+            string skipNowPath = Path.Combine(pluginPath, "skip_now.txt");
+            if (File.Exists(skipNowPath))
+            {
+                try { File.Delete(skipNowPath); }
+                catch (Exception ex) { UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to delete skip_now.txt: {ex.Message}"); }
+                skipRequested = true;
+                UnityEngine.Debug.Log("[AutoLobbyPlugin] skip_now.txt observed — forcing rotation.");
+            }
 
             if (skipRequested || elapsed >= GetRotationInterval())
             {
@@ -175,6 +213,74 @@ namespace LiftoffAutoLobby
             }
 
             HandleKeepAlive();
+        }
+
+        // ---------------------------------------------------------------
+        // bug-auto-start-joins-running-race.md: the auto-start guard.
+        // ---------------------------------------------------------------
+
+        // Which suppression is currently being reported, so the JSONL `decision` event is emitted
+        // once per EPISODE rather than once per tick. Keyed on the coarse kind (not the detail
+        // text, which carries a racer count that changes mid-race). In-memory only: an episode is
+        // meaningless across a game restart, and it is bookkeeping, not state anyone else reads
+        // (AGENTS.md rules 4-5). Cleared the moment a tick finds the guard open again.
+        private static string autoStartSuppressedKind;
+
+        // True when clicking the waiting-room start button would JOIN a running race instead of
+        // starting a new one — or when we cannot tell.
+        //
+        // FAIL-CLOSED on an unreadable signal, deliberately: a missed auto-start is small and
+        // recoverable (the decompile shows the button is gated only on the LOCAL player's content
+        // status, with no master-client gate, so any ready player can press Start themselves),
+        // while a wrong click is the live-confirmed room-churn bug this fixes. The failure is
+        // loud — LogError at resolution time plus a `decision` event per episode — never silent.
+        //
+        // The button-label check is belt-and-braces only, never the primary signal: the label is
+        // a localized, encrypted string, so it is evidence in English and nothing elsewhere. It
+        // can only ADD suppression, so a non-English client degrades to "the Photon signal
+        // decides" rather than to a wrong click.
+        private static bool ShouldSuppressAutoStart(Button startBtn, out string kind, out string detail)
+        {
+            bool raceInProgress;
+            string signalDetail;
+            if (!TryDetectRaceInProgress(out raceInProgress, out signalDetail))
+            {
+                kind = "signal_unreadable";
+                detail = $"race state unreadable ({signalDetail})";
+                return true;
+            }
+
+            string label = GetButtonText(startBtn);
+            if (raceInProgress)
+            {
+                kind = "race_in_progress";
+                detail = $"race in progress: {signalDetail}; button label '{label}'";
+                return true;
+            }
+
+            if (!string.IsNullOrEmpty(label) && label.IndexOf("join", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                kind = "join_label";
+                detail = $"button label '{label}' says clicking would JOIN, not start, although {signalDetail}";
+                return true;
+            }
+
+            kind = null;
+            detail = signalDetail;
+            return false;
+        }
+
+        private static void NoteAutoStartSuppressed(string kind, string detail)
+        {
+            if (string.Equals(autoStartSuppressedKind, kind, StringComparison.Ordinal)) return;
+            autoStartSuppressedKind = kind;
+
+            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Auto-start SUPPRESSED ({kind}): {detail}");
+            // Same envelope and `kind`/`detail` shape as the existing track_blacklist decision
+            // event above, so both group as "an autonomous plugin decision" in the JSONL.
+            LogJsonEvent("decision",
+                ("kind", "auto_start_suppressed"),
+                ("detail", $"{kind}: {detail}"));
         }
 
         // ---------------------------------------------------------------
@@ -225,6 +331,116 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // ---------------------------------------------------------------
+        // pre-rotation-callouts.md: tiered pre-rotation warnings (5m/2m/1m by default),
+        // extending the mechanism above rather than building a parallel one. The fixed final
+        // 10s warning (AnnounceNextTrackIfDue/chatWarnedAboutNextRace, above) is untouched.
+        // ---------------------------------------------------------------
+
+        // Which configured offsets have already announced for the CURRENT approach to
+        // rotation. Deliberately self-correcting instead of an explicit reset flag: every
+        // entry is dropped again the moment `elapsed` is no longer past its threshold (a new
+        // track started and elapsed fell back near zero, or /extend pushed elapsed back below
+        // it), so it can fire again next time its threshold is crossed. This sidesteps needing
+        // a reset call at every one of chatWarnedAboutNextRace's existing reset sites -- several
+        // of which live in Plugin.cs / Plugin.RoomSetup.cs, outside this feature's file
+        // partition (see the feature doc's "Design decisions" section) -- without adding a
+        // second state mechanism that must be kept in sync (AGENTS.md rule 4: this is in-memory
+        // per-tick bookkeeping, not a second persisted/derived state file).
+        private static readonly HashSet<int> calloutOffsetsFired = new HashSet<int>();
+
+        // Parses Settings.CalloutOffsetsMinutes ("5,2,1" by default) into whole seconds,
+        // largest (earliest warning) first. Unparseable/non-positive entries are dropped
+        // silently; an empty or fully-invalid result falls back to the 5/2/1 default so a
+        // typo'd cfg value never silences every callout.
+        private static List<int> GetCalloutOffsetsSeconds()
+        {
+            string raw = Settings.CalloutOffsetsMinutes;
+            var result = new List<int>();
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                foreach (var part in raw.Split(','))
+                {
+                    double minutes;
+                    if (double.TryParse(part.Trim(), System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out minutes) && minutes > 0)
+                    {
+                        int seconds = (int)Math.Round(minutes * 60.0);
+                        if (seconds > 0 && !result.Contains(seconds)) result.Add(seconds);
+                    }
+                }
+            }
+            if (result.Count == 0) result.AddRange(new[] { 300, 120, 60 }); // 5m, 2m, 1m
+            result.Sort((a, b) => b.CompareTo(a));
+            return result;
+        }
+
+        // "300" -> "5m", "90" -> "1m30s", "45" -> "45s". Kept simple on purpose: the default
+        // offsets are always whole minutes, this only has to look sane for a hand-edited cfg.
+        private static string FormatOffsetLabel(int seconds)
+        {
+            if (seconds < 60) return $"{seconds}s";
+            if (seconds % 60 == 0) return $"{seconds / 60}m";
+            return $"{seconds / 60}m{seconds % 60}s";
+        }
+
+        // Called every tick alongside AnnounceNextTrackIfDue, from both the waiting-room path
+        // (HandleGameRoom) and the client in-flight path (HandleClientInFlightRotation) -- same
+        // callout, same two call sites, per the operator's "callouts are client-critical"
+        // decision that extracted AnnounceNextTrackIfDue in the first place.
+        private static void AnnounceCalloutTiersIfDue(double elapsed)
+        {
+            double intervalSecs = GetRotationInterval();
+            foreach (int offsetSeconds in GetCalloutOffsetsSeconds())
+            {
+                // Acceptance criterion: an offset at or beyond the configured rotation interval
+                // is skipped cleanly (no negative-time threshold, no spam). Also drops any stale
+                // "fired" mark, in case the interval shrank at runtime.
+                if (offsetSeconds >= intervalSecs)
+                {
+                    calloutOffsetsFired.Remove(offsetSeconds);
+                    continue;
+                }
+
+                double threshold = intervalSecs - offsetSeconds;
+                if (elapsed < threshold)
+                {
+                    calloutOffsetsFired.Remove(offsetSeconds); // not due yet, or re-armed by /extend
+                    continue;
+                }
+                if (elapsed >= intervalSecs) continue; // rotation itself is due; HandleGameRoom takes over
+                if (!calloutOffsetsFired.Add(offsetSeconds)) continue; // already announced this approach
+
+                SendCalloutMessage(offsetSeconds);
+            }
+        }
+
+        private static void SendCalloutMessage(int offsetSeconds)
+        {
+            string nextEnv, nextMode;
+            int trackIdx;
+            string nextTrackName = PeekNextTrackName(out nextEnv, out nextMode, out trackIdx);
+            if (string.IsNullOrEmpty(nextTrackName))
+            {
+                UnityEngine.Debug.LogWarning("[AutoLobbyPlugin] AnnounceCalloutTiersIfDue: PeekNextTrackName returned null/empty.");
+                return;
+            }
+
+            string timeLabel = FormatOffsetLabel(offsetSeconds);
+            if (IsClientMode)
+            {
+                string body = RenderClientTemplate(Settings.CalloutTemplate, "Up next in {time}: {environment} - {track}",
+                    ("track", nextTrackName ?? ""), ("environment", nextEnv ?? ""), ("time", timeLabel));
+                SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} {body}");
+            }
+            else
+            {
+                SendChatMessage($"{FormatTag("SYSTEM", activeTheme.systemTagColor)} Up next in {FormatVariable(timeLabel)}: {FormatHighlight($"{nextEnv} - {nextTrackName}")}");
+            }
+
+            LogEvent("pre_rotation_callout", ("offset_seconds", offsetSeconds.ToString()), ("track", nextTrackName), ("environment", nextEnv ?? ""));
+        }
+
         // CLIENT-ONLY in-flight rotation (Plan B', code item 4). Called from HandleClientTick when
         // the player is inside a flight level and rotation is engaged. Server mode never calls this
         // — the server keeps its HandleFlightLevel exit-to-waiting-room path, untouched.
@@ -253,9 +469,10 @@ namespace LiftoffAutoLobby
 
             double elapsed = (DateTime.Now - roomCreatedTime).TotalSeconds;
 
-            // Same callout as the waiting-room path, same text: an in-flight track change is
+            // Same callouts as the waiting-room path, same text: an in-flight track change is
             // announced to the room exactly like a waiting-room one (conductor ruling 2026-07-26
             // from the operator's "callouts are client-critical" decision).
+            AnnounceCalloutTiersIfDue(elapsed);
             AnnounceNextTrackIfDue(elapsed);
 
             if (!skipRequested && elapsed < GetRotationInterval()) return;
@@ -409,11 +626,53 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // bug-auto-start-joins-running-race.md, briefing item 3 — what the exit path actually
+        // does, from the decompile (recorded here because the code below reads like a direct
+        // "leave the level" call and is not one):
+        //     private void OnToWaitingRoom() { <GameManager>.QuitGameWithConfirm(new <ToWaitingRoomAction>()); }
+        //     public void QuitGameWithConfirm(<QuitAction> a) {
+        //         <PopupManager>.<ShowConfirm>(a.<Title>, a.<Body>, a.<OnConfirm>,
+        //                                      delegate { isQuitShowing = false; }, <"yes">, <"no">);
+        //         isQuitShowing = true; }
+        // It OPENS A CONFIRMATION POPUP; the level is only left once that popup is confirmed, and
+        // nothing here confirms it. What completes the exit today is the unrelated global
+        // DismissPopups() safety net in RunTick (Plugin.UiToolkit.cs), which clicks any
+        // Confirm/OK/Close button in PopupCanvas(Clone) on the next tick. So the exit works by
+        // accident, and the observed 10-120s is genuine llvmpipe scene-load time on both ends,
+        // not a failing invoke. The game has no `if (isQuitShowing) return;` guard, so the old
+        // once-per-tick invoke stacked a fresh confirm popup EVERY SECOND for the whole load —
+        // hence the retry throttle below. Making the exit self-confirming (click the popup here
+        // and verify the scene actually changed) is recorded as a follow-up in the feature doc:
+        // it changes a path that currently works, which this bug does not own.
+        private const double FlightExitRetrySeconds = 10.0;
+        private const double FlightExitWarnSeconds = 30.0;
+        private static DateTime flightExitRequestedTime = DateTime.MinValue;
+        private static bool flightExitWarned;
+
         private static void HandleFlightLevel()
         {
             double elapsed = (DateTime.Now - sceneLoadTime).TotalSeconds;
             if (elapsed >= 5.0)
             {
+                // The scene-change block in RunTick resets sceneLoadTime, so a stale request from
+                // a previous flight-level entry can never throttle this one.
+                if (flightExitRequestedTime != DateTime.MinValue && flightExitRequestedTime < sceneLoadTime)
+                {
+                    flightExitRequestedTime = DateTime.MinValue;
+                    flightExitWarned = false;
+                }
+                if (flightExitRequestedTime != DateTime.MinValue)
+                {
+                    double sinceRequest = (DateTime.Now - flightExitRequestedTime).TotalSeconds;
+                    if (!flightExitWarned && sinceRequest >= FlightExitWarnSeconds)
+                    {
+                        flightExitWarned = true;
+                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Still in the flight level {sinceRequest:F0}s after requesting the exit to the waiting room — the confirm popup may not have been dismissed.");
+                    }
+                    if (sinceRequest < FlightExitRetrySeconds) return;
+                }
+                flightExitRequestedTime = DateTime.Now;
+
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] Level loaded for {elapsed:F1}s. Exiting flight level to waiting room.");
 
                 // 1. Try invoking InGameMenuMainPanel.OnToWaitingRoom directly via reflection

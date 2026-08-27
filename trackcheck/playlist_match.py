@@ -1,34 +1,30 @@
-"""Playlist <-> master-list matching semantics, factored out so there is exactly one
-implementation shared between the runtime resolver
-(`orchestrator/run_headless_lobby.py`'s `resolve_and_write_playlist()`) and the lint
-CLI (`trackcheck.lint_playlists`).
+"""Playlist <-> master-list matching semantics: THE implementation, shared by the
+runtime resolver (`dashboard.control.playlists.resolve_and_write_playlist()`) and the
+lint CLI (`trackcheck.lint_playlists`).
 
-This module is a deliberate line-for-line port of the matching logic embedded in
-`resolve_and_write_playlist()` (env pattern normalization via ENV_NORMALIZATION,
-fnmatch-based track pattern matching, "official"+"workshop" categories only --
-"local" tracks are intentionally excluded, they can't be shared to other players).
+Env pattern normalization via ENV_NORMALIZATION, fnmatch-based track pattern matching,
+"official"+"workshop" categories only ("local" tracks are intentionally excluded --
+they can't be shared to other players).
 
-Why a port instead of an import: `resolve_and_write_playlist()` is not just matching
--- it's interleaved with live-game cross-validation (track_mode_availability.json),
-file writes (tracks_to_rotate.txt, rotation_state.txt) and a fallback-recursion path,
-all keyed off the *real* repo-root playlists.json/master_tracks_list.json paths
-derived from its own `__file__`. Importing it here would mean either running it
-against production files as a side effect of running the linter/tests, or reaching
-into orchestrator internals to monkeypatch path resolution -- both worse than a
-small, obviously-equivalent, independently-tested port. Equivalence is verified
-directly rather than assumed: trackcheck/tests/test_playlist_match.py monkeypatches
-`run_headless_lobby.__file__` to point at a throwaway fixture repo layout and asserts
-this module's resolution matches `resolve_and_write_playlist()`'s output byte-for-
-byte on the same fixture data. If `resolve_and_write_playlist()`'s matching logic
-ever changes, that test is the tripwire -- update both together.
+History, because the module used to say the opposite: this started life as a deliberate
+line-for-line *port* of the matching logic embedded in `resolve_and_write_playlist()`,
+kept honest by a parity test, because that function was welded into the orchestrator
+(interleaved with live-game cross-validation, file writes and a fallback-recursion path,
+keyed off repo-root paths derived from its own `__file__`) and importing it here would
+have meant running production file writes as a side effect of linting. The
+bot-dashboard.md D5 extraction moved that function into `dashboard/control/`, where it
+takes its catalog paths as arguments -- so the dependency now runs the safe direction
+and the copy was deleted. The two ENV_NORMALIZATION dicts were verified byte-identical
+(45 keys, empty symmetric difference) before collapsing them. The parity test survives
+in trackcheck/tests/test_playlist_match.py, now guarding that the resolver still *writes*
+exactly what this module resolves.
 """
 
 import fnmatch
 
 # Maps any variant spelling to the canonical display name used as master list keys.
-# Kept in sync with resolve_and_write_playlist()'s ENV_NORMALIZATION in
-# orchestrator/run_headless_lobby.py -- see this module's docstring for why it's a
-# port rather than an import, and test_playlist_match.py for the parity test.
+# The single copy: dashboard.control.playlists imports this dict for its cross-validation
+# step (it used to carry an identical one of its own -- see this module's docstring).
 ENV_NORMALIZATION = {
     "thedrawingboard": "The Drawing Board",
     "thedrawingboardcyber": "The Drawing Board",
@@ -78,9 +74,9 @@ ENV_NORMALIZATION = {
 }
 
 # The categories a playlist entry is allowed to resolve tracks from. "local" is
-# excluded on purpose -- see orchestrator/run_headless_lobby.py's comment at the same
-# spot: local tracks can't be shared to other players, so they must never enter a
-# rotation the bot offers to a lobby.
+# excluded on purpose: local tracks can't be shared to other players (see
+# docs/features/done/race-not-shared-handling.md), so they must never enter a rotation
+# the bot offers to a lobby.
 RESOLVABLE_CATEGORIES = ("official", "workshop")
 
 
