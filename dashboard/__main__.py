@@ -6,6 +6,7 @@ configuration error, not a permissive default.
 """
 
 import argparse
+import os
 import sys
 
 from .control.settings import load_settings
@@ -45,8 +46,20 @@ def main(argv=None):
     print(f"[Dashboard] serving on http://{settings.host}:{settings.port}")
     print(f"[Dashboard] container restart button: "
           f"{'enabled -> ' + ' '.join(settings.restart_command) if settings.restart_available else 'disabled'}")
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port,
-                reload=args.reload, log_level="info")
+    if args.reload:
+        # uvicorn can only reload when given an import string, not an app instance (it
+        # silently warns and serves without reloading otherwise). create_app() already
+        # defaults to load_settings(), so hand uvicorn the factory and export any CLI
+        # host/port override through the same env vars load_settings() reads -- the
+        # reloader re-imports in a fresh subprocess where argparse's values don't exist.
+        os.environ["FPV_DASHBOARD_HOST"] = settings.host
+        os.environ["FPV_DASHBOARD_PORT"] = str(settings.port)
+        uvicorn.run("dashboard.api:create_app", factory=True,
+                    host=settings.host, port=settings.port,
+                    reload=True, log_level="info")
+    else:
+        uvicorn.run(create_app(settings), host=settings.host, port=settings.port,
+                    log_level="info")
     return 0
 
 
