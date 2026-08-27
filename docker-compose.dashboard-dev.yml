@@ -1,4 +1,8 @@
-# Live-edit overlay for the dashboard sidecar (see dashboard/README.md "Fast deploys").
+# Live-edit overlay for the dashboard sidecar (see dashboard/README.md). Since the app
+# layer moved to the private liftoff-dashboard repo, this overlay is no longer optional:
+# the bind-mounted directory is the MERGED package -- control/ tracked by this repo's
+# clone, the app files rsync'd in (untracked) by the private repo's deploys -- and the
+# image alone has no app to run (its /app/dashboard holds only control/).
 #
 # Apply ON THE HOST RUNNING THE STACK, together with the base file:
 #

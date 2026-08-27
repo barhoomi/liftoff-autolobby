@@ -1,5 +1,11 @@
 # RUNTIME dependencies of the dashboard sidecar (docs/features/doing/bot-dashboard.md).
 #
+# The app that imports these (dashboard/{api,write_api,__main__}.py) now lives in the
+# private liftoff-dashboard repo and reaches the container via the compose overlay's
+# bind mount -- but the IMAGE still has to provide the packages, so this file stays
+# here with the Dockerfile that installs it. The file references below describe that
+# private app code.
+#
 # Why this file exists separately from requirements-dev.txt: the Docker image has to install
 # these to run `python3 -m dashboard` (the sidecar died with `ModuleNotFoundError: No module
 # named 'uvicorn'` until it did), and requirements-dev.txt is explicitly the DEV/CI set --
