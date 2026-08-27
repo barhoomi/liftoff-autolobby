@@ -1,9 +1,14 @@
-"""Shared fixtures for the dashboard tests.
+"""Shared fixtures for the control-plane tests.
 
 Everything is built against a throwaway project tree: a fake ``config/`` (lobby_config +
 playlists + master track list), a fake BepInEx ``plugins/`` directory, and a fake log
 directory. Nothing here touches the real repo config, the real game install, or the
 live bot — the whole point of the D5 service layer is that all three are just paths.
+
+The FastAPI ``client``/``anon_client``/``write_event`` fixtures that used to live here
+moved to the private liftoff-dashboard repo along with the app layer and its API tests;
+this file (and everything left under ``dashboard/``) must stay importable without the
+web dependencies, same rule as ``dashboard/__init__.py`` states for the package itself.
 """
 
 import json
@@ -80,44 +85,3 @@ def protocol(project):
 @pytest.fixture
 def settings(project):
     return DashboardSettings(token=TOKEN, project_dir=project["root"])
-
-
-@pytest.fixture
-def client(project, settings):
-    from fastapi.testclient import TestClient
-
-    from dashboard.api import create_app
-
-    app = create_app(settings, plugins_dir=project["plugins_dir"], log_dir=project["log_dir"])
-    with TestClient(app) as test_client:
-        test_client.headers.update({"X-Auth-Token": TOKEN})
-        yield test_client
-
-
-@pytest.fixture
-def anon_client(project, settings):
-    """The same app without the auth header pre-set, for the auth tests."""
-    from fastapi.testclient import TestClient
-
-    from dashboard.api import create_app
-
-    app = create_app(settings, plugins_dir=project["plugins_dir"], log_dir=project["log_dir"])
-    with TestClient(app) as test_client:
-        yield test_client
-
-
-@pytest.fixture
-def write_event(project):
-    """Append a JSONL event to today's daily file, as either producer would."""
-    from dashboard.control import events as events_mod
-
-    def _write(name, ts=None, source="plugin", **fields):
-        record = {"ts": ts or events_mod.utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                  "source": source, "event": name}
-        record.update(fields)
-        path = events_mod.daily_path(project["log_dir"])
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-        return record
-
-    return _write
