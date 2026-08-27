@@ -52,14 +52,22 @@ def main(argv=None):
         # defaults to load_settings(), so hand uvicorn the factory and export any CLI
         # host/port override through the same env vars load_settings() reads -- the
         # reloader re-imports in a fresh subprocess where argparse's values don't exist.
+        #
+        # timeout_graceful_shutdown: without it uvicorn waits FOREVER for open
+        # connections on reload -- one dashboard browser tab (long-lived SSE stream)
+        # left the live worker stuck in "Waiting for connections to close" on every
+        # deploy (hit 2026-08-27). 5s lets normal requests finish and then cuts
+        # stragglers; the SSE client reconnects on its own.
         os.environ["FPV_DASHBOARD_HOST"] = settings.host
         os.environ["FPV_DASHBOARD_PORT"] = str(settings.port)
         uvicorn.run("dashboard.api:create_app", factory=True,
                     host=settings.host, port=settings.port,
-                    reload=True, log_level="info")
+                    reload=True, log_level="info",
+                    timeout_graceful_shutdown=5)
     else:
         uvicorn.run(create_app(settings), host=settings.host, port=settings.port,
-                    log_level="info")
+                    log_level="info",
+                    timeout_graceful_shutdown=5)
     return 0
 
 
