@@ -135,6 +135,12 @@ class TestTypedSetters:
         proto.request_workshop_download(" 1234567890 ")
         assert proto.read_text("workshop_download_request.txt") == "1234567890"
 
+    def test_request_workshop_download_refuses_an_empty_id(self, proto):
+        # An empty request file is unanswerable: the plugin has no id to echo, so its
+        # result line would be unparseable and the requester would wait out its timeout.
+        with pytest.raises(ValueError):
+            proto.request_workshop_download("   ")
+
     def test_override_game_mode_clears_on_falsy(self, proto):
         proto.set_override_game_mode("Classic Race")
         assert proto.read_text("override_game_mode.txt") == "Classic Race"

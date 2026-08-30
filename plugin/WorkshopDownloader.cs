@@ -315,13 +315,26 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            // '|' is the field separator and the file is one line, so a rejected id that
+            // contains either would produce a record the reader cannot parse -- and an
+            // unparseable result reads as "not ready yet", i.e. the requester would wait out
+            // its whole timeout instead of being told `bad_id`. Only ever reachable through
+            // the bad_id path (Steam ids are digits), which is exactly the path that carries
+            // unvalidated text.
+            private static string SanitizeField(string value)
+            {
+                if (string.IsNullOrEmpty(value)) return "";
+                return value.Replace('|', '_').Replace('\r', '_').Replace('\n', '_');
+            }
+
             private static void WriteResultFile(string idText, bool ok, string reason)
             {
                 if (string.IsNullOrEmpty(pluginPath)) return;
                 try
                 {
                     string line = string.Format(CultureInfo.InvariantCulture, "{0}|{1}|{2}\n",
-                                                idText, ok ? "ok" : "fail", reason ?? "");
+                                                SanitizeField(idText), ok ? "ok" : "fail",
+                                                SanitizeField(reason));
                     File.WriteAllText(Path.Combine(pluginPath, ResultFileName), line);
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Wrote {ResultFileName}: {line.Trim()}");
                 }

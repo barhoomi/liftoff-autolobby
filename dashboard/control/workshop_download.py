@@ -157,6 +157,12 @@ def download_workshop_item(published_id, protocol, game_dir=None, playlist_name=
     ``tracks_to_rotate.txt`` rather than a named playlist.
     """
     published_id = str(published_id).strip()
+    if not published_id:
+        # Same reason code the plugin uses for input it cannot parse -- an empty id is
+        # that same condition, just caught before a meaningless request file is written
+        # (see ProtocolDir.request_workshop_download). Not a second validator: every
+        # non-empty id still goes to the plugin unexamined.
+        return _fail(published_id, "bad_id", logger, detail="no workshop id given")
     gather = gather or _default_gather
     resolve = resolve or _default_resolve
     validate = validate or _default_validate

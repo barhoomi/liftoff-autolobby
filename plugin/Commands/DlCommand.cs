@@ -23,7 +23,11 @@ namespace LiftoffAutoLobby
 
             public void Execute(string userName, string userId, string argument)
             {
-                string id = (argument ?? "").Trim();
+                // Echoed back into chat below, so strip anything tag-shaped first: a '<' in a
+                // bot message corrupts SplitMessage's tag tracking (the same constraint
+                // trackcheck's NAME_UNSAFE_MARKUP check exists for). A real workshop id is
+                // digits; anything else is on its way to a `bad_id` result anyway.
+                string id = (argument ?? "").Trim().Replace("<", "").Replace(">", "");
                 if (id.Length == 0)
                 {
                     SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Usage: /dl <workshop_id> (the numeric id from the Steam Workshop URL)");

@@ -177,6 +177,17 @@ class TestPluginReportedFailures:
         assert any(e == "error" and "bad_id" in f["message"] for e, f in logger.events)
 
 
+class TestEmptyId:
+    def test_an_empty_id_fails_fast_without_writing_a_request(self, protocol, content_root):
+        plugin = FakePlugin(protocol, None)
+        outcome = download_workshop_item("  ", protocol, clock=plugin.clock,
+                                         sleep=plugin.sleep, timeout=10.0)
+        assert outcome.ok is False
+        assert outcome.reason == "bad_id"
+        assert not protocol.exists("workshop_download_request.txt")
+        assert plugin.polls == 0, "it should not have waited at all"
+
+
 class TestWatcherTimeout:
     def test_no_result_at_all_times_out_with_its_own_reason(self, protocol, content_root):
         # `line=None` => the fake plugin never answers, i.e. the game isn't running.

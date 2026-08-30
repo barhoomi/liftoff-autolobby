@@ -400,9 +400,16 @@ class ProtocolDir:
         download pending" to keep in sync -- the request file's existence *is* that state
         until the plugin takes it. Content is a bare decimal id, nothing else; the plugin
         answers ``bad_id`` for anything it cannot parse, so validation lives in exactly
-        one place rather than being duplicated here.
+        one place rather than being duplicated here -- the one exception is an *empty*
+        id, refused outright because an empty request file is not a protocol message at
+        all: the plugin would have no id to echo back, and its result line would be
+        unparseable, so the requester would sit through its whole timeout instead of
+        being told anything.
         """
-        self.write_text("workshop_download_request.txt", str(published_id).strip())
+        value = str(published_id).strip()
+        if not value:
+            raise ValueError("workshop_download_request.txt needs a published file id")
+        self.write_text("workshop_download_request.txt", value)
 
     def trigger_skip_now(self):
         """One-shot immediate-rotation request (bot-dashboard.md skip-now fix).
