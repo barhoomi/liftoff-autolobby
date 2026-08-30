@@ -55,7 +55,7 @@ def gather_tracks_and_races():
             break
             
     # Game installation paths
-    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lobby_config.json")
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "lobby_config.json")
     game_tracks_dir = None
     game_races_dir = None
     game_dir = None
@@ -150,7 +150,7 @@ def gather_tracks_and_races():
         except Exception as e:
             print(f"[Host] WARNING: Failed to load UI tracks dump: {e}")
 
-    master_list_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "master_tracks_list.json")
+    master_list_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "master_tracks_list.json")
     if ui_dump_data:
         master_data = {}
         for env_ui, tracks_ui in ui_dump_data.items():

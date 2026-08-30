@@ -24,7 +24,17 @@ namespace LiftoffAutoLobby
                         roomCreatedTime = roomCreatedTime.AddSeconds(extendSecs);
                         double newRemaining = Math.Max(0, GetRotationInterval() - (DateTime.Now - roomCreatedTime).TotalSeconds);
                         chatWarnedAboutNextRace = false;
-                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Extended by {extendSecs:F0}s. Next rotation in {newRemaining:F0}s.");
+                        if (IsClientMode)
+                        {
+                            string rendered = RenderClientTemplate(Settings.ExtendTemplate, "Extended by {seconds}s. Next rotation in {time}s.",
+                                ("seconds", $"{extendSecs:F0}"), ("time", $"{newRemaining:F0}"),
+                                ("track", currentTrackName), ("environment", currentEnvironment));
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} {rendered}");
+                        }
+                        else
+                        {
+                            SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Extended by {extendSecs:F0}s. Next rotation in {newRemaining:F0}s.");
+                        }
                         UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} extended timer by {extendSecs}s");
                     }
                     else

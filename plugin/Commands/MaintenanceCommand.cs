@@ -11,7 +11,13 @@ namespace LiftoffAutoLobby
         private class MaintenanceCommand : IChatCommand
         {
             public string Name => "/maintenance";
-            public string Description => "Schedule a shutdown. Usage: /maintenance [minutes|cancel]";
+
+            // player-onboarding-ux.md work item 2: role-aware description -- a client-mode
+            // reader should not see "Schedule a shutdown" and reasonably assume it applies to
+            // them. The server-mode wording is unchanged.
+            public string Description => IsServerMode
+                ? "Schedule a shutdown. Usage: /maintenance [minutes|cancel]"
+                : "Server-bot only — does not apply in client mode (never closes your own game).";
             public bool IsAdminOnly => true;
 
             public bool CanExecute(string userId, bool democracyEnabled, bool roomOwnedByBot)
@@ -19,6 +25,23 @@ namespace LiftoffAutoLobby
 
             public void Execute(string userName, string userId, string argument)
             {
+                // player-onboarding-ux.md work item 5: maintenance means a scheduled
+                // Application.Quit() of the SERVER's own process (plugin-mode-split.md's gate
+                // table: "Whole maintenance block is server-only" -- RunServerMaintenanceTick,
+                // where the quit actually fires, only ever runs under IsServerMode). In client
+                // mode that would mean quitting the requesting player's own game out from under
+                // them, which the plugin must never do -- so refuse with the real reason instead
+                // of writing maintenance_active.txt and claiming a shutdown that will never fire.
+                // That "claims success, does nothing" shape is exactly what AGENTS.md rule 2 (the
+                // /kick no-op bug) warns against. CanExecute is intentionally left unchanged
+                // (still just IsAdmin) so this refusal — not CommandRegistry's generic "this bot
+                // does not own the room" message — is what a client-mode admin sees.
+                if (IsClientMode)
+                {
+                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} /maintenance is a server-bot feature and has no effect here — it will never close your own game.");
+                    return;
+                }
+
                 if (!string.IsNullOrEmpty(argument) && argument.Equals("cancel", StringComparison.OrdinalIgnoreCase))
                 {
                     CancelMaintenance();

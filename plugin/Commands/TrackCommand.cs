@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 
 namespace LiftoffAutoLobby
@@ -40,16 +41,45 @@ namespace LiftoffAutoLobby
 
                     SearchResult selected = lastSearchResults[index - 1];
 
-                    string statePath = Path.Combine(pluginPath, "rotation_state.txt");
+                    // selected.PlaylistIndex is a position in the STATIC tracks_to_rotate.txt
+                    // (bug-shuffle-toggle-and-tracks-incompatibility.md, Option 2) -- stable
+                    // regardless of shuffle mode, since the plugin never rewrites that file.
+                    // Translate it into a WALK position (a position in the active rotation
+                    // order) so the very next pick is this exact track whether or not shuffle
+                    // is currently on, then continue the same walk from there afterward.
+                    var validTracks = ReadStaticTracks(Path.Combine(pluginPath, "tracks_to_rotate.txt"));
+                    if (selected.PlaylistIndex < 0 || selected.PlaylistIndex >= validTracks.Count)
+                    {
+                        SendTaggedLines("ADMIN", activeTheme.adminTagColor, "That track is no longer in tracks_to_rotate.txt (the playlist changed since /tracks ran) -- run /tracks again.");
+                        return;
+                    }
 
-                    // Set rotation_state.txt to the chosen track index
-                    File.WriteAllText(statePath, selected.PlaylistIndex.ToString());
+                    List<int> activeOrder = GetActiveRotationOrder(validTracks, forceReshuffle: false);
+                    int walkPos = activeOrder.IndexOf(selected.PlaylistIndex);
+                    if (walkPos < 0) walkPos = selected.PlaylistIndex; // defensive only -- activeOrder is always a full permutation of every valid index
+
+                    string statePath = Path.Combine(pluginPath, "rotation_state.txt");
+                    File.WriteAllText(statePath, walkPos.ToString());
 
                     skipRequested = true;
                     chatWarnedAboutNextRace = false;
 
-                    SendTaggedLines("ADMIN", activeTheme.adminTagColor, $"Rotating to track: {FormatVariable(selected.TrackName)} ({selected.Environment})");
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} triggered /track {index}. Updated state index to {selected.PlaylistIndex}");
+                    // client-chat-presentation.md: server-mode wording is the exact original
+                    // literal (byte-identical, with its FormatVariable-colored track name).
+                    // Client mode renders the customizable TrackJumpTemplate instead (plain
+                    // text -- see Plugin.Chat.cs's RenderClientTemplate for why no markup is
+                    // auto-applied to templated output).
+                    if (IsClientMode)
+                    {
+                        string body = RenderClientTemplate(Settings.TrackJumpTemplate, "Rotating to track: {track} ({environment})",
+                            ("track", selected.TrackName ?? ""), ("environment", selected.Environment ?? ""));
+                        SendTaggedLines("ADMIN", activeTheme.adminTagColor, body);
+                    }
+                    else
+                    {
+                        SendTaggedLines("ADMIN", activeTheme.adminTagColor, $"Rotating to track: {FormatVariable(selected.TrackName)} ({selected.Environment})");
+                    }
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Admin {userName} triggered /track {index}. Updated rotation cursor (walk position {walkPos}) to static index {selected.PlaylistIndex}");
                 }
                 catch (Exception ex)
                 {

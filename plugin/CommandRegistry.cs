@@ -32,6 +32,7 @@ namespace LiftoffAutoLobby
             {
                 commands.Clear();
                 RegisterCommand(new HelpCommand());
+                RegisterCommand(new VersionCommand());
                 RegisterCommand(new InfoCommand());
                 RegisterCommand(new HistoryCommand());
                 RegisterCommand(new SkipCommand());
@@ -51,6 +52,11 @@ namespace LiftoffAutoLobby
                 RegisterCommand(new PublicCommand());
                 RegisterCommand(new MaxPlayersCommand());
                 RegisterCommand(new ReloadThemeCommand());
+                RegisterCommand(new DemocracyCommand());
+                RegisterCommand(new StartCommand());
+                RegisterCommand(new StopCommand());
+                RegisterCommand(new PauseCommand());
+                RegisterCommand(new ResumeCommand());
                 UnityEngine.Debug.Log($"[AutoLobbyPlugin] CommandRegistry initialized with {commands.Count} command(s).");
             }
 
@@ -64,6 +70,10 @@ namespace LiftoffAutoLobby
             ///   - The single CanExecute gate folds the old admin + room-ownership checks:
             ///     for an admin, a CanExecute failure on an ownership command produces the
             ///     "this bot does not own the room" refusal, exactly as before.
+            /// Every exit point past the public-command check emits one admin_command_result
+            /// JSONL event (lifecycle-event-logging.md) so the outcome — not just the raw
+            /// command text — is visible to a log-only reader. Public commands (/info, /help)
+            /// stay unlogged there: they are outside the admin gate this event describes.
             /// </summary>
             public static void Process(string userName, string userId, string cmdText)
             {
@@ -86,10 +96,29 @@ namespace LiftoffAutoLobby
                         return;
                     }
 
-                    // Everything else is admin-only. Silently ignore non-admins to prevent probing.
+                    // Everything else is admin-only by default. Non-admins are silently
+                    // ignored to prevent probing, UNLESS the command's own CanExecute opts
+                    // them in under the current democracy state (e.g. /skip becomes a public
+                    // vote when democracy mode is on — see democracy-skip.md). This is the
+                    // only place a non-admin's CanExecute is consulted; every other
+                    // admin-only command's CanExecute still gates on IsAdmin(userId)
+                    // internally, so this is a no-op for them (identical to the old
+                    // silently-ignored behavior).
                     if (!IsAdmin(userId))
                     {
-                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Ignoring command '{cmd}' from non-admin {userName} ({userId})");
+                        if (command != null && command.CanExecute(userId, democracyEnabled, roomOwnedByBot))
+                        {
+                            // Democracy opt-in (e.g. /skip as a public vote) is a non-admin whose
+                            // command DID take effect — "accepted" from the JSONL reader's point
+                            // of view, which is the question this event exists to answer.
+                            LogAdminCommandResult(cmd, userName, userId, "accepted");
+                            command.Execute(userName, userId, arg);
+                        }
+                        else
+                        {
+                            LogAdminCommandResult(cmd, userName, userId, "denied_not_admin");
+                            UnityEngine.Debug.Log($"[AutoLobbyPlugin] Ignoring command '{cmd}' from non-admin {userName} ({userId})");
+                        }
                         return;
                     }
 
@@ -98,6 +127,7 @@ namespace LiftoffAutoLobby
                     // Unknown admin command — old 'default' case: log and drop.
                     if (command == null)
                     {
+                        LogAdminCommandResult(cmd, userName, userId, "denied_unknown_command");
                         UnityEngine.Debug.Log($"[AutoLobbyPlugin] Unknown admin command '{cmd}' from {userName}");
                         return;
                     }
@@ -105,14 +135,15 @@ namespace LiftoffAutoLobby
                     // Single permission gate. The user is already a confirmed admin here, so a
                     // CanExecute failure means the command's room-ownership requirement is unmet;
                     // reproduce the old pre-switch "this bot does not own the room" refusal.
-                    // (democracyEnabled is false today — democracy-skip will wire it in Phase 3.)
-                    if (!command.CanExecute(userId, /* democracyEnabled */ false, roomOwnedByBot))
+                    if (!command.CanExecute(userId, democracyEnabled, roomOwnedByBot))
                     {
+                        LogAdminCommandResult(cmd, userName, userId, "denied_room_not_owned");
                         SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} <color={activeTheme.alertTagColor}>'{cmd}' cannot be executed — this bot does not own the room.</color> Transfer host to the bot from the player list, or use /private <name> to have it create/join a different room.");
                         UnityEngine.Debug.Log($"[AutoLobbyPlugin] Refusing '{cmd}' from {userName} — bot does not own the room.");
                         return;
                     }
 
+                    LogAdminCommandResult(cmd, userName, userId, "accepted");
                     command.Execute(userName, userId, arg);
                 }
                 catch (Exception ex)

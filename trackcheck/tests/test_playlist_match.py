@@ -1,14 +1,19 @@
-"""Unit tests for trackcheck.playlist_match, plus a parity test proving its
-resolution semantics are identical to orchestrator/run_headless_lobby.py's
-resolve_and_write_playlist() on the same fixture data (see playlist_match.py's
-module docstring for why this is a parity test rather than a shared import)."""
+"""Unit tests for trackcheck.playlist_match, plus a parity test proving the runtime
+resolver (dashboard.control.playlists.resolve_and_write_playlist) writes exactly what
+this module resolves, on the same fixture data.
+
+The parity test predates bot-dashboard.md's D5 extraction, when the resolver carried its
+own copy of the matching rules and this module was a port of them. The resolver now
+*imports* this module (see its docstring), so the test no longer guards a duplicate --
+it guards the writer: definition order, dedup, and the exact CSV shape the plugin parses
+out of tracks_to_rotate.txt."""
 
 import json
 import os
 
 import pytest
 
-import run_headless_lobby  # available via pytest.ini's `pythonpath = . generator orchestrator`
+from dashboard.control import playlists as control_playlists
 
 from trackcheck.playlist_match import (
     is_match,
@@ -109,14 +114,12 @@ class TestResolvePlaylist:
         assert per_entry[0]["valid_shape"] is False
 
 
-class TestParityWithOrchestratorResolver:
-    """resolve_and_write_playlist() in orchestrator/run_headless_lobby.py computes
-    project_dir from its own __file__ at call time, so pointing it at a throwaway
-    fixture repo layout is just a matter of monkeypatching that one attribute --
-    no need to touch the real playlists.json/master_tracks_list.json, and no risk to
-    the live bot (main() only runs under `if __name__ == "__main__"`, never imported)."""
+class TestParityWithRuntimeResolver:
+    """resolve_and_write_playlist() takes its two catalog paths as optional arguments, so
+    it can be pointed at a throwaway fixture pair -- no need to touch the real
+    playlists.json/master_tracks_list.json, and no risk to the live bot."""
 
-    def test_resolution_matches_trackcheck_exactly(self, tmp_path, monkeypatch):
+    def test_resolution_matches_trackcheck_exactly(self, tmp_path):
         playlists_data = {
             "parity_playlist": [
                 {"environment": "The Drawing Board", "track": "*Honk*", "mode": "Infinite Race"},
@@ -126,24 +129,20 @@ class TestParityWithOrchestratorResolver:
         }
         master_data = load_fixture("master_for_lint.json")
 
-        fake_repo = tmp_path / "fake_repo"
-        fake_orchestrator_dir = fake_repo / "orchestrator"
-        fake_orchestrator_dir.mkdir(parents=True)
-        (fake_repo / "playlists.json").write_text(json.dumps(playlists_data))
-        (fake_repo / "master_tracks_list.json").write_text(json.dumps(master_data))
-
-        # resolve_and_write_playlist() derives project_dir from
-        # os.path.dirname(os.path.dirname(os.path.abspath(__file__))) at call time --
-        # repointing __file__ at our fake orchestrator dir redirects it to the fixture
-        # files above without touching the real repo-root playlists.json.
-        monkeypatch.setattr(run_headless_lobby, "__file__", str(fake_orchestrator_dir / "run_headless_lobby.py"))
+        fake_config_dir = tmp_path / "config"
+        fake_config_dir.mkdir()
+        fixture_playlists = fake_config_dir / "playlists.json"
+        fixture_master = fake_config_dir / "master_tracks_list.json"
+        fixture_playlists.write_text(json.dumps(playlists_data))
+        fixture_master.write_text(json.dumps(master_data))
 
         plugins_dir = tmp_path / "plugins"
         plugins_dir.mkdir()
         output_file = plugins_dir / "tracks_to_rotate.txt"
 
-        run_headless_lobby.resolve_and_write_playlist(
+        control_playlists.resolve_and_write_playlist(
             "parity_playlist", shuffle_enabled=False, output_file=str(output_file),
+            playlists_path=str(fixture_playlists), master_list_path=str(fixture_master),
         )
 
         written_lines = [

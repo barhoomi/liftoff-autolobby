@@ -34,7 +34,14 @@ namespace LiftoffAutoLobby
                 // /private only when the argument was empty.
                 if (string.IsNullOrWhiteSpace(argument) && !roomOwnedByBot)
                 {
-                    SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} <color={activeTheme.alertTagColor}>'/private' cannot be executed — this bot does not own the room.</color> Transfer host to the bot from the player list, or use /private <name> to have it create/join a different room.");
+                    if (IsClientMode)
+                    {
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} <color={activeTheme.alertTagColor}>'/private' cannot be executed — you're not currently the host of this room.</color> Transfer host back to yourself from the player list, or use /private <name> to create/join a different room.");
+                    }
+                    else
+                    {
+                        SendChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} <color={activeTheme.alertTagColor}>'/private' cannot be executed — this bot does not own the room.</color> Transfer host to the bot from the player list, or use /private <name> to have it create/join a different room.");
+                    }
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Refusing '/private' from {userName} — bot does not own the room.");
                     return;
                 }

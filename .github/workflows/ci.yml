@@ -1,0 +1,69 @@
+name: CI
+
+# Push/PR gate (build-release-pipeline.md R1 item 4): catches the "works on my
+# machine" class of breakage that was previously invisible. Two independent jobs so a
+# Python-only PR isn't blocked on the plugin DLL restore, and vice versa.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  plugin-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "7.0.x"
+
+      # Same private-source restore as release.yml -- see that workflow and this feature
+      # doc's "Operator runbook" for what has to exist before this step (and therefore
+      # this whole job) can pass. The DLL bundle is versioned per Liftoff game version
+      # in the private procedural-fpv-libs repo; plugin/libs/liftoff-version.txt pins
+      # which release this commit builds against.
+      - name: Restore game reference DLLs (private source)
+        env:
+          GH_TOKEN: ${{ secrets.LIFTOFF_DLLS_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::LIFTOFF_DLLS_TOKEN secret is not set -- see 'Operator runbook' in docs/features/doing/build-release-pipeline.md."
+            exit 1
+          fi
+          tag="liftoff-$(cat plugin/libs/liftoff-version.txt)"
+          gh release download "$tag" --repo barhoomi/procedural-fpv-libs \
+            --pattern liftoff-libs.zip --output /tmp/liftoff-libs.zip
+          mkdir -p plugin/libs
+          unzip -oq /tmp/liftoff-libs.zip -d plugin/libs
+
+      - name: dotnet build (0 warnings required)
+        run: |
+          dotnet build plugin/ -c Debug /warnaserror
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create venv + install deps
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install -q --upgrade pip
+          if [ -f requirements.txt ]; then venv/bin/pip install -q -r requirements.txt; fi
+          # requirements-dev.txt closes the gap this step used to work around by
+          # hardcoding "pytest numpy" (see docs bot-dashboard.md). The fallback keeps a
+          # checkout predating that file installable.
+          if [ -f requirements-dev.txt ]; then
+            venv/bin/pip install -q -r requirements-dev.txt
+          else
+            venv/bin/pip install -q pytest numpy
+          fi
+
+      - name: bash scripts/run_tests.sh
+        run: bash scripts/run_tests.sh

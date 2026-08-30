@@ -40,27 +40,30 @@ namespace LiftoffAutoLobby
                         return;
                     }
 
-                    string[] lines = File.ReadAllLines(tracksPath);
+                    // ReadStaticTracks (Plugin.Rotation.cs) is the SAME parser the rotation
+                    // engine indexes against, so PlaylistIndex here always means exactly the
+                    // same position /track expects (bug-shuffle-toggle-and-tracks-
+                    // incompatibility.md, Option 2) -- one parser, not two independently
+                    // maintained copies that could quietly drift apart on an edge case.
+                    List<string> staticTracks = ReadStaticTracks(tracksPath);
                     var allTracks = new List<SearchResult>();
-                    int playlistIndex = 0;
-                    for (int i = 0; i < lines.Length; i++)
+                    for (int i = 0; i < staticTracks.Count; i++)
                     {
-                        string line = lines[i].Trim();
-                        if (string.IsNullOrEmpty(line) || line.StartsWith("#")) continue;
-
-                        string[] parts = line.Split(',');
-                        string trackName = parts[0].Trim();
-                        string environment = parts.Length > 1 ? parts[1].Trim() : "The Drawing Board";
-                        string gameMode = parts.Length > 2 ? parts[2].Trim() : "Classic Race";
+                        // Rightmost-split (bug-comma-in-track-name.md) -- same parser the
+                        // rotation engine uses, so a track name containing a comma (e.g.
+                        // "Iceberg, Right ahead!") never shears its own fields.
+                        string trackName, environment, gameMode;
+                        ParseTrackLine(staticTracks[i], out trackName, out environment, out gameMode);
+                        if (string.IsNullOrEmpty(environment)) environment = "The Drawing Board";
+                        if (string.IsNullOrEmpty(gameMode)) gameMode = "Classic Race";
 
                         allTracks.Add(new SearchResult
                         {
-                            PlaylistIndex = playlistIndex,
+                            PlaylistIndex = i,
                             TrackName = trackName,
                             Environment = environment,
                             GameMode = gameMode
                         });
-                        playlistIndex++;
                     }
 
                     if (allTracks.Count == 0)

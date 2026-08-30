@@ -64,7 +64,7 @@ namespace LiftoffAutoLobby
                         FieldInfo localField = playerType.GetField("IsLocal", BindingFlags.Public | BindingFlags.Instance);
                         bool isLocal = localField != null && (bool)localField.GetValue(playerObj);
 
-                        string localSuffix = isLocal ? " [bot]" : "";
+                        string localSuffix = isLocal ? (IsClientMode ? " [you]" : " [bot]") : "";
                         linesList.Add($"{i + 1}. {FormatVariable(nick)} (ID: {FormatVariable(actorNumber.ToString())}){localSuffix}");
                     }
 

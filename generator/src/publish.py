@@ -19,10 +19,12 @@ import shutil
 import subprocess
 import sys
 
+# generator/ — staging, vdf, and steamcmd artifacts are generated in here (gitignored);
+# the committed preview thumbnail lives in generator/assets/.
 PROJECT_WORKSPACE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 STAGING_DIR = os.path.join(PROJECT_WORKSPACE, "workshop_staging")
 VDF_PATH = os.path.join(PROJECT_WORKSPACE, "workshop_build.vdf")
-PREVIEW_PATH = os.path.join(PROJECT_WORKSPACE, "preview.jpg")
+PREVIEW_PATH = os.path.join(PROJECT_WORKSPACE, "assets", "preview.jpg")
 
 STEAMCMD_PATH = "/usr/games/steamcmd"
 STEAM_APP_ID = "410340"  # Liftoff App ID

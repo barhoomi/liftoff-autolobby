@@ -5,6 +5,22 @@ import os
 from src.generator import generate_procedural_track
 from src.io import save_track_and_race
 
+
+def extract_track_name_from_rotation_line(line):
+    """Extract just the track-name field from one ``tracks_to_rotate.txt`` line
+    ("TrackName, Environment, GameMode"), rightmost-split into exactly 3 fields so a
+    comma inside the track name itself (e.g. the real Liftoff track "Iceberg, Right
+    ahead!") is preserved verbatim instead of shearing at the first comma. Identical to
+    a plain ``split(",")[0]`` for a line with <=3 fields, so every existing
+    (comma-free-name) file behaves the same as before.
+    See docs/features/doing/bug-comma-in-track-name.md.
+    """
+    parts = line.split(",")
+    if len(parts) <= 3:
+        return parts[0].strip() if parts else ""
+    return ",".join(parts[:-2]).strip()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate a procedural Liftoff track and race.")
     parser.add_argument("--name", type=str, default="Procedural Loop 1", help="Display name of the track")
@@ -59,7 +75,7 @@ def main():
         # Update rotation configuration file
         try:
             import json
-            config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lobby_config.json")
+            config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "lobby_config.json")
             if os.path.exists(config_path):
                 with open(config_path, "r") as f:
                     config = json.load(f)
@@ -81,13 +97,14 @@ def main():
                     
                     tracks_file = os.path.join(plugins_dir, "tracks_to_rotate.txt")
                     
-                    # Read existing tracks to prevent duplicates
+                    # Read existing tracks to prevent duplicates.
                     existing_tracks = []
                     if os.path.exists(tracks_file):
                         with open(tracks_file, "r") as f:
                             for line in f:
-                                if line.strip() and not line.strip().startswith("#"):
-                                    existing_tracks.append(line.split(",")[0].strip())
+                                stripped = line.strip()
+                                if stripped and not stripped.startswith("#"):
+                                    existing_tracks.append(extract_track_name_from_rotation_line(stripped))
                                     
                     # If this track is not in rotation, append it!
                     if args.name not in existing_tracks:

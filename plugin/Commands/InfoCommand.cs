@@ -35,7 +35,9 @@ namespace LiftoffAutoLobby
                 if (TryGetRoomInfo(out isVisible, out roomName, out maxPlayers, out playerCount))
                 {
                     string visibility = isVisible ? "public" : "private";
-                    string ownership = roomOwnedByBot ? "bot-owned" : $"<color={activeTheme.alertTagColor}>NOT bot-owned — settings/rotation unavailable</color>";
+                    string ownership = IsClientMode
+                        ? (roomOwnedByBot ? "host-owned" : $"<color={activeTheme.alertTagColor}>NOT host-owned — settings/rotation unavailable</color>")
+                        : (roomOwnedByBot ? "bot-owned" : $"<color={activeTheme.alertTagColor}>NOT bot-owned — settings/rotation unavailable</color>");
                     lines.Add($"Room: {FormatVariable($"{roomName}")} | Visibility: {FormatVariable($"{visibility}")} | Players: {FormatVariable($"{playerCount}/{maxPlayers}")} | {ownership}");
                 }
 

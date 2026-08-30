@@ -161,5 +161,12 @@ class EventLogger:
     def shutdown(self, reason):
         return self.emit("shutdown", reason=reason)
 
+    def decision(self, kind, detail):
+        """A notable orchestrator-side decision, same ``kind``/``detail`` shape the
+        plugin half already emits (see the feature doc's plugin catalogue). Used by the
+        first-run track bootstrap (``dashboard/control/bootstrap.py``) to record that it
+        armed and that it completed."""
+        return self.emit("decision", kind=kind, detail=detail)
+
     def error(self, message, context=None, playlist=None):
         return self.emit("error", message=message, context=context, playlist=playlist)

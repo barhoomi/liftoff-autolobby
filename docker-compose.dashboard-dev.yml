@@ -1,0 +1,34 @@
+# Live-edit overlay for the dashboard sidecar (see dashboard/README.md). Since the app
+# layer moved to the private liftoff-dashboard repo, this overlay is no longer optional:
+# the bind-mounted directory is the MERGED package -- control/ tracked by this repo's
+# clone, the app files rsync'd in (untracked) by the private repo's deploys -- and the
+# image alone has no app to run (its /app/dashboard holds only control/).
+#
+# Apply ON THE HOST RUNNING THE STACK, together with the base file:
+#
+#   DASHBOARD_SRC=/home/<you>/liftoff-autolobby/dashboard \
+#     docker compose -f docker-compose.yml -f docker-compose.dashboard-dev.yml up -d dashboard
+#
+# What it changes, and nothing else:
+#
+#   1. Bind-mounts a host checkout's dashboard/ package over the copy baked into the
+#      image, read-only. The image's /app/dashboard is otherwise frozen at build time --
+#      this is what makes "rsync new code to the host" visible to the container at all
+#      without an image rebuild.
+#   2. Appends --reload to the entrypoint: dashboard/__main__.py hands uvicorn the
+#      create_app factory as an import string, so uvicorn watches the (bind-mounted)
+#      source and restarts its worker ~1s after any .py file changes. Static assets
+#      (index.html/app.js/styles.css) are served straight from disk and need no reload
+#      at all.
+#
+# DASHBOARD_SRC has no default on purpose: a wrong default silently masks the baked-in
+# code with a stale checkout. Compose refuses to start until you point it at the real
+# dashboard/ directory (must be readable by uid 1000 -- the container's botuser).
+#
+# The bot service is untouched: dashboard code deploys can never restart the game.
+
+services:
+  dashboard:
+    entrypoint: ["/usr/bin/tini", "--", "python3", "-m", "dashboard", "--reload"]
+    volumes:
+      - ${DASHBOARD_SRC:?point DASHBOARD_SRC at the checkout's dashboard/ directory}:/app/dashboard:ro

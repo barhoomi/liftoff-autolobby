@@ -95,6 +95,12 @@ plugin/bin/
 plugin/obj/
 LiftoffAutoLobby/
 
+# Game reference assemblies (Option 1 licensing decision, docs/features/doing/
+# build-release-pipeline.md section 2/2a) -- not committed; plugin/libs/README.md explains
+# how to populate this directory locally. README.md itself is not matched by these patterns.
+plugin/libs/*.dll
+plugin/libs/*.decompiled.cs
+
 # Runtime / generated data files
 tracks_to_rotate.txt
 master_tracks_list.json
@@ -114,3 +120,32 @@ generator/.steamcmd_home/
 liftoff_pro_username.txt
 liftoff_pro_password.txt
 Credentials.xml
+
+# Private project material — kept locally only; purged from public history (2026-07-27 rewrite)
+/docs/
+/.claude/
+/.agents/
+/CLAUDE.md
+/AGENTS.md
+# apm agent-config (built by ~/repos/agent-registry/bin/apm) — deliberately NOT
+# committed in this public repo, against apm's usual model (decision 2026-08-30)
+/agents.json
+/agents-src/
+/agents.lock.json
+/GEMINI.md
+/gemini_execution_plan.md
+.obsidian/
+dist/
+
+# >>> apm generated (do not edit this block)
+/.claude/agents/implementer.md
+/.claude/agents/spec-author.md
+/.claude/skills/brainstorm/SKILL.md
+/.claude/skills/conductor/SKILL.md
+/.claude/skills/shepherd-agents/SKILL.md
+/.claude/skills/spec/SKILL.md
+/.claude/skills/spec/TEMPLATE.md
+/AGENTS.md
+/CLAUDE.md
+/agents.lock.json.tmp
+# <<< apm generated

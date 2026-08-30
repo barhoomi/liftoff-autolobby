@@ -1,0 +1,95 @@
+name: Release
+
+# Runs on a `v*` tag push. Builds the plugin once, produces the two release zips
+# (docs/features/doing/build-release-pipeline.md "Package layout"), drafts a GitHub
+# Release with them attached, and separately builds+pushes the server Docker image.
+#
+# NOTE (build-release-pipeline.md acceptance criteria): this workflow is committed but
+# not yet runnable end-to-end -- the build-packages job needs an operator-configured
+# private source for the game reference DLLs (Option-1 licensing decision; see that doc's
+# "Operator runbook" section). Until the LIFTOFF_DLLS_TOKEN secret exists, this job
+# fails at the "Restore game reference DLLs" step, on purpose and loudly.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# The default GITHUB_TOKEN is read-only on this repo; the draft-release step needs
+# contents:write and the GHCR push needs packages:write (both 403'd on the first
+# v1.0.0 run without these).
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "7.0.x"
+
+      # The DLL bundle is versioned per Liftoff game version in the private
+      # procedural-fpv-libs repo; plugin/libs/liftoff-version.txt pins which release
+      # this commit builds against.
+      - name: Restore game reference DLLs (private source)
+        env:
+          GH_TOKEN: ${{ secrets.LIFTOFF_DLLS_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::LIFTOFF_DLLS_TOKEN secret is not set -- see 'Operator runbook' in docs/features/doing/build-release-pipeline.md for how to create and configure the private DLL source. This is an operator setup step, not something this workflow can do for itself."
+            exit 1
+          fi
+          tag="liftoff-$(cat plugin/libs/liftoff-version.txt)"
+          gh release download "$tag" --repo barhoomi/procedural-fpv-libs \
+            --pattern liftoff-libs.zip --output /tmp/liftoff-libs.zip
+          mkdir -p plugin/libs
+          unzip -oq /tmp/liftoff-libs.zip -d plugin/libs
+
+      - name: Verify tag matches Directory.Build.props version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PROPS_VERSION="$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props)"
+          if [ "$TAG" != "$PROPS_VERSION" ]; then
+            echo "::error::Tag v$TAG does not match Directory.Build.props <Version>$PROPS_VERSION</Version> -- bump Directory.Build.props and re-tag."
+            exit 1
+          fi
+
+      - name: Build and package both zips
+        run: bash infra/package_release.sh
+
+      - name: Draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/liftoff-autolobby-player-v*.zip
+            dist/liftoff-autolobby-server-v*.zip
+
+  server-image:
+    runs-on: ubuntu-latest
+    # No dependency on build-packages / the private DLL source: the Dockerfile compiles
+    # the plugin at container *runtime* against the mounted Liftoff volume, not at
+    # `docker build` time (see Dockerfile's own header comment), so this job has no
+    # licensing-DLL problem and can run standalone.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:latest

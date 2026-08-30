@@ -26,7 +26,7 @@ namespace LiftoffAutoLobby
                 // dispatch gate exactly (same CanExecute), so admin-only / ownership /
                 // democracy-gated commands are hidden from users who cannot run them.
                 var visibleCommands = CommandRegistry.Commands
-                    .Where(cmd => cmd.CanExecute(userId, /* democracyEnabled */ false, roomOwnedByBot))
+                    .Where(cmd => cmd.CanExecute(userId, democracyEnabled, roomOwnedByBot))
                     .OrderBy(cmd => cmd.Name, System.StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
