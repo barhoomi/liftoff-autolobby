@@ -60,8 +60,11 @@ __pycache__/
 *.pyd
 .Python
 env/
-venv/
-.venv/
+# Both the directory and the bare name: a git worktree gets `venv` as a SYMLINK to the
+# main checkout's venv, and `venv/` (trailing slash = directories only) does not match a
+# symlink -- which is how the symlink once got committed and broke CI's venv creation.
+venv
+.venv
 pip-log.txt
 pip-delete-this-directory.txt
 develop-eggs/
