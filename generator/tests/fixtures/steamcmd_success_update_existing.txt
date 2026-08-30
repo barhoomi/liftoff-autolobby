@@ -1,0 +1,9 @@
+Logging in user 'fpv_bot' to Steam Public...OK
+Waiting for user info...OK
+ - Setting content directory to '/home/dev-user/Projects/procedural-fpv/generator/workshop_staging'.
+ - Setting title for item to 'Procedural FPV - Proc Batch 1'.
+Uploading item content...
+ - Upload complete.
+Committing item changes...
+Update published for item 3751155174.
+Logging out
