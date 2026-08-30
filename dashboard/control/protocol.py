@@ -26,6 +26,7 @@ are only ever replaced atomically, so a reader either sees the old file or the n
 
 import errno
 import os
+import re
 
 try:  # POSIX only; the bot runs on Linux, but keep the module importable anywhere.
     import fcntl
@@ -57,6 +58,15 @@ WRITABLE = {
     "skip_now.txt": "Present = admin-requested immediate rotation; the plugin deletes it "
                      "on consumption (bot-dashboard.md skip-now fix), so this is a "
                      "one-shot request, not a toggled flag.",
+    "say_<seq>.txt": "Sequenced operator chat message (dashboard-chat-send.md), e.g. "
+                      "'say_1.txt', 'say_2.txt'. Write via enqueue_say(), never directly -- "
+                      "the sequence number is assigned under the control lock by scanning "
+                      "existing say_*.txt files, so two writers can never collide. The "
+                      "plugin consumes files in ascending numeric order on its 1s tick, "
+                      "sends the content verbatim as plain chat text, and deletes each file "
+                      "after sending (same one-shot, plugin-deletes convention as "
+                      "skip_now.txt). This is a documentation-only entry, not a literal "
+                      "filename -- see enqueue_say()'s docstring for the real key format.",
 }
 
 # Plugin-owned runtime state. The plugin writes these; the control plane may ONLY reset
@@ -77,6 +87,17 @@ READ_ONLY = {
 }
 
 LOCK_FILENAME = ".control.lock"
+
+# dashboard-chat-send.md: sequenced operator chat message files, "say_<n>.txt" (n >= 1).
+# Matches the plugin's own consumer-side pattern (Plugin.GameRoom.cs).
+SAY_FILE_RE = re.compile(r"^say_(\d+)\.txt$")
+
+# Sane upper bound on one operator-typed chat message. The plugin's SendChatMessage
+# already splits anything over CHAT_MAX_CHARS (220) into multiple tag-safe chat lines, so
+# this isn't about the game's per-line limit -- it's about not letting one operator
+# request turn into an unbounded wall of chat spam. ~10 chat lines' worth is generous for
+# an interactive "reply in context" use case.
+MAX_SAY_MESSAGE_LENGTH = 2000
 
 
 def parse_track_line(line):
@@ -344,3 +365,57 @@ class ProtocolDir:
         wording used elsewhere for a human reading the directory.
         """
         self.write_text("skip_now.txt", "true")
+
+    def enqueue_say(self, message):
+        """Enqueue an operator chat message for the plugin to send verbatim, as plain
+        text, on its next 1s tick (dashboard-chat-send.md).
+
+        Writes a new sequenced one-shot file ``say_<n>.txt`` where ``n`` is one past the
+        highest existing ``say_*.txt`` sequence number (starting at 1). The scan-then-
+        write is done under a single acquisition of ``self.lock()`` so two concurrent
+        callers (dashboard + orchestrator, or two dashboard requests) can never be
+        assigned the same sequence number -- the exact race a single ``say_now.txt``
+        flag file would have (a second send within one plugin poll tick silently
+        overwriting the first, losing a message). The plugin consumes files in
+        ascending numeric order and deletes each one after sending, so this is a
+        one-shot request per file, never a toggled/replayed flag (same convention as
+        ``skip_now.txt``).
+
+        Raises ``ValueError`` for an empty/whitespace-only message or one over
+        ``MAX_SAY_MESSAGE_LENGTH`` characters -- both are rejected here, before a file
+        ever reaches the plugin, rather than relying on the plugin to cope with junk.
+
+        Returns the assigned sequence number.
+        """
+        if message is None:
+            raise ValueError("message is required")
+        text = message.strip()
+        if not text:
+            raise ValueError("message must not be empty or whitespace-only")
+        if len(text) > MAX_SAY_MESSAGE_LENGTH:
+            raise ValueError(
+                "message is {} characters, over the {}-character limit".format(
+                    len(text), MAX_SAY_MESSAGE_LENGTH
+                )
+            )
+        with self.lock():
+            os.makedirs(self.plugins_dir, exist_ok=True)
+            seq = self._next_say_sequence()
+            self._atomic_write("say_{}.txt".format(seq), text)
+        return seq
+
+    def _next_say_sequence(self):
+        """One past the highest existing ``say_*.txt`` sequence number, or 1 if none
+        exist. Callers must hold ``self.lock()`` -- this only scans, it does not lock
+        itself, so the scan and the subsequent write are one atomic unit from the
+        perspective of any other writer taking the same lock."""
+        highest = 0
+        try:
+            names = os.listdir(self.plugins_dir)
+        except OSError:
+            names = []
+        for name in names:
+            m = SAY_FILE_RE.match(name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+        return highest + 1
