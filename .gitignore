@@ -125,7 +125,25 @@ Credentials.xml
 /.agents/
 /CLAUDE.md
 /AGENTS.md
+# apm agent-config (built by ~/repos/agent-registry/bin/apm) — deliberately NOT
+# committed in this public repo, against apm's usual model (decision 2026-08-30)
+/agents.json
+/agents-src/
+/agents.lock.json
 /GEMINI.md
 /gemini_execution_plan.md
 .obsidian/
 dist/
+
+# >>> apm generated (do not edit this block)
+/.claude/agents/implementer.md
+/.claude/agents/spec-author.md
+/.claude/skills/brainstorm/SKILL.md
+/.claude/skills/conductor/SKILL.md
+/.claude/skills/shepherd-agents/SKILL.md
+/.claude/skills/spec/SKILL.md
+/.claude/skills/spec/TEMPLATE.md
+/AGENTS.md
+/CLAUDE.md
+/agents.lock.json.tmp
+# <<< apm generated
