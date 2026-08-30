@@ -46,8 +46,20 @@ from .playlists import (
     resolve_and_write_playlist,
     round_robin_shuffle_by_environment,
 )
-from .protocol import READ_ONLY, RESET_ONLY, WRITABLE, ProtocolDir, ProtocolOwnershipError
+from .protocol import (
+    READ_ONLY,
+    RESET_ONLY,
+    WRITABLE,
+    ProtocolDir,
+    ProtocolOwnershipError,
+    parse_workshop_download_result,
+)
 from .shuffle_order import compute_tracks_signature, read_active_order
+from .workshop_download import (
+    DownloadOutcome,
+    download_workshop_item,
+    wait_for_result,
+)
 
 __all__ = [
     "BOOTSTRAP_DEFAULT_TIMEOUT_SECONDS",
@@ -56,6 +68,7 @@ __all__ = [
     "NullLogger",
     "PlaylistError",
     "PlaylistNotFoundError",
+    "DownloadOutcome",
     "ProtocolDir",
     "ProtocolOwnershipError",
     "READ_ONLY",
@@ -66,6 +79,7 @@ __all__ = [
     "bootstrap_timeout",
     "config_dir",
     "compute_tracks_signature",
+    "download_workshop_item",
     "cross_validate_tracks",
     "lobby_config_path",
     "load_lobby_config",
@@ -74,6 +88,7 @@ __all__ = [
     "make_event_logger",
     "master_list_has_tracks",
     "master_tracks_path",
+    "parse_workshop_download_result",
     "player_log_candidates",
     "player_log_path",
     "playlists_path",
@@ -86,4 +101,5 @@ __all__ = [
     "resolve_plugins_dir",
     "round_robin_shuffle_by_environment",
     "track_dump_ready",
+    "wait_for_result",
 ]
