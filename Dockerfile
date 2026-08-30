@@ -54,7 +54,11 @@ RUN wget -q https://packages.microsoft.com/config/ubuntu/22.04/packages-microsof
 # --- Dashboard runtime dependencies (RUNTIME only -- not requirements-dev.txt) ---
 # The `dashboard` compose service runs `python3 -m dashboard` from THIS image, so fastapi +
 # uvicorn + pydantic have to be installed here; without them the sidecar dies immediately
-# with `ModuleNotFoundError: No module named 'uvicorn'` (hit live 2026-08-05). Deliberately
+# with `ModuleNotFoundError: No module named 'uvicorn'` (hit live 2026-08-05). The app
+# code itself (dashboard/{api,write_api,__main__}.py + static/) is NOT in this image any
+# more -- it lives in the private liftoff-dashboard repo and arrives via the compose
+# overlay's bind mount -- but the interpreter that imports these packages still runs in
+# this container, so the pip layer stays. Deliberately
 # a separate, runtime-only requirements file rather than requirements-dev.txt: the dev file
 # also carries pytest/numpy/httpx, and a production image has no business shipping the test
 # stack. Copied on its own, before the source COPY below, so editing the repo doesn't

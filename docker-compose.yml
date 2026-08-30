@@ -82,7 +82,13 @@ services:
     restart: "no"
 
   # docs/features/doing/bot-dashboard.md -- FastAPI monitoring/control sidecar. Same image
-  # as `bot` (see the `*bot-image` anchor above), but its ENTRYPOINT is overridden outright
+  # as `bot` (see the `*bot-image` anchor above). NOTE: the app layer (dashboard/{api,
+  # write_api,__main__}.py + static/) moved to the private liftoff-dashboard repo, so the
+  # image bakes only dashboard/control -- this service now REQUIRES the
+  # docker-compose.dashboard-dev.yml overlay, whose bind mount supplies the app files
+  # (rsync'd by that repo's deploys) merged with this repo's control/. Without the
+  # overlay, `python3 -m dashboard` has no __main__ to run.
+  # Its ENTRYPOINT is overridden outright
   # (not just `command:`): the image's default entrypoint is docker-entrypoint.sh, which
   # unconditionally runs the full Xvfb/Steam/game-install/plugin-build boot sequence and
   # ends in a hardcoded `exec` into the orchestrator -- it does not respect `command:`, so
