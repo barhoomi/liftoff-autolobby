@@ -42,18 +42,15 @@ def gather_tracks_and_races():
     custom_tracks_dir = os.path.expanduser("~/.config/unity3d/LuGus Studios/Liftoff/Tracks")
     custom_races_dir = os.path.expanduser("~/.config/unity3d/LuGus Studios/Liftoff/Races")
     
-    # Workshop paths
-    workshop_candidates = [
-        f"/home/{current_user}/.steam/debian-installation/steamapps/workshop/content/410340",
-        f"/home/{current_user}/.steam/steam/steamapps/workshop/content/410340",
-        f"/home/{current_user}/.local/share/Steam/steamapps/workshop/content/410340"
-    ]
-    workshop_dir = None
-    for path in workshop_candidates:
-        if os.path.exists(path):
-            workshop_dir = path
-            break
-            
+    # Workshop paths. The candidate list moved to orchestrator/workshop_items.py so the
+    # in-game downloader (docs/features/doing/workshop-ingame-download.md) resolves the same
+    # directory this gatherer scans -- one answer to "where did the item land", not two
+    # (AGENTS.md rule 4). Same candidates in the same order as the list that used to be
+    # inlined here, so an existing host resolves exactly what it always did.
+    from workshop_items import workshop_content_root
+    workshop_dir = workshop_content_root()
+
+
     # Game installation paths
     config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "lobby_config.json")
     game_tracks_dir = None

@@ -26,6 +26,7 @@ are only ever replaced atomically, so a reader either sees the old file or the n
 
 import errno
 import os
+import re
 
 try:  # POSIX only; the bot runs on Linux, but keep the module importable anywhere.
     import fcntl
@@ -57,6 +58,19 @@ WRITABLE = {
     "skip_now.txt": "Present = admin-requested immediate rotation; the plugin deletes it "
                      "on consumption (bot-dashboard.md skip-now fix), so this is a "
                      "one-shot request, not a toggled flag.",
+    "say_<seq>.txt": "Sequenced operator chat message (dashboard-chat-send.md), e.g. "
+                      "'say_1.txt', 'say_2.txt'. Write via enqueue_say(), never directly -- "
+                      "the sequence number is assigned under the control lock by scanning "
+                      "existing say_*.txt files, so two writers can never collide. The "
+                      "plugin consumes files in ascending numeric order on its 1s tick, "
+                      "sends the content verbatim as plain chat text, and deletes each file "
+                      "after sending (same one-shot, plugin-deletes convention as "
+                      "skip_now.txt). This is a documentation-only entry, not a literal "
+                      "filename -- see enqueue_say()'s docstring for the real key format.",
+    "workshop_download_request.txt": "One Steam Workshop published-file id (decimal) for the "
+                                     "plugin to download in-game; the plugin deletes it the "
+                                     "instant it starts processing, so it is a one-shot "
+                                     "request like skip_now.txt (workshop-ingame-download.md).",
 }
 
 # Plugin-owned runtime state. The plugin writes these; the control plane may ONLY reset
@@ -67,16 +81,34 @@ RESET_ONLY = {
     "shuffle_order.txt": "Derived shuffle deal (plugin-owned; control plane may only clear).",
 }
 
-# Plugin-produced data the control plane reads and must never write.
+# Plugin-produced data the control plane reads and must never write. One of them
+# (workshop_download_result.txt) is nonetheless *deleted* by the control plane, through the
+# single sanctioned consume_workshop_download_result() below -- the same shape as
+# rotation_state.txt's reset: plugin owns the content, the control plane owns exactly one
+# documented mutation of it.
 READ_ONLY = {
     "track_mode_availability.json": "Ground-truth (environment, mode) -> tracks dump from the game UI.",
     "ui_tracks_dump.json": "Flat environment -> tracks dump from the game UI. The only way "
                            "official (asset-bundled) tracks are ever discovered, so it is what "
                            "gather_tracks.py reconciles master_tracks_list.json from, and what "
                            "the first-run bootstrap waits for (control/bootstrap.py).",
+    "workshop_download_result.txt": "Outcome of an in-game workshop download, written by the "
+                                    "plugin as '<id>|<ok|fail>|<reason>'. Consumed (read then "
+                                    "deleted) via consume_workshop_download_result().",
 }
 
 LOCK_FILENAME = ".control.lock"
+
+# dashboard-chat-send.md: sequenced operator chat message files, "say_<n>.txt" (n >= 1).
+# Matches the plugin's own consumer-side pattern (Plugin.GameRoom.cs).
+SAY_FILE_RE = re.compile(r"^say_(\d+)\.txt$")
+
+# Sane upper bound on one operator-typed chat message. The plugin's SendChatMessage
+# already splits anything over CHAT_MAX_CHARS (220) into multiple tag-safe chat lines, so
+# this isn't about the game's per-line limit -- it's about not letting one operator
+# request turn into an unbounded wall of chat spam. ~10 chat lines' worth is generous for
+# an interactive "reply in context" use case.
+MAX_SAY_MESSAGE_LENGTH = 2000
 
 
 def parse_track_line(line):
@@ -106,6 +138,30 @@ def parse_track_line(line):
     environment = parts[-2].strip()
     track = ",".join(parts[:-2]).strip()
     return track, environment, mode
+
+
+def parse_workshop_download_result(raw):
+    """Parse one ``workshop_download_result.txt`` line into
+    ``{"published_id", "ok", "reason"}``, or None if it isn't a complete record yet.
+
+    Format (written by ``plugin/WorkshopDownloader.cs``):
+    ``<published_file_id>|<ok|fail>|<reason>``, reason empty on a plain success.
+
+    Returning None for anything malformed is deliberate and load-bearing: the plugin
+    writes this file with ``File.WriteAllText`` (not an atomic replace), so a poller can
+    genuinely observe a half-written line. "Not parseable" therefore means "not ready
+    yet, look again next tick" -- never "failed". A real failure always arrives as a
+    complete ``<id>|fail|<reason>`` line.
+    """
+    if raw is None:
+        return None
+    parts = raw.strip().split("|", 2)
+    if len(parts) != 3:
+        return None
+    published_id, status, reason = (p.strip() for p in parts)
+    if not published_id or status not in ("ok", "fail"):
+        return None
+    return {"published_id": published_id, "ok": status == "ok", "reason": reason}
 
 
 class ProtocolOwnershipError(RuntimeError):
@@ -262,6 +318,30 @@ class ProtocolDir:
         with self.lock():
             self._atomic_write("rotation_state.txt", "0")
 
+    def read_workshop_download_result(self):
+        """Parsed ``workshop_download_result.txt``, or None when absent/half-written."""
+        return parse_workshop_download_result(self.read_text("workshop_download_result.txt"))
+
+    def consume_workshop_download_result(self):
+        """Read the result file and delete it, returning the parsed record (or None).
+
+        The ONLY sanctioned mutation of ``workshop_download_result.txt`` from the control
+        plane (it is plugin-produced, hence in READ_ONLY). Consuming rather than merely
+        reading is what keeps it a one-shot signal: leaving it behind would make the next
+        download request read a stale outcome. A file present but not yet parseable is
+        left alone -- deleting a half-written line would destroy the real result.
+        """
+        with self.lock():
+            record = self.read_workshop_download_result()
+            if record is None:
+                return None
+            try:
+                os.remove(self.path("workshop_download_result.txt"))
+            except OSError as e:
+                if e.errno != errno.ENOENT:
+                    raise
+            return record
+
     def clear_shuffle_order(self):
         """Delete the plugin's persisted shuffle deal so it re-deals from scratch. The
         ONLY sanctioned mutation of ``shuffle_order.txt`` from the control plane."""
@@ -333,6 +413,25 @@ class ProtocolDir:
             return True
         return self.delete("override_game_mode.txt")
 
+    def request_workshop_download(self, published_id):
+        """Ask the plugin to download one workshop item in-game (no restart).
+
+        One-shot, like ``trigger_skip_now``: the plugin deletes the file the instant it
+        starts processing it, so there is no "cancel" side and no second copy of "is a
+        download pending" to keep in sync -- the request file's existence *is* that state
+        until the plugin takes it. Content is a bare decimal id, nothing else; the plugin
+        answers ``bad_id`` for anything it cannot parse, so validation lives in exactly
+        one place rather than being duplicated here -- the one exception is an *empty*
+        id, refused outright because an empty request file is not a protocol message at
+        all: the plugin would have no id to echo back, and its result line would be
+        unparseable, so the requester would sit through its whole timeout instead of
+        being told anything.
+        """
+        value = str(published_id).strip()
+        if not value:
+            raise ValueError("workshop_download_request.txt needs a published file id")
+        self.write_text("workshop_download_request.txt", value)
+
     def trigger_skip_now(self):
         """One-shot immediate-rotation request (bot-dashboard.md skip-now fix).
 
@@ -344,3 +443,57 @@ class ProtocolDir:
         wording used elsewhere for a human reading the directory.
         """
         self.write_text("skip_now.txt", "true")
+
+    def enqueue_say(self, message):
+        """Enqueue an operator chat message for the plugin to send verbatim, as plain
+        text, on its next 1s tick (dashboard-chat-send.md).
+
+        Writes a new sequenced one-shot file ``say_<n>.txt`` where ``n`` is one past the
+        highest existing ``say_*.txt`` sequence number (starting at 1). The scan-then-
+        write is done under a single acquisition of ``self.lock()`` so two concurrent
+        callers (dashboard + orchestrator, or two dashboard requests) can never be
+        assigned the same sequence number -- the exact race a single ``say_now.txt``
+        flag file would have (a second send within one plugin poll tick silently
+        overwriting the first, losing a message). The plugin consumes files in
+        ascending numeric order and deletes each one after sending, so this is a
+        one-shot request per file, never a toggled/replayed flag (same convention as
+        ``skip_now.txt``).
+
+        Raises ``ValueError`` for an empty/whitespace-only message or one over
+        ``MAX_SAY_MESSAGE_LENGTH`` characters -- both are rejected here, before a file
+        ever reaches the plugin, rather than relying on the plugin to cope with junk.
+
+        Returns the assigned sequence number.
+        """
+        if message is None:
+            raise ValueError("message is required")
+        text = message.strip()
+        if not text:
+            raise ValueError("message must not be empty or whitespace-only")
+        if len(text) > MAX_SAY_MESSAGE_LENGTH:
+            raise ValueError(
+                "message is {} characters, over the {}-character limit".format(
+                    len(text), MAX_SAY_MESSAGE_LENGTH
+                )
+            )
+        with self.lock():
+            os.makedirs(self.plugins_dir, exist_ok=True)
+            seq = self._next_say_sequence()
+            self._atomic_write("say_{}.txt".format(seq), text)
+        return seq
+
+    def _next_say_sequence(self):
+        """One past the highest existing ``say_*.txt`` sequence number, or 1 if none
+        exist. Callers must hold ``self.lock()`` -- this only scans, it does not lock
+        itself, so the scan and the subsequent write are one atomic unit from the
+        perspective of any other writer taking the same lock."""
+        highest = 0
+        try:
+            names = os.listdir(self.plugins_dir)
+        except OSError:
+            names = []
+        for name in names:
+            m = SAY_FILE_RE.match(name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+        return highest + 1

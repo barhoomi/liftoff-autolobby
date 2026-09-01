@@ -1,0 +1,25 @@
+Redirecting stderr to '/home/fpv_bot/Steam/logs/stderr.txt'
+[  0%] Checking for available updates...
+[----] Verifying installation...
+Steam Console Client (c) Valve Corporation - version 1721242702
+-- type 'quit' to exit --
+Loading Steam API...OK
+
+Logging in user 'fpv_bot' to Steam Public...OK
+Waiting for user info...OK
+ - Setting content directory to '/home/dev-user/Projects/procedural-fpv/generator/workshop_staging'.
+ - Setting preview file for item to '/home/dev-user/Projects/procedural-fpv/generator/preview.jpg'.
+ - Setting title for item to 'Procedural FPV - Proc Batch 1'.
+ - Setting description for item.
+ - Setting change note for item.
+ - Setting visibility for item to 0.
+Uploading item content...
+ - Preparing content...
+ - Uploading content (1.4 MB / 1.4 MB) 100% ...
+ - Upload complete.
+Committing item changes...
+Created new item with ID 1234567890.
+Workshop item created successfully! You can view it here:
+https://steamcommunity.com/sharedfiles/filedetails/?id=1234567890
+Logging out
+Waiting for cache to finish flushing... done.

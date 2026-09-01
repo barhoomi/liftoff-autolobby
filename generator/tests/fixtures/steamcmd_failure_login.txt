@@ -1,0 +1,9 @@
+Redirecting stderr to '/home/fpv_bot/Steam/logs/stderr.txt'
+[  0%] Checking for available updates...
+[----] Verifying installation...
+Steam Console Client (c) Valve Corporation - version 1721242702
+-- type 'quit' to exit --
+Loading Steam API...OK
+
+Logging in user 'fpv_bot' to Steam Public...FAILED (Invalid Login Auth Code)
+FAILED login with result code Invalid Login Auth Code

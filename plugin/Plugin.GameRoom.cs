@@ -47,6 +47,12 @@ namespace LiftoffAutoLobby
                 return;
             }
 
+            // dashboard-chat-send.md: consume any operator-injected chat messages queued by the
+            // control plane. Real logic lives in Plugin.Chat.cs (ProcessOperatorSayQueue) — kept
+            // to one poll call here since a later feature (workshop-ingame-download) adds its own
+            // poll to this same tick handler.
+            ProcessOperatorSayQueue();
+
             // Flush any chat messages that were queued while the chat panel wasn't available yet
             // (e.g. sent from a Photon callback while still on the MultiplayerMenu screen).
             if (pendingRoomChatMessages.Count > 0)

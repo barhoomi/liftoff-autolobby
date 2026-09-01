@@ -2,6 +2,11 @@
 *.log
 # Structured JSONL event logs (orchestrator + plugin), default logs/ dir
 logs/
+
+# Rejected workshop items moved aside by orchestrator/workshop_items.py (default
+# quarantine/ dir, override with FPV_QUARANTINE_DIR). Real game content + a manifest;
+# never source, never committed.
+quarantine/
 *.jsonl
 npm-debug.log*
 yarn-debug.log*
@@ -55,8 +60,11 @@ __pycache__/
 *.pyd
 .Python
 env/
-venv/
-.venv/
+# Both the directory and the bare name: a git worktree gets `venv` as a SYMLINK to the
+# main checkout's venv, and `venv/` (trailing slash = directories only) does not match a
+# symlink -- which is how the symlink once got committed and broke CI's venv creation.
+venv
+.venv
 pip-log.txt
 pip-delete-this-directory.txt
 develop-eggs/
@@ -110,6 +118,8 @@ bot_*.txt
 generator/workshop_config.json
 generator/workshop_build.vdf
 generator/staging/
+generator/workshop_staging/
+generator/.steamcmd_home/
 
 # Docker container local config (copy of .env.example, filled in per-machine)
 .env
@@ -125,7 +135,25 @@ Credentials.xml
 /.agents/
 /CLAUDE.md
 /AGENTS.md
+# apm agent-config (built by ~/repos/agent-registry/bin/apm) — deliberately NOT
+# committed in this public repo, against apm's usual model (decision 2026-08-30)
+/agents.json
+/agents-src/
+/agents.lock.json
 /GEMINI.md
 /gemini_execution_plan.md
 .obsidian/
 dist/
+
+# >>> apm generated (do not edit this block)
+/.claude/agents/implementer.md
+/.claude/agents/spec-author.md
+/.claude/skills/brainstorm/SKILL.md
+/.claude/skills/conductor/SKILL.md
+/.claude/skills/shepherd-agents/SKILL.md
+/.claude/skills/spec/SKILL.md
+/.claude/skills/spec/TEMPLATE.md
+/AGENTS.md
+/CLAUDE.md
+/agents.lock.json.tmp
+# <<< apm generated

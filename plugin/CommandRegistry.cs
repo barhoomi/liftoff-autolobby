@@ -45,6 +45,7 @@ namespace LiftoffAutoLobby
                 RegisterCommand(new ExtendCommand());
                 RegisterCommand(new ShuffleCommand());
                 RegisterCommand(new PlaylistCommand());
+                RegisterCommand(new DlCommand());
                 RegisterCommand(new ModeCommand());
                 RegisterCommand(new KickCommand());
                 RegisterCommand(new MaintenanceCommand());

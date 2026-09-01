@@ -440,6 +440,90 @@ namespace LiftoffAutoLobby
             }
         }
 
+        // dashboard-chat-send.md: sequenced single-shot operator chat message files
+        // (say_<seq>.txt) written by the control plane (dashboard/control/protocol.py's
+        // enqueue_say, under its own .control.lock flock). Same one-shot,
+        // plugin-consumes-and-deletes convention as skip_now.txt (Plugin.GameRoom.cs) --
+        // the plugin owns deleting the file, so it can never be replayed, and there is no
+        // second piece of state (a cursor, a "processed" marker) that must be kept in sync
+        // (AGENTS.md rule 4).
+        //
+        // Messages are sent VERBATIM as plain chat text, including ones starting with "/":
+        // v1 deliberately does not execute anything through the plugin's command path
+        // (pinned decision, dashboard-chat-send.md Decision log) -- an operator "/kick" is
+        // just a chat line, exactly as if a player had typed it themselves.
+        //
+        // A malformed/unreadable file is logged and deleted so it can never wedge the queue
+        // behind it for a later, valid file; this method must never throw into the 1s tick.
+        private static readonly Regex OperatorSayFileRegex = new Regex(@"^say_(\d+)\.txt$", RegexOptions.IgnoreCase);
+
+        private static int? ParseOperatorSaySequence(string fileName)
+        {
+            Match match = OperatorSayFileRegex.Match(fileName);
+            if (!match.Success) return null;
+            int seq;
+            if (int.TryParse(match.Groups[1].Value, out seq)) return seq;
+            return null;
+        }
+
+        private static void ProcessOperatorSayQueue()
+        {
+            string[] files;
+            try
+            {
+                files = Directory.GetFiles(pluginPath, "say_*.txt");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to list say_*.txt files: {ex.Message}");
+                return;
+            }
+            if (files.Length == 0) return;
+
+            // Ascending NUMERIC sequence order -- "say_10.txt" must not sort before
+            // "say_2.txt" the way plain filename/OS enumeration order would.
+            var ordered = files
+                .Select(f => new { Path = f, Seq = ParseOperatorSaySequence(Path.GetFileName(f)) })
+                .Where(x => x.Seq.HasValue)
+                .OrderBy(x => x.Seq.Value)
+                .ToList();
+
+            foreach (var entry in ordered)
+            {
+                string fileName = Path.GetFileName(entry.Path);
+                string message = null;
+                try
+                {
+                    message = File.ReadAllText(entry.Path).Trim();
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to read {fileName}: {ex.Message}");
+                }
+
+                try
+                {
+                    File.Delete(entry.Path);
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to delete {fileName} after consuming it: {ex.Message}");
+                }
+
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] {fileName} was empty or unreadable — skipping.");
+                    continue;
+                }
+
+                SendChatMessage(message);
+                // Structured JSON file event (A3): distinguishes operator-injected speech from
+                // bot-generated messages in later analysis -- same "decision" event shape
+                // (kind/detail) as track_blacklist/auto_start_suppressed above.
+                LogJsonEvent("decision", ("kind", "operator_say"), ("detail", message));
+            }
+        }
+
         private static void SendChatMessage(string message)
         {
             if (string.IsNullOrEmpty(message)) return;
