@@ -21,6 +21,7 @@ from dashboard.control.protocol import (
     ProtocolDir,
     ProtocolOwnershipError,
     parse_track_line,
+    parse_workshop_download_result,
 )
 
 
@@ -131,6 +132,18 @@ class TestTypedSetters:
         assert proto.exists("skip_now.txt")
         assert proto.read_text("skip_now.txt") == "true"
 
+    def test_request_workshop_download_writes_a_bare_id(self, proto):
+        # One-shot like skip_now.txt: the plugin deletes it the instant it starts
+        # processing, so there is no cancel side and no second "is a download pending".
+        proto.request_workshop_download(" 1234567890 ")
+        assert proto.read_text("workshop_download_request.txt") == "1234567890"
+
+    def test_request_workshop_download_refuses_an_empty_id(self, proto):
+        # An empty request file is unanswerable: the plugin has no id to echo, so its
+        # result line would be unparseable and the requester would wait out its timeout.
+        with pytest.raises(ValueError):
+            proto.request_workshop_download("   ")
+
     def test_override_game_mode_clears_on_falsy(self, proto):
         proto.set_override_game_mode("Classic Race")
         assert proto.read_text("override_game_mode.txt") == "Classic Race"
@@ -206,6 +219,49 @@ class TestReads:
 
     def test_read_static_track_lines_of_a_missing_file_is_empty(self, proto):
         assert proto.read_static_track_lines() == []
+
+
+class TestWorkshopDownloadResult:
+    """workshop_download_result.txt is plugin-produced (READ_ONLY) but the control plane
+    owns exactly one mutation of it: consuming it. Same shape as rotation_state.txt's
+    reset."""
+
+    def test_the_result_file_cannot_be_written_by_the_control_plane(self, proto):
+        with pytest.raises(ProtocolOwnershipError):
+            proto.write_text("workshop_download_result.txt", "1|ok|")
+
+    def test_consume_reads_then_deletes(self, proto):
+        proto.write_text("lobby_name.txt", "x")  # creates the directory
+        with open(proto.path("workshop_download_result.txt"), "w") as f:
+            f.write("1234567890|ok|\n")
+        assert proto.consume_workshop_download_result() == {
+            "published_id": "1234567890", "ok": True, "reason": "",
+        }
+        assert not proto.exists("workshop_download_result.txt")
+        assert proto.consume_workshop_download_result() is None
+
+    def test_a_half_written_line_is_left_alone(self, proto):
+        # The plugin writes with File.WriteAllText (not an atomic replace), so a torn read
+        # is real. Deleting it would destroy the answer that is still being written.
+        proto.write_text("lobby_name.txt", "x")
+        with open(proto.path("workshop_download_result.txt"), "w") as f:
+            f.write("1234567890|o")
+        assert proto.consume_workshop_download_result() is None
+        assert proto.exists("workshop_download_result.txt")
+
+    def test_parse_accepts_only_complete_records(self):
+        assert parse_workshop_download_result("42|fail|timeout") == {
+            "published_id": "42", "ok": False, "reason": "timeout",
+        }
+        # a reason may itself be empty (plain success) but the field must be there
+        assert parse_workshop_download_result("42|ok|")["reason"] == ""
+        for bad in (None, "", "42", "42|ok", "|ok|", "42|maybe|x"):
+            assert parse_workshop_download_result(bad) is None
+
+    def test_parse_keeps_a_pipe_inside_the_reason(self):
+        # split("|", 2): only the first two pipes are field separators, so an EResult name
+        # or message containing one survives instead of silently truncating.
+        assert parse_workshop_download_result("42|fail|a|b")["reason"] == "a|b"
 
 
 def test_plugins_dir_is_required():

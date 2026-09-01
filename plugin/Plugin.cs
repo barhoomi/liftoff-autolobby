@@ -433,6 +433,13 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            // workshop-ingame-download.md: the whole plugin half of the feature behind ONE call.
+            // Placed here, above the scene dispatch, deliberately: a download request must be
+            // serviced in every scene (a race can outlast the 120s Steam budget) and in both
+            // roles, and this is after the SteamAPI.Init() block above so Steam is up before the
+            // first request can reach SteamUGC. Everything else lives in plugin/WorkshopDownloader.cs.
+            WorkshopDownloader.Tick();
+
             string sceneName = SceneManager.GetActiveScene().name;
             if (sceneName != lastSceneName)
             {

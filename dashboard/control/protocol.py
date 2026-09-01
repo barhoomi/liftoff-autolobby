@@ -67,6 +67,10 @@ WRITABLE = {
                       "after sending (same one-shot, plugin-deletes convention as "
                       "skip_now.txt). This is a documentation-only entry, not a literal "
                       "filename -- see enqueue_say()'s docstring for the real key format.",
+    "workshop_download_request.txt": "One Steam Workshop published-file id (decimal) for the "
+                                     "plugin to download in-game; the plugin deletes it the "
+                                     "instant it starts processing, so it is a one-shot "
+                                     "request like skip_now.txt (workshop-ingame-download.md).",
 }
 
 # Plugin-owned runtime state. The plugin writes these; the control plane may ONLY reset
@@ -77,13 +81,20 @@ RESET_ONLY = {
     "shuffle_order.txt": "Derived shuffle deal (plugin-owned; control plane may only clear).",
 }
 
-# Plugin-produced data the control plane reads and must never write.
+# Plugin-produced data the control plane reads and must never write. One of them
+# (workshop_download_result.txt) is nonetheless *deleted* by the control plane, through the
+# single sanctioned consume_workshop_download_result() below -- the same shape as
+# rotation_state.txt's reset: plugin owns the content, the control plane owns exactly one
+# documented mutation of it.
 READ_ONLY = {
     "track_mode_availability.json": "Ground-truth (environment, mode) -> tracks dump from the game UI.",
     "ui_tracks_dump.json": "Flat environment -> tracks dump from the game UI. The only way "
                            "official (asset-bundled) tracks are ever discovered, so it is what "
                            "gather_tracks.py reconciles master_tracks_list.json from, and what "
                            "the first-run bootstrap waits for (control/bootstrap.py).",
+    "workshop_download_result.txt": "Outcome of an in-game workshop download, written by the "
+                                    "plugin as '<id>|<ok|fail>|<reason>'. Consumed (read then "
+                                    "deleted) via consume_workshop_download_result().",
 }
 
 LOCK_FILENAME = ".control.lock"
@@ -127,6 +138,30 @@ def parse_track_line(line):
     environment = parts[-2].strip()
     track = ",".join(parts[:-2]).strip()
     return track, environment, mode
+
+
+def parse_workshop_download_result(raw):
+    """Parse one ``workshop_download_result.txt`` line into
+    ``{"published_id", "ok", "reason"}``, or None if it isn't a complete record yet.
+
+    Format (written by ``plugin/WorkshopDownloader.cs``):
+    ``<published_file_id>|<ok|fail>|<reason>``, reason empty on a plain success.
+
+    Returning None for anything malformed is deliberate and load-bearing: the plugin
+    writes this file with ``File.WriteAllText`` (not an atomic replace), so a poller can
+    genuinely observe a half-written line. "Not parseable" therefore means "not ready
+    yet, look again next tick" -- never "failed". A real failure always arrives as a
+    complete ``<id>|fail|<reason>`` line.
+    """
+    if raw is None:
+        return None
+    parts = raw.strip().split("|", 2)
+    if len(parts) != 3:
+        return None
+    published_id, status, reason = (p.strip() for p in parts)
+    if not published_id or status not in ("ok", "fail"):
+        return None
+    return {"published_id": published_id, "ok": status == "ok", "reason": reason}
 
 
 class ProtocolOwnershipError(RuntimeError):
@@ -283,6 +318,30 @@ class ProtocolDir:
         with self.lock():
             self._atomic_write("rotation_state.txt", "0")
 
+    def read_workshop_download_result(self):
+        """Parsed ``workshop_download_result.txt``, or None when absent/half-written."""
+        return parse_workshop_download_result(self.read_text("workshop_download_result.txt"))
+
+    def consume_workshop_download_result(self):
+        """Read the result file and delete it, returning the parsed record (or None).
+
+        The ONLY sanctioned mutation of ``workshop_download_result.txt`` from the control
+        plane (it is plugin-produced, hence in READ_ONLY). Consuming rather than merely
+        reading is what keeps it a one-shot signal: leaving it behind would make the next
+        download request read a stale outcome. A file present but not yet parseable is
+        left alone -- deleting a half-written line would destroy the real result.
+        """
+        with self.lock():
+            record = self.read_workshop_download_result()
+            if record is None:
+                return None
+            try:
+                os.remove(self.path("workshop_download_result.txt"))
+            except OSError as e:
+                if e.errno != errno.ENOENT:
+                    raise
+            return record
+
     def clear_shuffle_order(self):
         """Delete the plugin's persisted shuffle deal so it re-deals from scratch. The
         ONLY sanctioned mutation of ``shuffle_order.txt`` from the control plane."""
@@ -353,6 +412,25 @@ class ProtocolDir:
             self.write_text("override_game_mode.txt", str(mode))
             return True
         return self.delete("override_game_mode.txt")
+
+    def request_workshop_download(self, published_id):
+        """Ask the plugin to download one workshop item in-game (no restart).
+
+        One-shot, like ``trigger_skip_now``: the plugin deletes the file the instant it
+        starts processing it, so there is no "cancel" side and no second copy of "is a
+        download pending" to keep in sync -- the request file's existence *is* that state
+        until the plugin takes it. Content is a bare decimal id, nothing else; the plugin
+        answers ``bad_id`` for anything it cannot parse, so validation lives in exactly
+        one place rather than being duplicated here -- the one exception is an *empty*
+        id, refused outright because an empty request file is not a protocol message at
+        all: the plugin would have no id to echo back, and its result line would be
+        unparseable, so the requester would sit through its whole timeout instead of
+        being told anything.
+        """
+        value = str(published_id).strip()
+        if not value:
+            raise ValueError("workshop_download_request.txt needs a published file id")
+        self.write_text("workshop_download_request.txt", value)
 
     def trigger_skip_now(self):
         """One-shot immediate-rotation request (bot-dashboard.md skip-now fix).

@@ -130,6 +130,7 @@ idle.
 | `/promote <username>` | Admin | Hand room host to another player. |
 | `/kick <player_name>` | Admin | Kick a player. |
 | `/playlist [name]` | Admin | Show/switch playlist (server mode). |
+| `/dl <workshop_id>` | Admin | Download a Steam Workshop track by id, no restart. |
 | `/maintenance [minutes\|cancel]` | Admin | Schedule a shutdown (server mode). |
 | `/reloadtheme` | Admin | Reload chat colors from `chat_theme.json`. |
 
