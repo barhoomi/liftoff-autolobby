@@ -594,7 +594,24 @@ class WorkshopIngest:
             ", ".join(surviving)))
         return self.state
 
+    def _defer_arrivals(self):
+        """Take results that land while a cycle is already past COLLECTING off disk.
+
+        Consumed, not left in place: the plugin writes ONE result file, so a third result
+        arriving during a multi-minute sweep wait would overwrite the second. They are
+        never merged into a batch whose validation has already run — they start the next
+        cycle instead.
+        """
+        while True:
+            record = self._take_unclaimed_result()
+            if record is None:
+                return
+            print("[Ingest] Holding a result for {} until the current ingest finishes.".format(
+                record["published_id"]))
+            self._deferred.append(record)
+
     def _poll_waiting_sweep(self, now):
+        self._defer_arrivals()
         tracks = tracks_to_confirm([self._reports[i] for i in self._surviving])
         if sweep_satisfied(self.plugins_dir, self._baseline_mtime, tracks):
             self.state = self.FINALIZING
@@ -609,6 +626,7 @@ class WorkshopIngest:
         return self.state
 
     def _poll_finalizing(self):
+        self._defer_arrivals()
         outcome = finalize_ingest(
             self._surviving, self._reports, self.plugins_dir,
             gather=self._gather, resolve=self._resolve,
