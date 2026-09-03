@@ -49,11 +49,13 @@ from .workshop_ingest import (  # noqa: F401  (several are re-exported on purpos
     REASON_SWEEP_TIMEOUT,
     REASON_VALIDATION_FAILED,
     REASON_WATCHER_TIMEOUT,
+    REASON_RESOLVE_FAILED,
     availability_dump_mtime,
     fail_batch,
     finalize_ingest,
     race_search_dirs,
     sweep_blocked_detail,
+    sweep_failure,
     sweep_satisfied,
     sweep_timeout_seconds,
     tracks_to_confirm,
@@ -103,29 +105,48 @@ class DownloadOutcome:
 
 def wait_for_result(protocol, published_id, timeout=DEFAULT_TIMEOUT_SECONDS,
                     poll_interval=DEFAULT_POLL_INTERVAL_SECONDS,
-                    clock=time.monotonic, sleep=time.sleep, logger=None, on_poll=None):
+                    clock=time.monotonic, sleep=time.sleep, logger=None, on_poll=None,
+                    own_ids=None):
     """Block until the plugin publishes a result for ``published_id``, or the bound trips.
 
     Returns the parsed record (``{"published_id", "ok", "reason"}``) or None on timeout.
-    A result for a *different* id is consumed and ignored: it belongs to an ``/dl`` a chat
-    admin ran, and leaving it in place would make it outlive this wait and be mistaken for
-    the answer to the next request.
+
+    A result for an id this run does **not** own is LEFT WHERE IT IS. It belongs to a chat
+    ``/dl``, and the auto-ingest is what will finish it — consuming and discarding it (as
+    this function used to) meant a download the plugin had already announced in chat as
+    "ingesting now" was never validated, never gathered and never resolved by anybody. The
+    claim file makes the arbitration symmetric: the auto-ingest leaves this run's results
+    alone, and this run leaves the auto-ingest's alone.
+
+    ``own_ids`` is the whole batch this run is driving; a result for one of those *other*
+    ids is a duplicate of an outcome already handled, so it is consumed and dropped.
 
     ``on_poll`` runs once per iteration; the batch flow uses it to refresh its claim file's
     mtime, so a legitimately long run never looks abandoned to the auto-ingest.
     """
+    wanted = str(published_id).strip()
+    mine = set(str(i).strip() for i in (own_ids or ())) | {wanted}
+    announced = set()
     deadline = clock() + timeout
     while True:
-        record = protocol.consume_workshop_download_result()
+        record = protocol.consume_workshop_download_result(
+            accept=lambda r: r["published_id"] in mine)
+        if record is not None and record["published_id"] == wanted:
+            return record
         if record is not None:
-            if record["published_id"] == str(published_id).strip():
-                return record
-            message = ("discarding a workshop download result for {} while waiting for {} "
-                       "(an /dl command finishing in parallel)".format(
-                           record["published_id"], published_id))
-            print("[Workshop] {}".format(message))
-            if logger is not None:
-                logger.decision(DECISION_KIND, message)
+            print("[Workshop] Discarding a duplicate result for {} while waiting for "
+                  "{}.".format(record["published_id"], wanted))
+        else:
+            foreign = protocol.read_workshop_download_result()
+            if foreign is not None and foreign["published_id"] not in announced:
+                announced.add(foreign["published_id"])
+                message = ("leaving the workshop download result for {} in place while "
+                           "waiting for {}: it belongs to a chat /dl, and the "
+                           "orchestrator's auto-ingest is what finishes it".format(
+                               foreign["published_id"], wanted))
+                print("[Workshop] {}".format(message))
+                if logger is not None:
+                    logger.decision(DECISION_KIND, message)
         if clock() >= deadline:
             return None
         if on_poll is not None:
@@ -166,7 +187,8 @@ def download_workshop_items(published_ids, protocol, game_dir=None, playlist_nam
                             poll_interval=DEFAULT_POLL_INTERVAL_SECONDS,
                             clock=time.monotonic, sleep=time.sleep,
                             project_dir=None, gather=None, resolve=None, validate=None,
-                            quarantine=None, resolve_item_dir=None, sweep_timeout=None):
+                            quarantine=None, resolve_item_dir=None, sweep_timeout=None,
+                            skip_now=False):
     """Download a SET of workshop items into the running game and make them rotatable.
 
     A set, not one id, because Liftoff publishes a track and its race as separate workshop
@@ -203,7 +225,8 @@ def download_workshop_items(published_ids, protocol, game_dir=None, playlist_nam
                           poll_interval=poll_interval, clock=clock, sleep=sleep,
                           project_dir=project_dir, gather=gather, resolve=resolve,
                           validate=validate, quarantine=quarantine,
-                          resolve_item_dir=resolve_item_dir, sweep_timeout=sweep_timeout)
+                          resolve_item_dir=resolve_item_dir, sweep_timeout=sweep_timeout,
+                          skip_now=skip_now)
     finally:
         # Always: an unreleased claim makes the auto-ingest ignore results until the
         # staleness bound expires.
@@ -212,13 +235,18 @@ def download_workshop_items(published_ids, protocol, game_dir=None, playlist_nam
 
 def _run_batch(ids, protocol, baseline_mtime, game_dir, playlist_name, tracks_file,
                shuffle, logger, timeout, poll_interval, clock, sleep, project_dir,
-               gather, resolve, validate, quarantine, resolve_item_dir, sweep_timeout):
+               gather, resolve, validate, quarantine, resolve_item_dir, sweep_timeout,
+               skip_now):
     def refresh_claim():
         protocol.claim_workshop_downloads(ids)
 
-    # Any leftover result (a previous run that died, or an /dl that finished while nobody
-    # was listening) must go before the request, or it would be read as this one's answer.
-    stale = protocol.consume_workshop_download_result()
+    # A leftover result for one of OUR ids (a previous run that died mid-wait) must go
+    # before the request, or it would be read as this one's answer. A leftover for anyone
+    # else's id is deliberately left alone: it is a chat /dl's outcome, and eating it here
+    # -- as this used to -- means that download is never ingested by anybody. Nothing below
+    # can mistake it for ours, because wait_for_result now only accepts our own ids.
+    stale = protocol.consume_workshop_download_result(
+        accept=lambda r: r["published_id"] in set(ids))
     if stale is not None:
         print("[Workshop] Discarded a stale download result for {} before requesting {}.".format(
             stale["published_id"], ", ".join(ids)))
@@ -236,7 +264,7 @@ def _run_batch(ids, protocol, baseline_mtime, game_dir, playlist_name, tracks_fi
 
         record = wait_for_result(protocol, published_id, timeout=timeout,
                                  poll_interval=poll_interval, clock=clock, sleep=sleep,
-                                 logger=logger, on_poll=refresh_claim)
+                                 logger=logger, on_poll=refresh_claim, own_ids=ids)
         if record is None:
             return fail_batch(
                 ids, REASON_WATCHER_TIMEOUT, logger,
@@ -257,6 +285,16 @@ def _run_batch(ids, protocol, baseline_mtime, game_dir, playlist_name, tracks_fi
                                   published_id),
                               plugin_reasons=plugin_reasons)
         plugin_reasons[published_id] = record["reason"]
+
+    # AFTER the downloads and BEFORE the sweep wait (§2.4). Firing it before the batch --
+    # as this used to -- rotates while the items are still downloading, so the sweep it
+    # triggers runs too early to see them and the flag ends up DELAYING the re-sweep it
+    # exists to accelerate (review finding 10, 2026-09-04). skip_now.txt is consumed from
+    # HandleGameRoom, i.e. in the waiting room, so it never interrupts a running race.
+    if skip_now:
+        protocol.trigger_skip_now()
+        print("[Workshop] Requested an immediate rotation, so the re-sweep happens at the "
+              "end of the current race instead of at the rotation timer.")
 
     item_dirs = {}
     for published_id in ids:
@@ -291,9 +329,12 @@ def _run_batch(ids, protocol, baseline_mtime, game_dir, playlist_name, tracks_fi
     if not wait_for_fresh_dump(protocol.plugins_dir, baseline_mtime, tracks, bound,
                                poll_interval=poll_interval, clock=clock, sleep=sleep,
                                logger=logger, on_poll=refresh_claim):
-        return fail_batch(ids, REASON_SWEEP_TIMEOUT, logger,
-                          detail=sweep_blocked_detail(protocol, elapsed=bound),
-                          item_dirs=item_dirs,
+        # Two different things to tell an operator, and the baseline is what tells them
+        # apart: a sweep that ran without listing our track (the files are fine and are NOT
+        # quarantined) versus no sweep at all (usually operator state, not a fault).
+        reason, detail = sweep_failure(protocol.plugins_dir, baseline_mtime, tracks,
+                                       protocol, elapsed=bound)
+        return fail_batch(ids, reason, logger, detail=detail, item_dirs=item_dirs,
                           warnings=dict(extras["warnings"]),
                           plugin_reasons=plugin_reasons)
 

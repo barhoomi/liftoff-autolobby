@@ -43,7 +43,7 @@ from typing import Dict, List, Optional
 
 from . import paths  # noqa: F401  (import performs the orchestrator sys.path bootstrap)
 from . import bootstrap
-from .protocol import WORKSHOP_BUSY_FILE, WORKSHOP_CLAIM_FILE
+from .protocol import WORKSHOP_BUSY_FILE, WORKSHOP_CLAIM_FILE, WORKSHOP_RESULT_FILE
 
 from workshop_items import quarantine_item, workshop_content_root, workshop_item_dir  # noqa: E402
 
@@ -60,6 +60,10 @@ REASON_WATCHER_TIMEOUT = "watcher_timeout"
 REASON_ITEM_DIR_MISSING = "item_dir_missing"
 REASON_VALIDATION_FAILED = "validation_failed"
 REASON_GATHER_FAILED = "gather_failed"
+# Distinct from gather_failed on purpose: gathering rebuilds the track DATABASE and
+# resolving rewrites the ROTATION, and an operator reading a reason code needs to know
+# which of the two broke without parsing free text.
+REASON_RESOLVE_FAILED = "resolve_failed"
 REASON_SWEEP_TIMEOUT = "sweep_timeout"
 REASON_GAME_LISTING_MISSING = "game_listing_missing"
 
@@ -115,12 +119,19 @@ class BatchOutcome:
         return "workshop item(s) {} failed ({}){}".format(ids, self.reason, detail)
 
 
-def fail_batch(published_ids, reason, logger, detail=None, **fields):
+def fail_batch(published_ids, reason, logger, detail=None, report=True, **fields):
+    """Build a failed ``BatchOutcome``, and by default print + log it once.
+
+    ``report=False`` builds it silently, for the auto-ingest: that machine reports every
+    outcome from one place (``WorkshopIngest._finish``), so reporting here as well would
+    print each failure twice and record it as both an ``error`` and a ``decision``.
+    """
     outcome = BatchOutcome(published_ids=list(published_ids), ok=False, reason=reason,
                            detail=detail, **fields)
-    print("[Workshop] ERROR: {}".format(outcome.summary()))
-    if logger is not None:
-        logger.error(outcome.summary(), context=DECISION_KIND)
+    if report:
+        print("[Workshop] ERROR: {}".format(outcome.summary()))
+        if logger is not None:
+            logger.error(outcome.summary(), context=DECISION_KIND)
     return outcome
 
 
@@ -213,26 +224,59 @@ def track_listed(availability, name, environment):
 
 
 def sweep_satisfied(plugins_dir, baseline_mtime, tracks):
-    """True once a *usable* availability sweep newer than the ingest has landed.
+    """True once the game demonstrably offers every track this ingest brought in.
 
-    Two conditions, and the second is a disjunction on purpose:
+    The condition is **the listing itself**, not the dump's mtime. Freshness was only ever
+    a proxy for the question that matters — "can the game see this track yet?" — and it is
+    a leaky one in both directions (review findings 3 and 5, 2026-09-04):
 
-    - ``track_dump_ready`` — both dumps parse and at least one environment has tracks.
-      Never mtime alone: the plugin writes them with ``File.WriteAllLines``, not
-      atomically, so a fresh mtime on a half-written file is a real observation.
-    - the dump is newer than the baseline **or** it already lists every track we
-      ingested. The second disjunct closes the race where a rotation's sweep lands between
-      the plugin writing the result and the reader capturing its baseline — without it,
-      an ingest that already succeeded would sit and wait out its timeout.
+    - a sweep completing *between* two members of a still-open batch has a newer mtime but
+      predates the second member entirely, so mtime alone declared the wait satisfied and
+      the second item was then reported as ``game_listing_missing``;
+    - a batch with no track of its own (a race-only item) has nothing a sweep could reveal,
+      so an mtime-only rule left it waiting for a sweep nothing would ever arm. Callers
+      skip the wait entirely for that case; ``tracks`` empty answering True here keeps the
+      predicate honest rather than making the caller's shortcut load-bearing.
+
+    ``track_dump_ready`` still gates everything: the plugin writes both dumps with
+    ``File.WriteAllLines``, not atomically, so a half-written one must read as "not yet".
+
+    ``baseline_mtime`` is no longer part of the answer — it only classifies a *timeout*
+    (see ``sweep_failure``), i.e. "no sweep ran at all" versus "one ran without our track".
     """
     if not bootstrap.track_dump_ready(plugins_dir):
         return False
-    if availability_dump_mtime(plugins_dir) > baseline_mtime:
-        return True
     if not tracks:
-        return False
+        return True
     availability = load_availability(plugins_dir)
     return all(track_listed(availability, name, env) for name, env in tracks)
+
+
+def unlisted_tracks(plugins_dir, tracks):
+    """``[(name, environment)]`` the current dump does not offer."""
+    availability = load_availability(plugins_dir)
+    return [(name, env) for name, env in tracks
+            if not track_listed(availability, name, env)]
+
+
+def sweep_failure(plugins_dir, baseline_mtime, tracks, protocol, elapsed=None):
+    """``(reason, detail)`` for a sweep wait that ran out of time.
+
+    The two reasons mean genuinely different things to an operator, and the baseline is
+    what tells them apart: a dump newer than the baseline means a sweep DID run and simply
+    did not list our track (``game_listing_missing`` — the files are fine and are not
+    quarantined; a subscription that did not take looks exactly like this), while no newer
+    dump at all means no sweep ran, which is usually operator state rather than a fault.
+    """
+    swept = (bootstrap.track_dump_ready(plugins_dir)
+             and availability_dump_mtime(plugins_dir) > baseline_mtime)
+    if swept and tracks:
+        missing = unlisted_tracks(plugins_dir, tracks) or tracks
+        return REASON_GAME_LISTING_MISSING, (
+            "a fresh availability sweep landed but does not list {} -- the files are on "
+            "disk and were NOT quarantined".format(
+                "; ".join("'{}' in {}".format(n, e) for n, e in missing)))
+    return REASON_SWEEP_TIMEOUT, sweep_blocked_detail(protocol, elapsed=elapsed)
 
 
 def sweep_timeout_seconds(protocol, override=None):
@@ -422,8 +466,8 @@ def finalize_ingest(surviving, reports, plugins_dir, gather=None, resolve=None,
         try:
             resolved = resolve(playlist_name, shuffle, tracks_file, logger=logger)
         except Exception as exc:
-            outcome.reason = REASON_GATHER_FAILED
-            outcome.detail = str(exc)
+            outcome.reason = REASON_RESOLVE_FAILED
+            outcome.detail = "playlist '{}': {}".format(playlist_name, exc)
             return outcome
         outcome.resolved_count = len(resolved or [])
 
@@ -539,10 +583,10 @@ class WorkshopIngest:
         return self.state
 
     def _start_batch(self, record):
+        # No baseline and no deadline yet: both belong to the sweep wait, and the batch is
+        # still open (COLLECTING) -- see _poll_collecting.
         self._batch = collections.OrderedDict()
         self._batch[record["published_id"]] = record
-        self._baseline_mtime = availability_dump_mtime(self.plugins_dir)
-        self._deadline = self._clock() + self._sweep_timeout()
         self.state = self.COLLECTING
         print("[Ingest] Unclaimed workshop download result for {} -- ingesting.".format(
             record["published_id"]))
@@ -557,29 +601,43 @@ class WorkshopIngest:
         if self._plugin_busy():
             return self.state
 
+        ids = list(self._batch)
+
+        # ALL-OR-NOTHING on a download failure (decision log 5, and the §9.1 correction of
+        # 2026-09-04). If ANY member failed to download, the batch fails HERE and nothing is
+        # validated or quarantined. Validating the survivors would judge a half set against
+        # itself: `/dl <typo'd_track> <good_race>` would find the race's TRACK dependency
+        # missing -- because its partner never downloaded -- and move a perfectly good
+        # workshop item out of the content root AND unsubscribe it, over a typo in the
+        # *other* id. The CLI has always refused this; the auto-ingest shares the policy.
+        failed = [(i, r) for i, r in self._batch.items() if not r["ok"]]
+        if failed:
+            first_id, first_record = failed[0]
+            self._finish(fail_batch(
+                ids, first_record["reason"] or "unknown", self.logger, report=False,
+                detail=("workshop item {} failed in the plugin; the rest of the batch was "
+                        "left untouched (nothing validated, nothing quarantined)".format(
+                            first_id))))
+            return self.state
+
         landed = collections.OrderedDict()
-        for published_id, record in self._batch.items():
-            if not record["ok"]:
-                print("[Ingest] {} failed in the plugin ({}) -- nothing to validate.".format(
-                    published_id, record["reason"] or "unknown"))
-                continue
+        for published_id in ids:
             item_dir = self._resolve_item_dir(published_id, game_dir=self.game_dir)
             if not item_dir:
-                print("[Ingest] {} reported ok but no item directory exists.".format(
-                    published_id))
-                continue
+                self._finish(fail_batch(
+                    ids, REASON_ITEM_DIR_MISSING, self.logger, report=False,
+                    detail=("Steam reported the download OK but no directory for {} exists "
+                            "under the workshop content root; the rest of the batch was "
+                            "left untouched".format(published_id))))
+                return self.state
             landed[published_id] = item_dir
 
-        if not landed:
-            ids = list(self._batch)
-            failures = [r["reason"] for r in self._batch.values() if not r["ok"]]
-            # All the plugin's own fault -> report the plugin's own reason verbatim;
-            # otherwise Steam said ok and the files are not there, which is its own thing.
-            reason = (failures[0] or "unknown") if len(failures) == len(ids) else \
-                REASON_ITEM_DIR_MISSING
-            self._finish(fail_batch(ids, reason, self.logger,
-                                    detail="no member of the batch left usable files"))
-            return self.state
+        # Baseline captured HERE, not when the batch's first result arrived: the batch stays
+        # open while the plugin is busy, so a sweep completing between two members'
+        # downloads would otherwise count as "a sweep that saw this batch" when it predates
+        # the second member entirely (review finding 5, 2026-09-04).
+        self._baseline_mtime = availability_dump_mtime(self.plugins_dir)
+        self._deadline = self._clock() + self._sweep_timeout()
 
         surviving, reports, extras = validate_and_quarantine_batch(
             landed, race_search_dirs=race_search_dirs(list(landed.values()),
@@ -587,17 +645,36 @@ class WorkshopIngest:
             validate=self._validate, quarantine=self._quarantine, protocol=self.protocol,
             project_dir=self.project_dir, logger=self.logger)
 
-        if not surviving:
+        # §5.4: if ANY member fails validation the batch is validation_failed and no
+        # gather/resolve runs -- unvalidated content must never reach the rotation, and a
+        # half-ingested pair is not worth having. (Rejected members ARE quarantined; that
+        # is per-member by design and the only thing that is.)
+        if len(surviving) != len(landed):
             self._finish(fail_batch(
-                list(landed), REASON_VALIDATION_FAILED, self.logger,
+                ids, REASON_VALIDATION_FAILED, self.logger, report=False,
                 detail=", ".join(sorted(
                     r for reasons in extras["rejected_reasons"].values() for r in reasons)),
+                item_dirs=dict(landed),
                 quarantined=dict(extras["quarantined"]),
                 validation_reasons=dict(extras["rejected_reasons"]),
                 warnings=dict(extras["warnings"])))
             return self.state
 
         self._surviving, self._reports, self._extras = surviving, reports, extras
+
+        # A batch with no tracks of its own (a race-only item, whose partner track is
+        # already installed) has nothing for a sweep to reveal: a .race never appears in the
+        # game's track dropdown, and gather_tracks_and_races() picks races up by disk scan,
+        # not from the dump. Waiting for a sweep would wedge the machine -- nothing would
+        # ever re-arm one, and every later /dl would queue behind it until the 900s bound
+        # expired and reported a false sweep_timeout (review finding 3, 2026-09-04).
+        tracks = tracks_to_confirm([reports[i] for i in surviving])
+        if not tracks:
+            self.state = self.FINALIZING
+            print("[Ingest] {} validated (no new track to confirm) -- ingesting now.".format(
+                ", ".join(surviving)))
+            return self.state
+
         self.state = self.WAITING_SWEEP
         print("[Ingest] {} validated -- waiting for the plugin's availability re-sweep.".format(
             ", ".join(surviving)))
@@ -626,9 +703,10 @@ class WorkshopIngest:
             self.state = self.FINALIZING
             return self.state
         if self._deadline is not None and now >= self._deadline:
+            reason, detail = sweep_failure(self.plugins_dir, self._baseline_mtime, tracks,
+                                           self.protocol, elapsed=self._sweep_timeout())
             self._finish(fail_batch(
-                list(self._surviving), REASON_SWEEP_TIMEOUT, self.logger,
-                detail=sweep_blocked_detail(self.protocol),
+                list(self._surviving), reason, self.logger, report=False, detail=detail,
                 item_dirs=dict(self._surviving),
                 quarantined=dict(self._extras.get("quarantined", {})),
                 warnings=dict(self._extras.get("warnings", {}))))
@@ -677,18 +755,18 @@ class WorkshopIngest:
     def _take_unclaimed_result(self):
         """Consume the result file, unless it is half-written or claimed by the CLI.
 
-        Reads NON-destructively first: consuming a claimed result would make the CLI
-        report a false watcher_timeout while this machine quietly succeeded — the most
-        confusing possible way to violate "verify before you claim".
+        The claim test is handed to ``consume_workshop_download_result`` as its ``accept``
+        predicate rather than performed as a separate read beforehand: checking one read
+        and consuming another would let the plugin swap the file in between, so the record
+        taken need not be the record that passed the check — and taking a claimed result
+        makes the CLI sit out its whole timeout and report a false ``watcher_timeout``
+        while this machine quietly succeeds.
         """
-        if not self.protocol.exists("workshop_download_result.txt"):
+        if not self.protocol.exists(WORKSHOP_RESULT_FILE):
             return None
-        record = self.protocol.read_workshop_download_result()
-        if record is None:
-            return None  # half-written: not ready, not failed
-        if record["published_id"] in self._claimed_ids():
-            return None
-        return self.protocol.consume_workshop_download_result()
+        claimed = self._claimed_ids()
+        return self.protocol.consume_workshop_download_result(
+            accept=lambda record: record["published_id"] not in claimed)
 
     def _plugin_busy(self):
         try:
@@ -698,10 +776,22 @@ class WorkshopIngest:
         return (time.time() - mtime) <= BUSY_STALE_SECONDS
 
     def _finish(self, outcome):
+        """End the cycle, reporting the outcome exactly ONCE.
+
+        One print and one event per cycle: a ``decision`` on success (so an operator can
+        read a chat /dl's outcome straight out of the JSONL log, §9.1) and an ``error`` on
+        failure. Every failure path builds its outcome with ``report=False`` precisely so
+        this is the only place that speaks.
+        """
         self.last_outcome = outcome
-        print("[Ingest] {}".format(outcome.summary()))
-        if self.logger is not None:
-            self.logger.decision(DECISION_KIND, outcome.summary())
+        if outcome.ok:
+            print("[Ingest] {}".format(outcome.summary()))
+            if self.logger is not None:
+                self.logger.decision(DECISION_KIND, outcome.summary())
+        else:
+            print("[Ingest] ERROR: {}".format(outcome.summary()))
+            if self.logger is not None:
+                self.logger.error(outcome.summary(), context=DECISION_KIND)
         self._reset()
 
     def _reset(self):

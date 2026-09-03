@@ -98,13 +98,10 @@ def main(argv=None):
     if playlist_name == "custom":
         playlist_name = ""
 
-    if args.skip_now:
-        # Consumed by the plugin from HandleGameRoom, i.e. in the waiting room -- it never
-        # interrupts a running race.
-        protocol.trigger_skip_now()
-        print("[Workshop] Requested an immediate rotation, so the re-sweep happens at the "
-              "end of the current race instead of at the rotation timer.")
-
+    # --skip-now is applied INSIDE the batch, after the downloads land and before the sweep
+    # wait (§2.4). Firing it here, before anything is downloaded, would rotate while the
+    # items are still coming down and the sweep it triggers would run too early to see
+    # them -- delaying the re-sweep it exists to accelerate.
     outcome = download_workshop_items(
         args.workshop_id,
         protocol,
@@ -115,6 +112,7 @@ def main(argv=None):
         logger=logger,
         timeout=args.timeout,
         sweep_timeout=args.sweep_timeout,
+        skip_now=args.skip_now,
         project_dir=_PROJECT_ROOT,
     )
     print(outcome.summary())

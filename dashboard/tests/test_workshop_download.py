@@ -324,9 +324,62 @@ class TestStaleAndForeignResults:
         outcome, _ = run(protocol, plugin, calls={})
         assert outcome.ok is True, "the stale failure was mistaken for this request's answer"
 
+    def test_a_foreign_result_is_left_on_disk_for_the_auto_ingest(self, protocol,
+                                                                  content_root):
+        """A chat /dl finishing while this CLI waits writes a result for an id this run
+        does not own. It must be LEFT ALONE: consuming and discarding it (which this used
+        to do) meant a download the plugin had already announced in chat as "ingesting
+        now" was never validated, gathered or resolved by anybody. §9.4's arbitration only
+        works if it runs in both directions."""
+        logger = RecordingLogger()
+        plugin = FakePlugin(protocol, "999|ok|\n", sweep_tracks=None)
+        outcome, calls = run(protocol, plugin, calls={}, logger=logger)
+
+        assert outcome.reason == REASON_WATCHER_TIMEOUT, "999 is not this run's answer"
+        assert protocol.read_workshop_download_result()["published_id"] == "999", (
+            "the chat /dl's result was eaten by a CLI that was not waiting for it")
+        assert calls == {}
+        assert any(e == "decision" and "999" in f["detail"] and "auto-ingest" in f["detail"]
+                   for e, f in logger.events)
+
+    def test_the_leave_it_alone_notice_is_logged_once_not_once_per_poll(
+            self, protocol, content_root):
+        logger = RecordingLogger()
+        plugin = FakePlugin(protocol, "999|ok|\n", sweep_tracks=None)
+        run(protocol, plugin, calls={}, logger=logger)
+        notices = [f for e, f in logger.events
+                   if e == "decision" and "leaving the workshop download result" in f["detail"]]
+        assert len(notices) == 1, "one notice per foreign id, not one per poll"
+
+    def test_a_stale_result_for_a_foreign_id_is_not_discarded_before_requesting(
+            self, protocol, content_root):
+        """The pre-request "discard a stale result" step has the same hazard: a chat /dl
+        result that landed a second ago is not stale, it is somebody's pending ingest."""
+        install(content_root, "good_item")
+        protocol.write_text("lobby_name.txt", "x")
+        with open(protocol.path("workshop_download_result.txt"), "w") as fh:
+            fh.write("999|ok|\n")
+
+        class LateAnswerPlugin(FakePlugin):
+            def sleep(self, seconds):
+                self.now += seconds
+                self.polls += 1
+                if self.polls >= 3:
+                    if self.protocol.exists("workshop_download_request.txt"):
+                        os.remove(self.protocol.path("workshop_download_request.txt"))
+                    with open(self.protocol.path("workshop_download_result.txt"), "w") as fh:
+                        fh.write("{}|ok|\n".format(WORKSHOP_ID))
+                    write_dumps(self.protocol)
+
+        plugin = LateAnswerPlugin(protocol, None)
+        outcome, _ = run(protocol, plugin, calls={})
+        assert outcome.ok is True
+        # 999 survived until the plugin itself replaced the file -- this run never took it.
+        assert not protocol.exists("workshop_download_result.txt")
+
     def test_a_result_for_another_id_does_not_end_the_wait(self, protocol, content_root):
-        """An /dl command finishing in parallel writes a result for a different id. It is
-        consumed (so it cannot linger and answer the next request) but never returned."""
+        """An /dl command finishing in parallel writes a result for a different id; it is
+        never returned as this request's answer."""
         install(content_root, "good_item")
 
         class TwoStagePlugin(FakePlugin):
@@ -467,7 +520,20 @@ class TestGameListingMissing:
         assert outcome.ok is False
         assert outcome.reason == REASON_GAME_LISTING_MISSING
         assert os.path.isdir(str(item)), "a listing miss must not quarantine the files"
-        assert calls == {"gather": 1}, "gather runs first; only resolve is skipped"
+        assert calls == {}, (
+            "the wait is for the LISTING now, not for a newer mtime, so a track the game "
+            "never offers waits out its bound there -- the track database is never touched")
+        assert "NOT quarantined" in outcome.detail
+
+    def test_no_sweep_at_all_is_reported_as_a_timeout_not_a_listing_miss(
+            self, protocol, content_root):
+        """The two reasons mean different things to an operator, and the baseline is what
+        tells them apart: a dump newer than the baseline means a sweep ran and did not list
+        us; no newer dump at all means no sweep ran, which is usually operator state."""
+        install(content_root, "good_item")
+        plugin = FakePlugin(protocol, "{}|ok|\n".format(WORKSHOP_ID), sweep_tracks=None)
+        outcome, _ = run(protocol, plugin, calls={})
+        assert outcome.reason == REASON_SWEEP_TIMEOUT
 
 
 class TestMultiIdBatch:
@@ -529,3 +595,61 @@ class TestMultiIdBatch:
         outcome, _ = run(protocol, plugin, calls={}, ids=[WORKSHOP_ID, WORKSHOP_ID])
         assert plugin.requests == [WORKSHOP_ID]
         assert outcome.ok is True
+
+
+class TestSkipNow:
+    def test_skip_now_fires_after_the_downloads_and_before_the_sweep_wait(
+            self, protocol, content_root):
+        """§2.4. Firing it before the batch -- as this used to -- rotates while the items
+        are still downloading, so the sweep it triggers runs too early to see them: the
+        flag would DELAY the re-sweep it exists to accelerate."""
+        install(content_root, "good_item")
+
+        class RecordingPlugin(FakePlugin):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.skip_present_at_request = None
+
+            def sleep(self, seconds):
+                if (self.skip_present_at_request is None
+                        and self.protocol.exists("workshop_download_request.txt")):
+                    self.skip_present_at_request = self.protocol.exists("skip_now.txt")
+                super().sleep(seconds)
+
+        plugin = RecordingPlugin(protocol, "{}|ok|\n".format(WORKSHOP_ID))
+        outcome, _ = run(protocol, plugin, calls={}, skip_now=True)
+        assert outcome.ok is True
+        assert protocol.exists("skip_now.txt"), "the rotation was never requested"
+        assert plugin.skip_present_at_request is False, (
+            "skip_now.txt was already there while the item was still downloading -- the "
+            "rotation it triggers would sweep before the item landed")
+
+    def test_without_the_flag_no_rotation_is_requested(self, protocol, content_root):
+        install(content_root, "good_item")
+        plugin = FakePlugin(protocol, "{}|ok|\n".format(WORKSHOP_ID))
+        run(protocol, plugin, calls={})
+        assert not protocol.exists("skip_now.txt")
+
+    def test_a_failed_download_does_not_request_a_rotation(self, protocol, content_root):
+        plugin = FakePlugin(protocol, "{}|fail|bad_id\n".format(WORKSHOP_ID))
+        run(protocol, plugin, calls={}, skip_now=True)
+        assert not protocol.exists("skip_now.txt")
+
+
+class TestResolveFailureHasItsOwnReason:
+    def test_a_failing_resolve_is_not_labelled_gather_failed(self, protocol, content_root,
+                                                             tmp_path):
+        """Gathering rebuilds the track DATABASE and resolving rewrites the ROTATION; an
+        operator reading a reason code needs to know which one broke."""
+        install(content_root, "good_item")
+
+        def exploding_resolve(playlist_name, shuffle, tracks_file, logger=None):
+            raise RuntimeError("playlist 'demo' resolves to 0 tracks")
+
+        plugin = FakePlugin(protocol, "{}|ok|\n".format(WORKSHOP_ID))
+        outcome, _ = run(protocol, plugin, calls={}, resolve=exploding_resolve,
+                         playlist_name="demo", tracks_file=str(tmp_path / "tracks.txt"))
+        assert outcome.ok is False
+        assert outcome.reason == "resolve_failed"
+        assert outcome.reason != REASON_GATHER_FAILED
+        assert "demo" in outcome.detail

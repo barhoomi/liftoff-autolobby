@@ -364,11 +364,13 @@ class TestFailurePaths:
         item = install(content_root, "split_pair_track", TRACK_ID)
         install(content_root, "split_pair_race", RACE_ID)
         write_result(protocol, TRACK_ID)
-        harness.poll()                                    # baseline captured
+        harness.poll(2)                                   # -> WAITING_SWEEP, baseline set
         write_dumps(protocol, tracks=("Some Other Track",))  # a sweep, but without us
-        harness.poll(4)
+        harness.clock.advance(1000.0)                     # the bound expires
+        harness.poll(2)
         assert harness.ingest.last_outcome.reason == REASON_GAME_LISTING_MISSING
         assert os.path.isdir(str(item))
+        assert harness.calls == {}, "the track database is never touched on a listing miss"
 
     def test_an_exception_in_gather_leaves_the_machine_back_in_idle(
             self, protocol, content_root, quarantine_dir):
@@ -448,3 +450,166 @@ class TestUnsubscribeBatching:
         assert sorted(protocol.read_lines("workshop_unsubscribe_request.txt")) == \
             sorted([TRACK_ID, RACE_ID])
         assert harness.ingest.last_outcome.reason == REASON_VALIDATION_FAILED
+
+
+class TestPartialBatchIsAllOrNothing:
+    """Review cluster A (2026-09-04). §9.1's literal wording said "drop the ok=false
+    members and validate the survivors"; decision log 5 says the opposite, and decision
+    log 5 is the policy. Validating survivors judges a half set against itself."""
+
+    def test_a_mistyped_track_id_does_not_destroy_its_good_race_partner(
+            self, harness, protocol, content_root, quarantine_dir):
+        """`/dl <typo> <good_race>`: the typo resolves synchronously as bad_id, the race
+        downloads fine. Validating the race ALONE finds its TRACK dependency missing --
+        because its partner never downloaded -- and would move a perfectly good workshop
+        item out of the Steam content root and unsubscribe it, over a typo in the OTHER
+        id."""
+        race = install(content_root, "split_pair_race", RACE_ID)
+        set_busy(protocol, count=2)
+        write_result(protocol, "12345", ok=False, reason="bad_id")
+        harness.poll()
+        write_result(protocol, RACE_ID)
+        harness.poll()
+        os.remove(protocol.path("workshop_download_busy.txt"))
+        harness.poll(2)
+
+        assert os.path.isdir(str(race)), "the good race item was quarantined"
+        assert not protocol.exists("workshop_unsubscribe_request.txt"), (
+            "the good race item was unsubscribed from the bot account")
+        assert harness.calls == {}
+        assert harness.ingest.last_outcome.ok is False
+        assert harness.ingest.last_outcome.reason == "bad_id"
+        assert "left untouched" in harness.ingest.last_outcome.detail
+
+    def test_a_member_whose_files_never_landed_fails_the_whole_batch_untouched(
+            self, harness, protocol, content_root, quarantine_dir):
+        track = install(content_root, "split_pair_track", TRACK_ID)
+        set_busy(protocol, count=2)
+        write_result(protocol, TRACK_ID)
+        harness.poll()
+        write_result(protocol, RACE_ID)          # ok, but nothing on disk for it
+        harness.poll()
+        os.remove(protocol.path("workshop_download_busy.txt"))
+        harness.poll(2)
+
+        assert os.path.isdir(str(track))
+        assert not protocol.exists("workshop_unsubscribe_request.txt")
+        assert harness.calls == {}
+        assert harness.ingest.last_outcome.reason == "item_dir_missing"
+
+    def test_one_rejected_member_fails_the_batch_even_though_the_other_passed(
+            self, harness, protocol, content_root, quarantine_dir):
+        """§5.4: if ANY member fails validation the batch is validation_failed and no
+        gather/resolve runs. The rejected member IS quarantined -- that part is per member
+        by design -- but the batch does not go on to be reported as a success."""
+        good = install(content_root, "split_pair_track", TRACK_ID)
+        install(content_root, "unsupported_env_item", RACE_ID)
+        set_busy(protocol, count=2)
+        write_result(protocol, TRACK_ID)
+        harness.poll()
+        write_result(protocol, RACE_ID)
+        harness.poll()
+        os.remove(protocol.path("workshop_download_busy.txt"))
+        write_dumps(protocol)
+        harness.poll(2)
+
+        assert harness.ingest.last_outcome.ok is False
+        assert harness.ingest.last_outcome.reason == REASON_VALIDATION_FAILED
+        assert harness.calls == {}, "an unvalidated batch must never reach gather/resolve"
+        assert os.path.isdir(str(good)), "the passing member was quarantined too"
+        assert protocol.read_lines("workshop_unsubscribe_request.txt") == [RACE_ID]
+
+
+class TestRaceOnlyBatchNeedsNoSweep:
+    """Review finding 3 (2026-09-04). A .race never appears in the game's track dropdown,
+    and gather picks races up by disk scan, so there is nothing for a sweep to reveal --
+    and nothing would ever arm one. Waiting wedged the machine and queued every later /dl
+    behind it until the bound expired, then reported a false sweep_timeout."""
+
+    def test_it_goes_straight_to_finalizing_and_never_waits(self, harness, protocol,
+                                                            content_root):
+        install(content_root, "split_pair_track", TRACK_ID)   # its partner, already there
+        install(content_root, "split_pair_race", RACE_ID)
+        write_dumps(protocol)                                  # an OLD sweep; none coming
+        stamp = time.time() - 600
+        os.utime(protocol.path("track_mode_availability.json"), (stamp, stamp))
+
+        write_result(protocol, RACE_ID)
+        assert harness.poll() == WorkshopIngest.COLLECTING
+        assert harness.poll() == WorkshopIngest.FINALIZING, (
+            "a race-only batch has no track to confirm -- it must not wait for a sweep")
+        assert harness.poll() == WorkshopIngest.IDLE
+        assert harness.calls["gather"] == 1
+        assert harness.ingest.last_outcome.ok is True
+
+    def test_it_does_not_block_the_next_dl_behind_it(self, harness, protocol, content_root):
+        install(content_root, "split_pair_track", TRACK_ID)
+        install(content_root, "split_pair_race", RACE_ID)
+        write_dumps(protocol)
+        stamp = time.time() - 600
+        os.utime(protocol.path("track_mode_availability.json"), (stamp, stamp))
+
+        write_result(protocol, RACE_ID)
+        harness.poll(3)                       # the race-only cycle completes
+        write_result(protocol, TRACK_ID)      # a later /dl
+        harness.poll(4)
+        assert harness.calls["gather"] == 2
+        assert harness.ingest.state == WorkshopIngest.IDLE
+
+
+class TestBaselineIsCapturedWhenTheBatchCloses:
+    """Review finding 5 (2026-09-04). The batch stays open while the plugin is busy, so a
+    sweep completing BETWEEN two members predates the second member entirely -- and an
+    mtime-based baseline captured at the first member's arrival called it satisfied."""
+
+    def test_a_sweep_landing_mid_batch_does_not_satisfy_the_wait_for_the_late_member(
+            self, harness, protocol, content_root):
+        install(content_root, "split_pair_track", TRACK_ID)
+        install(content_root, "good_item", RACE_ID)      # a SECOND, independent track
+        set_busy(protocol, count=2)
+        write_result(protocol, TRACK_ID)
+        harness.poll()                                   # COLLECTING, batch still open
+
+        write_dumps(protocol, tracks=(SPLIT_TRACK,))     # a sweep that saw only the first
+        write_result(protocol, RACE_ID)
+        harness.poll()
+        os.remove(protocol.path("workshop_download_busy.txt"))
+        assert harness.poll() == WorkshopIngest.WAITING_SWEEP
+        assert harness.poll() == WorkshopIngest.WAITING_SWEEP, (
+            "a dump that predates the second member must not satisfy the wait")
+        assert harness.calls == {}
+
+        write_dumps(protocol, tracks=(SPLIT_TRACK, "Fixture Good Track"))
+        harness.poll(3)
+        assert harness.calls["gather"] == 1
+        assert harness.ingest.last_outcome.ok is True
+
+
+class TestOutcomeIsReportedExactlyOnce:
+    def test_a_failure_is_logged_as_one_error_and_no_decision(self, harness, protocol,
+                                                              content_root):
+        write_result(protocol, TRACK_ID, ok=False, reason="k_EResultFileNotFound")
+        harness.poll(2)
+        errors = [f for e, f in harness.logger.events if e == "error"]
+        outcomes = [d for d in harness.logger.decisions() if "failed (" in d]
+        assert len(errors) == 1, harness.logger.events
+        assert outcomes == [], "a failure was recorded as both an error and a decision"
+
+
+class TestResolveFailureHasItsOwnReason:
+    def test_a_failing_resolve_is_not_labelled_gather_failed(self, protocol, content_root,
+                                                             quarantine_dir, tmp_path):
+        install(content_root, "split_pair_track", TRACK_ID)
+        install(content_root, "split_pair_race", RACE_ID)
+
+        def exploding_resolve(playlist_name, shuffle, tracks_file, logger=None):
+            raise RuntimeError("resolves to 0 tracks")
+
+        harness = Harness(protocol, resolve=exploding_resolve)
+        harness.ingest.tracks_file = str(tmp_path / "tracks.txt")
+        protocol.set_playlist_name("demo")
+        write_result(protocol, TRACK_ID)
+        write_dumps(protocol)
+        harness.poll(4)
+        assert harness.ingest.last_outcome.reason == "resolve_failed"
+        assert "demo" in harness.ingest.last_outcome.detail
