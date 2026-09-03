@@ -24,6 +24,7 @@ from dashboard.control import (  # noqa: E402  (import needs the bootstrap above
     PlaylistError,
     ProtocolDir,
     TrackBootstrap,
+    WorkshopIngest,
     bootstrap_timeout,
     load_lobby_config,
     make_event_logger,
@@ -268,6 +269,17 @@ def main():
             with open(tracks_file, "w") as f:
                 f.write("# Format: TrackName,EnvironmentName,GameModeName\n")
 
+    # Auto-ingest for chat `/dl` (workshop-ingest-hardening.md §9). Constructed
+    # unconditionally and permanently, unlike the bootstrap above: it is not a one-shot
+    # first-run repair but the thing that finishes every in-game download an admin starts
+    # from the lobby -- without it, closing the loop still needs a human to SSH in and run
+    # the CLI. No playlist name is passed on purpose: poll() reads playlist_name.txt at
+    # finalize time, so a playlist switched between the /dl and the sweep is honoured for
+    # free and the machine never holds a stale copy of loop state.
+    ingest = WorkshopIngest(protocol, plugins_dir, game_dir=game_dir,
+                            tracks_file=tracks_file, shuffle=args.shuffle,
+                            project_dir=project_dir, logger=logger)
+
     # 4. Start Xvfb if not running and GUI mode is NOT enabled
     if not args.gui:
         print("[Host] Checking virtual framebuffer (Xvfb)...")
@@ -367,6 +379,13 @@ def main():
                     # simply gets picked up by check 1 above on the very next tick, now
                     # that the master list is populated -- no special case needed.
                     active_playlist = bootstrap.playlist_name
+
+            # 1c. Auto-ingest: a chat /dl writes a result nobody is waiting for. Same
+            # validate -> sweep -> gather -> resolve path as the CLI, expressed as a
+            # non-blocking state machine (workshop-ingest-hardening.md §9) -- the CLI's
+            # blocking wait stays out of this loop, by design.
+            if ingest is not None:
+                ingest.poll()
 
             # 2. Check process state and handle relaunch (every 15 seconds)
             if current_time - last_process_check >= 15.0:

@@ -42,15 +42,6 @@ def gather_tracks_and_races():
     custom_tracks_dir = os.path.expanduser("~/.config/unity3d/LuGus Studios/Liftoff/Tracks")
     custom_races_dir = os.path.expanduser("~/.config/unity3d/LuGus Studios/Liftoff/Races")
     
-    # Workshop paths. The candidate list moved to orchestrator/workshop_items.py so the
-    # in-game downloader (docs/features/doing/workshop-ingame-download.md) resolves the same
-    # directory this gatherer scans -- one answer to "where did the item land", not two
-    # (AGENTS.md rule 4). Same candidates in the same order as the list that used to be
-    # inlined here, so an existing host resolves exactly what it always did.
-    from workshop_items import workshop_content_root
-    workshop_dir = workshop_content_root()
-
-
     # Game installation paths
     config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "lobby_config.json")
     game_tracks_dir = None
@@ -72,6 +63,23 @@ def gather_tracks_and_races():
                 game_races_dir = os.path.join(game_dir, "Liftoff_Data", "Races")
         except Exception:
             pass
+
+    # Workshop paths. The candidate list lives in orchestrator/workshop_items.py so the
+    # in-game downloader (docs/features/doing/workshop-ingame-download.md) resolves the same
+    # directory this gatherer scans -- one answer to "where did the item land", not two
+    # (AGENTS.md rule 4).
+    #
+    # Resolved HERE, after game_dir, and not at the top of the function: called argless it
+    # can only ever try FPV_WORKSHOP_CONTENT_DIR and the three /home/<user>/... layouts, so
+    # the game_dir-derived candidate (<steamapps>/common/Liftoff -> <steamapps>/workshop/
+    # content/410340) never fired. In the container the install lives under /steam/... while
+    # every remaining candidate is under /home/<user>/..., so the bot scanned 0 workshop
+    # tracks -- a latent gap that predates both workshop features (evidence 3,
+    # workshop-ingest-hardening.md §3).
+    from workshop_items import workshop_content_root
+    workshop_dir = workshop_content_root(game_dir=game_dir)
+    if not workshop_dir:
+        print(f"[Host] WARNING: no workshop content root found (looked under game_dir={game_dir}).")
 
     # Gather search patterns and classify them
     track_patterns = []
