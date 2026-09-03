@@ -80,15 +80,32 @@ namespace LiftoffAutoLobby
 
             private const double ProgressLogIntervalSeconds = 15.0;
 
+            // How long to hold a queued download back while a previous outcome is still
+            // sitting unconsumed in the single-slot result file. The control plane polls it
+            // every 1-2s, so this only ever elapses when nothing is reading at all (client
+            // mode, or a stopped orchestrator) -- in which case the wait would be pointless
+            // and we proceed rather than stall the queue forever.
+            private const double ResultHandoffTimeoutSeconds = 15.0;
+
             // Long-lived, never null once registered: see the class comment (finalizer unregisters).
             private static Steamworks.Callback<Steamworks.DownloadItemResult_t> downloadResultCallback;
 
             // Same lifetime rule as downloadResultCallback -- a CallResult whose only
             // reference is a local would be finalized (and so unregistered) before Steam
-            // answers. Reusing ONE CallResult across requests is correct here and only here:
-            // a CallResult tracks a single call handle, and the download queue (§4.1) means
-            // exactly one SubscribeItem is ever in flight.
+            // answers. Reusing ONE CallResult across requests is acceptable here and only
+            // here: a CallResult tracks a single call handle, and since downloads are started
+            // only from the tick -- at most one per tick, and never while a previous outcome
+            // is unread (see ResultSlotFree) -- two subscribes are at least a second apart,
+            // far longer than a Steam call result takes. The failure mode if one ever did
+            // overlap is a dropped LOG LINE, not a dropped download: nothing branches on this
+            // result, which is why it is safe to trade the extra CallResult for the
+            // simplicity. What a failed subscribe actually costs surfaces downstream as
+            // game_listing_missing.
             private static Steamworks.CallResult<Steamworks.RemoteStorageSubscribePublishedFileResult_t> subscribeResultCallResult;
+
+            // When the current wait for a consumer to take the result file started; MinValue
+            // while the slot is free. See ResultSlotFree().
+            private static DateTime resultWaitSinceUtc = DateTime.MinValue;
 
             // The id the in-flight SubscribeItem belongs to, recorded at Set() time. Taken
             // from here rather than from a field of the result struct deliberately: we
@@ -148,18 +165,23 @@ namespace LiftoffAutoLobby
             }
 
             /// <summary>
-            /// Submit a download, starting it now when nothing is in flight and queueing it
-            /// otherwise. This is what /dl calls; the file protocol still goes through
+            /// Submit a download. ALWAYS queues; the tick is the only thing that ever starts
+            /// one. This is what /dl calls; the file protocol still goes through
             /// PollRequestFile -> TryStartDownload directly, one id at a time.
             /// </summary>
+            /// <remarks>
+            /// There is deliberately no "nothing pending, start it right now" fast path.
+            /// TryStartDownload can resolve SYNCHRONOUSLY (bad_id / already_installed /
+            /// download_rejected), so with a fast path a two-id /dl produced two Complete()
+            /// calls in a single frame: the second WriteResultFile overwrote the first in the
+            /// single-slot result file before any consumer could read it, the busy heartbeat
+            /// never got written at all (pending+queued was 0 at every tick boundary), and the
+            /// second SubscribeItem's Set() unregistered the first call handle. Queueing
+            /// unconditionally makes "at most one outcome published per tick" true by
+            /// construction. The cost is that a /dl starts up to one tick (1s) later.
+            /// </remarks>
             public static void EnqueueDownload(string id, bool announceInChat, string requestedBy)
             {
-                if (pending.Count == 0 && queued.Count == 0)
-                {
-                    TryStartDownload(id, announceInChat, requestedBy);
-                    return;
-                }
-
                 int ahead = pending.Count + queued.Count;
                 if (queued.Count >= MaxQueuedDownloads)
                 {
@@ -174,7 +196,51 @@ namespace LiftoffAutoLobby
                     AnnounceInChat = announceInChat,
                     RequestedBy = requestedBy,
                 });
-                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Workshop download of {id} queued behind {ahead} other(s).");
+                if (ahead > 0)
+                {
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Workshop download of {id} queued behind {ahead} other(s).");
+                }
+                else
+                {
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Workshop download of {id} queued -- starting on the next tick.");
+                }
+            }
+
+            // True when the single-slot result file is free to receive the next outcome.
+            //
+            // workshop_download_result.txt holds ONE record. Starting a download whose
+            // outcome may land (or resolve synchronously) while the previous outcome is still
+            // unread would overwrite that outcome, and a lost result means a download nobody
+            // ever ingests -- while chat has already said "downloaded, ingesting now".
+            // Waiting for the consumer to take it is the only thing that actually prevents
+            // that; the bounded give-up keeps an install with no control plane (client mode)
+            // from wedging its own queue.
+            private static bool ResultSlotFree()
+            {
+                if (string.IsNullOrEmpty(pluginPath)) return true;
+
+                bool present;
+                try { present = File.Exists(Path.Combine(pluginPath, ResultFileName)); }
+                catch (Exception) { return true; }
+
+                if (!present)
+                {
+                    resultWaitSinceUtc = DateTime.MinValue;
+                    return true;
+                }
+                if (resultWaitSinceUtc == DateTime.MinValue)
+                {
+                    resultWaitSinceUtc = DateTime.UtcNow;
+                    return false;
+                }
+                if ((DateTime.UtcNow - resultWaitSinceUtc).TotalSeconds < ResultHandoffTimeoutSeconds)
+                {
+                    return false;
+                }
+
+                UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Nothing consumed {ResultFileName} within {ResultHandoffTimeoutSeconds:F0}s -- proceeding anyway; the earlier outcome will be overwritten. Is the orchestrator running?");
+                resultWaitSinceUtc = DateTime.MinValue;
+                return true;
             }
 
             // The batch-boundary heartbeat the auto-ingest reads (§4.1). Rewritten every tick
@@ -214,6 +280,10 @@ namespace LiftoffAutoLobby
                 // request never jumps a queued chat batch (§4.1); the CLI's own bound may trip
                 // meanwhile, and its watcher_timeout text says exactly that.
                 if (pending.Count > 0 || queued.Count > 0) return;
+
+                // Nor while a previous outcome is still unread: this request may resolve
+                // synchronously (bad_id / already_installed) and would overwrite it.
+                if (!ResultSlotFree()) return;
 
                 string requestPath = Path.Combine(pluginPath, RequestFileName);
                 if (!File.Exists(requestPath)) return;
@@ -484,10 +554,10 @@ namespace LiftoffAutoLobby
             {
                 ExpireAndLogPending();
 
-                // One at a time, one per tick: the result file carries a single outcome, so
-                // starting the next queued id only once nothing is pending is what keeps a
-                // reader from ever seeing two outcomes collapse into one file.
-                if (pending.Count == 0 && queued.Count > 0)
+                // One at a time, one per tick, and only once the previous outcome has been
+                // taken: the result file carries a single outcome, so this is what keeps a
+                // reader from ever seeing two of them collapse into one file.
+                if (pending.Count == 0 && queued.Count > 0 && ResultSlotFree())
                 {
                     QueuedDownload next = queued.Dequeue();
                     UnityEngine.Debug.Log($"[AutoLobbyPlugin] Starting queued workshop download of {next.IdText} ({queued.Count} still queued).");
