@@ -548,3 +548,71 @@ class TestRootOwnershipHandover:
         monkeypatch.setattr(os, "chown", boom)
         proto.set_lobby_name("Test Lobby")
         assert proto.read_text("lobby_name.txt") == "Test Lobby"
+
+
+class TestConditionalResultConsume:
+    """`accept` makes consuming the single-slot result file conditional AND atomic
+    (workshop-ingest-hardening review, cluster B + finding 6, 2026-09-04).
+
+    Two consumers poll this one file -- the blocking CLI and the orchestrator's
+    auto-ingest -- and each must leave the other's outcomes alone. Checking one read and
+    consuming another is not enough: the record taken need not be the record that passed
+    the check, and either way a wrongly-taken result is a download nobody ever ingests."""
+
+    def write_result(self, proto, published_id):
+        os.makedirs(proto.plugins_dir, exist_ok=True)
+        with open(proto.path("workshop_download_result.txt"), "w") as fh:
+            fh.write("{}|ok|\n".format(published_id))
+
+    def test_an_accepted_record_is_consumed(self, proto):
+        self.write_result(proto, "111")
+        record = proto.consume_workshop_download_result(
+            accept=lambda r: r["published_id"] == "111")
+        assert record["published_id"] == "111"
+        assert not proto.exists("workshop_download_result.txt")
+
+    def test_a_rejected_record_is_left_exactly_where_it_was(self, proto):
+        self.write_result(proto, "999")
+        assert proto.consume_workshop_download_result(
+            accept=lambda r: r["published_id"] == "111") is None
+        assert proto.read_workshop_download_result()["published_id"] == "999"
+
+    def test_no_predicate_still_consumes_anything(self, proto):
+        self.write_result(proto, "999")
+        assert proto.consume_workshop_download_result()["published_id"] == "999"
+        assert not proto.exists("workshop_download_result.txt")
+
+    def test_the_record_returned_is_the_record_the_predicate_saw(self, proto):
+        """The plugin can rewrite the file between the peek and the consume. Whatever
+        comes back must be what was checked -- otherwise the auto-ingest can start a batch
+        on a result the CLI is blocking on, and the CLI times out for nothing."""
+        self.write_result(proto, "111")
+        seen = []
+
+        def accept(record):
+            seen.append(record["published_id"])
+            if len(seen) == 1:
+                # Simulate the plugin's next tick landing right here, between the peek
+                # and the rename that claims the bytes.
+                self.write_result(proto, "999")
+            return record["published_id"] == "111"
+
+        record = proto.consume_workshop_download_result(accept=accept)
+        assert seen == ["111", "999"], (
+            "the record actually taken must be re-checked, not assumed to be the peeked one")
+        assert record is None, "it took a record the predicate never approved"
+        assert proto.read_workshop_download_result()["published_id"] == "999", (
+            "the outcome that arrived mid-consume was destroyed")
+
+    def test_a_half_written_line_is_never_consumed(self, proto):
+        os.makedirs(proto.plugins_dir, exist_ok=True)
+        with open(proto.path("workshop_download_result.txt"), "w") as fh:
+            fh.write("111|o")
+        assert proto.consume_workshop_download_result(accept=lambda r: True) is None
+        assert proto.exists("workshop_download_result.txt")
+
+    def test_no_staging_file_is_left_behind(self, proto):
+        self.write_result(proto, "111")
+        proto.consume_workshop_download_result()
+        leftovers = [n for n in os.listdir(proto.plugins_dir) if ".consuming." in n]
+        assert leftovers == []

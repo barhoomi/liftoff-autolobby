@@ -393,7 +393,7 @@ class ProtocolDir:
         """Parsed ``workshop_download_result.txt``, or None when absent/half-written."""
         return parse_workshop_download_result(self.read_text("workshop_download_result.txt"))
 
-    def consume_workshop_download_result(self):
+    def consume_workshop_download_result(self, accept=None):
         """Read the result file and delete it, returning the parsed record (or None).
 
         The ONLY sanctioned mutation of ``workshop_download_result.txt`` from the control
@@ -401,17 +401,58 @@ class ProtocolDir:
         reading is what keeps it a one-shot signal: leaving it behind would make the next
         download request read a stale outcome. A file present but not yet parseable is
         left alone -- deleting a half-written line would destroy the real result.
+
+        ``accept(record) -> bool`` makes the consume **conditional and atomic**: a record
+        the predicate rejects is left exactly where it was, and the record returned is
+        provably the one the predicate saw. Both consumers need this and neither can get it
+        by reading first and consuming after:
+
+        - the blocking CLI must not eat a result belonging to a chat ``/dl`` -- the
+          auto-ingest would then never see that download at all;
+        - the auto-ingest must not eat a result the CLI has claimed -- the CLI would then
+          sit out its whole timeout and report a false ``watcher_timeout``.
+
+        The claim is staked with ``os.rename``, atomic within the directory: once the file
+        has been renamed aside, nothing can read or overwrite the bytes about to be
+        returned. If the plugin replaced the file in the microseconds between the peek and
+        the rename with a record the predicate would refuse, it is put back rather than
+        dropped.
         """
         with self.lock():
             record = self.read_workshop_download_result()
             if record is None:
                 return None
+            if accept is not None and not accept(record):
+                return None
+
+            source = self.path(WORKSHOP_RESULT_FILE)
+            staged = "{}.consuming.{}".format(source, os.getpid())
             try:
-                os.remove(self.path("workshop_download_result.txt"))
+                os.rename(source, staged)
             except OSError as e:
-                if e.errno != errno.ENOENT:
-                    raise
-            return record
+                if e.errno == errno.ENOENT:
+                    return None  # taken between the peek and the rename
+                raise
+            try:
+                with open(staged, "r", encoding="utf-8") as f:
+                    raw = f.read()
+            finally:
+                try:
+                    os.remove(staged)
+                except OSError as e:  # pragma: no cover - we just renamed it into place
+                    if e.errno != errno.ENOENT:
+                        raise
+
+            taken = parse_workshop_download_result(raw)
+            if taken is None:  # pragma: no cover - the peek above already parsed it
+                return record
+            if accept is not None and not accept(taken):
+                # The plugin overwrote the file between the peek and the rename with an
+                # outcome this caller may not take. Put it back: losing it would strand a
+                # download that nobody ever ingests.
+                self._atomic_write(WORKSHOP_RESULT_FILE, raw)
+                return None
+            return taken
 
     def clear_shuffle_order(self):
         """Delete the plugin's persisted shuffle deal so it re-deals from scratch. The
