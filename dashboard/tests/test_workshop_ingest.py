@@ -426,3 +426,25 @@ class TestPlaylistIsReadLate:
         harness.poll(4)
         assert harness.calls["gather"] == 1
         assert "resolve" not in harness.calls
+
+
+class TestUnsubscribeBatching:
+    def test_two_rejected_members_produce_ONE_request_carrying_BOTH_ids(
+            self, harness, protocol, content_root, quarantine_dir):
+        """workshop_unsubscribe_request.txt is one-shot: the plugin reads and deletes it
+        on its 1s tick. Writing it once per rejected member would mean the second write
+        silently replaced the first, and the first item would stay subscribed -- free to
+        be re-downloaded by Steam and listed by the next sweep."""
+        install(content_root, "unsupported_env_item", TRACK_ID)
+        install(content_root, "unsafe_name_item", RACE_ID)
+        set_busy(protocol, count=2)
+        write_result(protocol, TRACK_ID)
+        harness.poll()
+        write_result(protocol, RACE_ID)
+        harness.poll()
+        os.remove(protocol.path("workshop_download_busy.txt"))
+        harness.poll(2)
+
+        assert sorted(protocol.read_lines("workshop_unsubscribe_request.txt")) == \
+            sorted([TRACK_ID, RACE_ID])
+        assert harness.ingest.last_outcome.reason == REASON_VALIDATION_FAILED

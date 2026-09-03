@@ -308,6 +308,7 @@ def validate_and_quarantine_batch(item_dirs, race_search_dirs=None, validate=Non
     quarantined = {}
     rejected_reasons = {}
     warnings = {}
+    to_unsubscribe = []
 
     for published_id, item_dir in item_dirs.items():
         report = by_dir.get(item_dir)
@@ -345,15 +346,23 @@ def validate_and_quarantine_batch(item_dirs, race_search_dirs=None, validate=Non
                     published_id, exc), context=DECISION_KIND)
             continue
 
-        if protocol is not None:
-            try:
-                protocol.request_workshop_unsubscribe([published_id])
-            except Exception as exc:
-                print("[Workshop] ERROR: failed to request unsubscribe of {}: {}".format(
-                    published_id, exc))
-                if logger is not None:
-                    logger.error("failed to request unsubscribe of {}: {}".format(
-                        published_id, exc), context=DECISION_KIND)
+        to_unsubscribe.append(published_id)
+
+    # ONE request for the whole batch, after the loop -- not one per member as the feature
+    # doc's §1.4 wording suggests. workshop_unsubscribe_request.txt is a one-shot file the
+    # plugin reads and deletes on its 1s tick, so two writes microseconds apart would mean
+    # the second silently replaces the first and the first id is never unsubscribed. The
+    # file's own format (up to 16 ids, one per line) is what this batching is for. Failure
+    # is logged and swallowed: it must never mask the rejection it accompanies.
+    if protocol is not None and to_unsubscribe:
+        try:
+            protocol.request_workshop_unsubscribe(to_unsubscribe)
+        except Exception as exc:
+            print("[Workshop] ERROR: failed to request unsubscribe of {}: {}".format(
+                ", ".join(to_unsubscribe), exc))
+            if logger is not None:
+                logger.error("failed to request unsubscribe of {}: {}".format(
+                    ", ".join(to_unsubscribe), exc), context=DECISION_KIND)
 
     return surviving, reports, {
         "quarantined": quarantined,
