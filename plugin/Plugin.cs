@@ -439,6 +439,7 @@ namespace LiftoffAutoLobby
             // roles, and this is after the SteamAPI.Init() block above so Steam is up before the
             // first request can reach SteamUGC. Everything else lives in plugin/WorkshopDownloader.cs.
             WorkshopDownloader.Tick();
+            SweepRefresh.Tick();
 
             string sceneName = SceneManager.GetActiveScene().name;
             if (sceneName != lastSceneName)

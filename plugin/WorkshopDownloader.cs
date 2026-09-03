@@ -44,10 +44,31 @@ namespace LiftoffAutoLobby
             //     the next launch with no memory of the earlier attempt.
             //   workshop_download_result.txt   written by the plugin on completion, one line
             //     "<published_file_id>|<ok|fail>|<reason>"; reason is empty on success (or
-            //     "already_installed"), else bad_id / download_rejected / <EResult name> / timeout.
-            //     Consumed (read + deleted) by the control plane.
+            //     "already_installed"), else bad_id / download_rejected / queue_full /
+            //     <EResult name> / timeout. Consumed (read + deleted) by the control plane.
+            //   workshop_unsubscribe_request.txt  written by the control plane after it
+            //     quarantines a rejected item (workshop-ingest-hardening.md §1.4): up to 16
+            //     decimal ids, one per line. Same one-shot discipline as the request file --
+            //     deleted the instant the plugin starts acting on it.
+            //   workshop_download_busy.txt     written by the plugin on EVERY tick while any
+            //     download is pending or queued (content: the outstanding count), deleted on
+            //     the tick that count reaches 0. It is a heartbeat, not a flag: the refreshed
+            //     mtime is what lets the auto-ingest tell "still downloading" from "the file
+            //     was left behind by a process that died" (workshop-ingest-hardening.md §4.1).
             public const string RequestFileName = "workshop_download_request.txt";
             public const string ResultFileName = "workshop_download_result.txt";
+            public const string UnsubscribeRequestFileName = "workshop_unsubscribe_request.txt";
+            public const string BusyFileName = "workshop_download_busy.txt";
+
+            // Cap on the ids one workshop_unsubscribe_request.txt may carry -- the control
+            // plane writes one line per quarantined batch member, and a batch is at most a
+            // handful of items. A file longer than this is junk, not a request.
+            public const int MaxUnsubscribeIdsPerRequest = 16;
+
+            // FIFO depth for /dl submissions waiting on the in-flight download. Small on
+            // purpose: the queue exists to make `/dl <track_id> <race_id>` work, not to be a
+            // job scheduler, and each entry can cost up to TimeoutSeconds.
+            public const int MaxQueuedDownloads = 8;
 
             // Matches the game's own PopupShareContent.RoutineCheckItemUpdateProgress budget
             // (120s, found in the spike's decompile) rather than inventing a new number.
@@ -61,6 +82,24 @@ namespace LiftoffAutoLobby
 
             // Long-lived, never null once registered: see the class comment (finalizer unregisters).
             private static Steamworks.Callback<Steamworks.DownloadItemResult_t> downloadResultCallback;
+
+            // Same lifetime rule as downloadResultCallback -- a CallResult whose only
+            // reference is a local would be finalized (and so unregistered) before Steam
+            // answers. Reusing ONE CallResult across requests is correct here and only here:
+            // a CallResult tracks a single call handle, and the download queue (§4.1) means
+            // exactly one SubscribeItem is ever in flight.
+            private static Steamworks.CallResult<Steamworks.RemoteStorageSubscribePublishedFileResult_t> subscribeResultCallResult;
+
+            // The id the in-flight SubscribeItem belongs to, recorded at Set() time. Taken
+            // from here rather than from a field of the result struct deliberately: we
+            // already know the id, and this keeps the log line independent of the pinned
+            // SDK's exact RemoteStorageSubscribePublishedFileResult_t layout.
+            private static ulong subscribeInFlightId;
+
+            // Confirms SteamUGC.UnsubscribeItem landed (workshop-ingest-hardening.md §1.4).
+            // Nothing branches on it -- it exists so a quarantine that failed to detach the
+            // item from the bot account is visible in the log instead of being silent.
+            private static Steamworks.Callback<Steamworks.RemoteStoragePublishedFileUnsubscribed_t> unsubscribedCallback;
 
             // Keyed by PublishedFileId_t.m_PublishedFileId so OnDownloadItemResult can match an
             // async completion back to the request that started it. The file protocol only allows
@@ -78,13 +117,29 @@ namespace LiftoffAutoLobby
                 public string RequestedBy;    // chat display name, for the follow-up message
             }
 
-            // Called once per second from RunTick (Plugin.cs). Cheap when idle: one File.Exists.
+            // Submissions waiting for the in-flight download to resolve. Only /dl fills this
+            // (the file protocol stays strictly one id at a time -- PollRequestFile refuses to
+            // read while anything is pending OR queued), which is what keeps the single result
+            // file a one-outcome-at-a-time channel.
+            private static readonly Queue<QueuedDownload> queued = new Queue<QueuedDownload>();
+
+            private class QueuedDownload
+            {
+                public string IdText;
+                public bool AnnounceInChat;
+                public string RequestedBy;
+            }
+
+            // Called once per second from RunTick (Plugin.cs). Cheap when idle: two File.Exists
+            // (the request file and the busy marker) plus one for the unsubscribe request.
             public static void Tick()
             {
                 try
                 {
                     PollRequestFile();
+                    PollUnsubscribeRequestFile();
                     ServicePending();
+                    UpdateBusyMarker();
                 }
                 catch (Exception ex)
                 {
@@ -92,14 +147,73 @@ namespace LiftoffAutoLobby
                 }
             }
 
+            /// <summary>
+            /// Submit a download, starting it now when nothing is in flight and queueing it
+            /// otherwise. This is what /dl calls; the file protocol still goes through
+            /// PollRequestFile -> TryStartDownload directly, one id at a time.
+            /// </summary>
+            public static void EnqueueDownload(string id, bool announceInChat, string requestedBy)
+            {
+                if (pending.Count == 0 && queued.Count == 0)
+                {
+                    TryStartDownload(id, announceInChat, requestedBy);
+                    return;
+                }
+
+                int ahead = pending.Count + queued.Count;
+                if (queued.Count >= MaxQueuedDownloads)
+                {
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Refusing to queue workshop download of '{id}': {queued.Count} already queued (cap {MaxQueuedDownloads}).");
+                    Complete(id == null ? "" : id.Trim(), false, "queue_full", announceInChat, requestedBy);
+                    return;
+                }
+
+                queued.Enqueue(new QueuedDownload
+                {
+                    IdText = id,
+                    AnnounceInChat = announceInChat,
+                    RequestedBy = requestedBy,
+                });
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] Workshop download of {id} queued behind {ahead} other(s).");
+            }
+
+            // The batch-boundary heartbeat the auto-ingest reads (§4.1). Rewritten every tick
+            // while anything is outstanding so a reader can distinguish "still working" from
+            // "a crashed process left this behind"; deleted as soon as nothing is outstanding,
+            // which on the first idle tick after launch also clears a marker a previous
+            // process died holding.
+            private static void UpdateBusyMarker()
+            {
+                if (string.IsNullOrEmpty(pluginPath)) return;
+                string path = Path.Combine(pluginPath, BusyFileName);
+                int outstanding = pending.Count + queued.Count;
+                try
+                {
+                    if (outstanding > 0)
+                    {
+                        File.WriteAllText(path, outstanding.ToString(CultureInfo.InvariantCulture) + "\n");
+                    }
+                    else if (File.Exists(path))
+                    {
+                        File.Delete(path);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to update {BusyFileName}: {ex.Message}");
+                }
+            }
+
             private static void PollRequestFile()
             {
                 if (string.IsNullOrEmpty(pluginPath)) return;
 
-                // One at a time: while a download is in flight the request file is left untouched,
-                // so a second request simply waits its turn instead of clobbering the single
-                // result file. No new reason code, no queue state to keep in sync.
-                if (pending.Count > 0) return;
+                // One at a time: while a download is in flight -- or a /dl batch is still
+                // queued behind it -- the request file is left untouched, so a second request
+                // simply waits its turn instead of clobbering the single result file. A file
+                // request never jumps a queued chat batch (§4.1); the CLI's own bound may trip
+                // meanwhile, and its watcher_timeout text says exactly that.
+                if (pending.Count > 0 || queued.Count > 0) return;
 
                 string requestPath = Path.Combine(pluginPath, RequestFileName);
                 if (!File.Exists(requestPath)) return;
@@ -127,6 +241,63 @@ namespace LiftoffAutoLobby
                 TryStartDownload(raw, announceInChat: false, requestedBy: null);
             }
 
+            // workshop-ingest-hardening.md §1.4: the control plane quarantines a rejected item
+            // and THEN asks for it to be unsubscribed. Unsubscribing is what stops Steam
+            // silently re-downloading the item back into the content root (and what keeps it
+            // out of SteamUGC.GetSubscribedItems, i.e. out of the next availability sweep).
+            // Same read -> delete-before-acting -> act discipline as PollRequestFile: an
+            // unsubscribe replayed forever after a crash would be worse than one missed.
+            private static void PollUnsubscribeRequestFile()
+            {
+                if (string.IsNullOrEmpty(pluginPath)) return;
+
+                string requestPath = Path.Combine(pluginPath, UnsubscribeRequestFileName);
+                if (!File.Exists(requestPath)) return;
+
+                string[] lines;
+                try
+                {
+                    lines = File.ReadAllLines(requestPath);
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Failed to read {UnsubscribeRequestFileName}: {ex.Message}");
+                    return; // transient read error (e.g. mid-replace): retry on the next tick
+                }
+
+                try { File.Delete(requestPath); }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] Failed to delete {UnsubscribeRequestFileName}: {ex.Message} -- refusing to process it, it would be reprocessed forever.");
+                    return;
+                }
+
+                EnsureCallbacksRegistered();
+
+                int handled = 0;
+                foreach (string line in lines)
+                {
+                    if (handled >= MaxUnsubscribeIdsPerRequest)
+                    {
+                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] {UnsubscribeRequestFileName} carried more than {MaxUnsubscribeIdsPerRequest} ids -- ignoring the rest.");
+                        break;
+                    }
+                    string text = (line ?? "").Trim();
+                    if (text.Length == 0) continue;
+
+                    ulong raw;
+                    if (!ulong.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out raw) || raw == 0)
+                    {
+                        UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Ignoring '{text}' in {UnsubscribeRequestFileName}: not a published-file id.");
+                        continue;
+                    }
+
+                    handled++;
+                    Steamworks.SteamUGC.UnsubscribeItem((Steamworks.PublishedFileId_t)raw);
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] SteamUGC.UnsubscribeItem({raw}) issued.");
+                }
+            }
+
             /// <summary>
             /// Start a workshop download. Returns true when the request reached Steam and a
             /// callback is now awaited; false when it resolved immediately (bad id, already
@@ -149,21 +320,47 @@ namespace LiftoffAutoLobby
                 // `return (PublishedFileId_t)ulong.Parse(s);`) -- same cast, same DLL.
                 Steamworks.PublishedFileId_t id = (Steamworks.PublishedFileId_t)raw;
 
+                // Register BEFORE any Steam call: a result callback can in principle arrive
+                // before the call that triggered it returns, and a late registration would
+                // miss it.
+                EnsureCallbacksRegistered();
+
+                // Subscribe FIRST, unconditionally, before any state inspection
+                // (workshop-ingest-hardening.md §1.1). The game enumerates the content it will
+                // offer from SteamUGC.GetSubscribedItems (spike Q5, decompile-confirmed), not
+                // from what happens to be on disk -- so a DownloadItem-only fetch lands files
+                // the game never lists, which is exactly the failure this fixes. Subscribing is
+                // idempotent for an already-subscribed item, so there is no "should I?" branch.
+                // The returned SteamAPICall_t is a handle, NOT a success signal (AGENTS.md rule
+                // 2/3): nothing branches on it, and a failed subscription surfaces downstream as
+                // the control plane's game_listing_missing, which is the check that matters.
+                subscribeInFlightId = raw;
+                Steamworks.SteamAPICall_t call = Steamworks.SteamUGC.SubscribeItem(id);
+                UnityEngine.Debug.Log($"[AutoLobbyPlugin] SteamUGC.SubscribeItem({raw}) issued (call={call.m_SteamAPICall}).");
+                if (subscribeResultCallResult != null) subscribeResultCallResult.Set(call);
+
                 // Already on disk? Mirrors the game's own state check (spike Q2/Q4) and avoids a
-                // redundant round-trip for an item subscribed in a previous session.
+                // redundant round-trip for an item subscribed in a previous session. "Installed"
+                // is Steam's manifest talking, and a manifest survives the quarantine
+                // shutil.move that took the files away (reproduced live 2026-09-03), so the
+                // folder must actually be there before this short-circuits to success -- see
+                // workshop-ingest-hardening.md §6.
                 uint state = Steamworks.SteamUGC.GetItemState(id);
                 bool installed = (state & (uint)Steamworks.EItemState.k_EItemStateInstalled) != 0;
                 bool needsUpdate = (state & (uint)Steamworks.EItemState.k_EItemStateNeedsUpdate) != 0;
                 if (installed && !needsUpdate)
                 {
-                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Workshop item {raw} is already installed (state=0x{state:X}) -- nothing to download.");
-                    Complete(raw.ToString(CultureInfo.InvariantCulture), true, "already_installed", announceInChat, requestedBy);
-                    return false;
+                    ulong sizeOnDisk; string folder; uint timeStamp;
+                    bool haveInfo = Steamworks.SteamUGC.GetItemInstallInfo(id, out sizeOnDisk, out folder, 1024u, out timeStamp);
+                    bool onDisk = haveInfo && !string.IsNullOrEmpty(folder) && System.IO.Directory.Exists(folder);
+                    if (onDisk)
+                    {
+                        UnityEngine.Debug.Log($"[AutoLobbyPlugin] Workshop item {raw} is already installed (state=0x{state:X}) -- nothing to download.");
+                        Complete(raw.ToString(CultureInfo.InvariantCulture), true, "already_installed", announceInChat, requestedBy);
+                        return false;
+                    }
+                    UnityEngine.Debug.LogWarning($"[AutoLobbyPlugin] Workshop item {raw} reports installed (state=0x{state:X}) but its folder is missing (folder='{folder}') — downloading again.");
                 }
-
-                // Register BEFORE asking for the download: the result callback can in principle
-                // arrive before DownloadItem returns, and a late registration would miss it.
-                EnsureCallbackRegistered();
 
                 bool accepted = Steamworks.SteamUGC.DownloadItem(id, true);
                 if (!accepted)
@@ -190,11 +387,60 @@ namespace LiftoffAutoLobby
                 return true;
             }
 
-            private static void EnsureCallbackRegistered()
+            private static void EnsureCallbacksRegistered()
             {
-                if (downloadResultCallback != null) return;
-                downloadResultCallback = Steamworks.Callback<Steamworks.DownloadItemResult_t>.Create(OnDownloadItemResult);
-                UnityEngine.Debug.Log("[AutoLobbyPlugin] Registered Callback<DownloadItemResult_t> (kept in a static field so the finalizer can't unregister it).");
+                if (downloadResultCallback == null)
+                {
+                    downloadResultCallback = Steamworks.Callback<Steamworks.DownloadItemResult_t>.Create(OnDownloadItemResult);
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Registered Callback<DownloadItemResult_t> (kept in a static field so the finalizer can't unregister it).");
+                }
+                if (subscribeResultCallResult == null)
+                {
+                    subscribeResultCallResult = Steamworks.CallResult<Steamworks.RemoteStorageSubscribePublishedFileResult_t>.Create(OnSubscribeItemResult);
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Registered CallResult<RemoteStorageSubscribePublishedFileResult_t> (evidence only -- nothing branches on it).");
+                }
+                if (unsubscribedCallback == null)
+                {
+                    unsubscribedCallback = Steamworks.Callback<Steamworks.RemoteStoragePublishedFileUnsubscribed_t>.Create(OnPublishedFileUnsubscribed);
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Registered Callback<RemoteStoragePublishedFileUnsubscribed_t>.");
+                }
+            }
+
+            // Evidence only: a subscription failure is NOT a download failure, and this never
+            // writes the result file, fails the download, or gates anything. What a failed
+            // subscribe actually costs shows up downstream as the control plane's
+            // game_listing_missing -- the check that reflects the property we care about
+            // ("does the game list this track"), rather than the call that was supposed to
+            // cause it.
+            private static void OnSubscribeItemResult(Steamworks.RemoteStorageSubscribePublishedFileResult_t cb, bool ioFailure)
+            {
+                try
+                {
+                    string idText = subscribeInFlightId.ToString(CultureInfo.InvariantCulture);
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] SubscribeItem result for {idText}: {cb.m_eResult} (ioFailure={ioFailure})");
+                    LogJsonEvent("workshop_subscribe_result",
+                        ("id", idText),
+                        ("result", cb.m_eResult.ToString()));
+                }
+                catch (Exception ex)
+                {
+                    // Never throw back into Steam's callback dispatch.
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] OnSubscribeItemResult failed: {ex}");
+                }
+            }
+
+            private static void OnPublishedFileUnsubscribed(Steamworks.RemoteStoragePublishedFileUnsubscribed_t cb)
+            {
+                try
+                {
+                    ulong id = cb.m_nPublishedFileId.m_PublishedFileId;
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Unsubscribed {id} (app {cb.m_nAppID.m_AppId}).");
+                    LogJsonEvent("workshop_unsubscribed", ("id", id.ToString(CultureInfo.InvariantCulture)));
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError($"[AutoLobbyPlugin] OnPublishedFileUnsubscribed failed: {ex}");
+                }
             }
 
             private static void OnDownloadItemResult(Steamworks.DownloadItemResult_t cb)
@@ -235,6 +481,21 @@ namespace LiftoffAutoLobby
             // Timeouts + progress logging. Progress is for humans only: GetItemDownloadInfo is
             // NEVER used as a completion signal (rule 3) -- only DownloadItemResult_t is.
             private static void ServicePending()
+            {
+                ExpireAndLogPending();
+
+                // One at a time, one per tick: the result file carries a single outcome, so
+                // starting the next queued id only once nothing is pending is what keeps a
+                // reader from ever seeing two outcomes collapse into one file.
+                if (pending.Count == 0 && queued.Count > 0)
+                {
+                    QueuedDownload next = queued.Dequeue();
+                    UnityEngine.Debug.Log($"[AutoLobbyPlugin] Starting queued workshop download of {next.IdText} ({queued.Count} still queued).");
+                    TryStartDownload(next.IdText, next.AnnounceInChat, next.RequestedBy);
+                }
+            }
+
+            private static void ExpireAndLogPending()
             {
                 if (pending.Count == 0) return;
 
@@ -298,6 +559,13 @@ namespace LiftoffAutoLobby
                     ("reason", string.IsNullOrEmpty(reason) ? null : reason),
                     ("requested_by", requestedBy));
 
+                // A landed item is only *playable* once the game's own Environment x GameMode
+                // sweep has seen it, and that sweep is cached across rotations -- so every
+                // success re-arms it (workshop-ingest-hardening.md §2.4). already_installed
+                // included: that path now (re-)subscribes too, and the game may never have
+                // listed the item before.
+                if (ok) SweepRefresh.Arm($"workshop_download:{idText}");
+
                 if (!announceInChat) return;
                 // Queued, not sent directly: the callback can resolve minutes later, while the bot
                 // is mid-race or between rooms, where SendChatMessage reliably fails. The queue is
@@ -305,8 +573,8 @@ namespace LiftoffAutoLobby
                 if (ok)
                 {
                     string extra = reason == "already_installed"
-                        ? " (it was already installed)"
-                        : " — it becomes rotatable at the next track gather.";
+                        ? " (it was already installed; re-subscribed)"
+                        : " — ingesting now; it becomes rotatable after the next availability sweep.";
                     QueueChatMessage($"{FormatTag("ADMIN", activeTheme.adminTagColor)} Workshop item {FormatVariable(idText)} downloaded{extra}");
                 }
                 else
