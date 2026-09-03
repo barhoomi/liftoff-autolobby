@@ -424,3 +424,127 @@ class TestEnqueueSay:
             if say_re.match(n)
         )
         assert written == list(range(1, 11))
+
+
+class TestWorkshopUnsubscribeRequest:
+    """workshop-ingest-hardening.md §1.4 -- what a quarantine writes so Steam cannot
+    silently re-download the item it just rejected."""
+
+    def test_one_id_is_written_one_per_line(self, proto):
+        proto.request_workshop_unsubscribe(["3766917302"])
+        assert proto.read_text("workshop_unsubscribe_request.txt") == "3766917302"
+        assert proto.read_lines("workshop_unsubscribe_request.txt") == ["3766917302"]
+
+    def test_several_ids_keep_their_order(self, proto):
+        proto.request_workshop_unsubscribe([111, "222", 333])
+        assert proto.read_lines("workshop_unsubscribe_request.txt") == ["111", "222", "333"]
+
+    def test_a_non_numeric_id_is_refused(self, proto):
+        # Unlike the download request there is no result file to carry a `bad_id` back,
+        # so junk would be dropped silently by the plugin. Refuse it here instead.
+        with pytest.raises(ValueError):
+            proto.request_workshop_unsubscribe(["../../etc/passwd"])
+        assert not proto.exists("workshop_unsubscribe_request.txt")
+
+    def test_an_empty_request_is_refused(self, proto):
+        with pytest.raises(ValueError):
+            proto.request_workshop_unsubscribe([])
+
+    def test_more_ids_than_the_plugin_reads_is_refused(self, proto):
+        with pytest.raises(ValueError):
+            proto.request_workshop_unsubscribe([str(i) for i in range(100, 100 + 17)])
+
+
+class TestWorkshopDownloadClaim:
+    """§9.4 -- control-plane-internal arbitration between the blocking CLI and the
+    orchestrator's auto-ingest, which both poll the single result file."""
+
+    def test_claiming_then_releasing_round_trips(self, proto):
+        proto.claim_workshop_downloads(["111", "222"])
+        ids, mtime = proto.read_workshop_download_claim()
+        assert ids == ["111", "222"]
+        assert mtime is not None
+        assert proto.release_workshop_downloads() is True
+        assert proto.read_workshop_download_claim() == ([], None)
+
+    def test_reclaiming_refreshes_the_mtime(self, proto):
+        proto.claim_workshop_downloads(["111"])
+        _, first = proto.read_workshop_download_claim()
+        os.utime(proto.path("workshop_download_claim.txt"), (first - 100, first - 100))
+        proto.claim_workshop_downloads(["111"])
+        _, second = proto.read_workshop_download_claim()
+        assert second > first - 100
+
+    def test_the_claim_file_is_control_plane_writable_and_the_busy_marker_is_not(self):
+        assert "workshop_download_claim.txt" in WRITABLE
+        assert "workshop_unsubscribe_request.txt" in WRITABLE
+        assert "workshop_download_busy.txt" in READ_ONLY
+
+
+class TestRootOwnershipHandover:
+    """§8.3 -- `docker compose exec` defaults to root, so anything the control plane
+    creates while root must be handed to the user that owns the plugins directory, or the
+    plugin (botuser) cannot write it afterwards. Reproduced live 2026-09-03: /track
+    answered "Access denied" until a human ran chown."""
+
+    @staticmethod
+    def pretend_dir_is_botusers(proto, monkeypatch):
+        """os.stat(plugins_dir) reports uid/gid 1000, while every OTHER stat (the ones
+        makedirs and open do internally) keeps returning the real thing."""
+        os.makedirs(proto.plugins_dir, exist_ok=True)
+        real_stat = os.stat
+
+        class OwnedByBotuser:
+            def __init__(self, real):
+                self._real = real
+                self.st_uid = 1000
+                self.st_gid = 1000
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setattr(os, "stat", lambda p, *a, **k: (
+            OwnedByBotuser(real_stat(p, *a, **k)) if str(p) == proto.plugins_dir
+            else real_stat(p, *a, **k)))
+
+    @pytest.fixture
+    def as_root(self, proto, monkeypatch):
+        """Pretend to be root over a botuser-owned plugins dir, and record chowns."""
+        self.pretend_dir_is_botusers(proto, monkeypatch)
+        calls = []
+        monkeypatch.setattr(os, "chown", lambda p, uid, gid: calls.append((str(p), uid, gid)))
+        return calls
+
+    def test_a_written_file_is_chowned_before_the_atomic_rename(self, proto, as_root):
+        proto.set_lobby_name("Test Lobby")
+        chowned = [c for c in as_root if "lobby_name.txt" in c[0]]
+        assert chowned, as_root
+        # The TEMP file, not the target: the rename then publishes an already-correctly
+        # owned file, so the live file is never momentarily root-owned.
+        assert chowned[0][0].endswith(".tmp.{}".format(os.getpid()))
+        assert chowned[0][1:] == (1000, 1000)
+
+    def test_the_lock_file_is_chowned_too(self, proto, as_root):
+        """One layer deeper than the reported bug: .control.lock is created 0o666 BEFORE
+        umask, so a root-created one lands 0644 root:root and every later botuser writer
+        fails its os.open with EACCES."""
+        proto.set_lobby_name("Test Lobby")
+        assert any(c[0].endswith(".control.lock") and c[1:] == (1000, 1000) for c in as_root)
+
+    def test_nothing_is_chowned_when_we_are_not_root(self, proto, monkeypatch):
+        calls = []
+        monkeypatch.setattr(os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(os, "chown", lambda p, uid, gid: calls.append((p, uid, gid)))
+        proto.set_lobby_name("Test Lobby")
+        assert calls == []
+
+    def test_a_failing_chown_does_not_fail_the_write(self, proto, monkeypatch):
+        self.pretend_dir_is_botusers(proto, monkeypatch)
+
+        def boom(*args):
+            raise OSError("not permitted")
+
+        monkeypatch.setattr(os, "chown", boom)
+        proto.set_lobby_name("Test Lobby")
+        assert proto.read_text("lobby_name.txt") == "Test Lobby"
