@@ -22,6 +22,13 @@
 #       +force_install_dir /steam/Liftoff +login <STEAM_ACCOUNT> +quit
 #   (full path needed: /usr/games isn't on PATH outside an interactive login shell)
 #
+# Pulling a Steam Workshop track into the RUNNING bot (no restart). ALWAYS with
+# `--user botuser` -- `docker compose exec` defaults to root, and a root-invoked run
+# leaves root-owned protocol files under BepInEx/plugins/ that the plugin (running as
+# botuser) cannot write, which broke /track live on 2026-09-03:
+#   docker compose exec --user botuser bot python3 orchestrator/download_workshop_item.py <track_id> <race_id>
+# (Liftoff publishes a track and its race as separate workshop items; pass both ids.)
+#
 # Admin chat commands (docs/features/doing/container-seed-admin-ids.md): set ADMIN_IDS in
 # .env (simplest -- see .env.example), OR mount your own admin_ids.txt into the bot_config
 # volume at /config/admin_ids.txt (uncomment a bind mount below, or `docker compose cp`
@@ -39,6 +46,15 @@ services:
     image: *bot-image
     env_file:
       - .env
+    environment:
+      # Where Steam puts subscribed/downloaded Workshop items for AppID 410340. Belt to
+      # gather_tracks.py's braces (workshop-ingest-hardening.md §3): that resolver now
+      # derives this from the config's game_dir, but the container's install lives under
+      # /steam/... while its remaining candidates are all /home/<user>/... -- which is why
+      # the bot scanned 0 workshop tracks. Hardcoded to the GUI-first install path for the
+      # same reason FPV_GAME_DIR/FPV_PLUGINS_DIR are, below. If you run with USE_STEAMCMD=1
+      # in .env, override this to /steam/Liftoff/../workshop/content/410340.
+      FPV_WORKSHOP_CONTENT_DIR: /steam/.steam/debian-installation/steamapps/workshop/content/410340
     volumes:
       - steam_data:/steam
       - bot_logs:/logs
@@ -133,6 +149,10 @@ services:
       # with USE_STEAMCMD=1 in .env, override both of these to /steam/Liftoff(/BepInEx/plugins).
       FPV_GAME_DIR: /steam/.steam/debian-installation/steamapps/common/Liftoff
       FPV_PLUGINS_DIR: /steam/.steam/debian-installation/steamapps/common/Liftoff/BepInEx/plugins
+      # Same value and the same reasoning as the bot service's entry (see there); both
+      # containers must agree on where a workshop item landed. If you run with
+      # USE_STEAMCMD=1 in .env, override this too.
+      FPV_WORKSHOP_CONTENT_DIR: /steam/.steam/debian-installation/steamapps/workshop/content/410340
     volumes:
       # Whole volume, same as the bot service -- Compose has no way to mount only a
       # subdirectory of a named volume -- but only BepInEx/plugins under it is actually

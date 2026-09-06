@@ -54,33 +54,49 @@ from .protocol import (
     ProtocolOwnershipError,
     parse_workshop_download_result,
 )
+from .privileges import PrivilegeDrop, drop_privileges_to_owner, plan_privilege_drop
 from .shuffle_order import compute_tracks_signature, read_active_order
 from .workshop_download import (
     DownloadOutcome,
     download_workshop_item,
+    download_workshop_items,
+    wait_for_fresh_dump,
     wait_for_result,
+)
+from .workshop_ingest import (
+    BatchOutcome,
+    WorkshopIngest,
+    finalize_ingest,
+    sweep_satisfied,
+    validate_and_quarantine_batch,
 )
 
 __all__ = [
     "BOOTSTRAP_DEFAULT_TIMEOUT_SECONDS",
+    "BatchOutcome",
     "EVENT_LOG_AVAILABLE",
     "MasterTracksMissingError",
     "NullLogger",
     "PlaylistError",
     "PlaylistNotFoundError",
     "DownloadOutcome",
+    "PrivilegeDrop",
     "ProtocolDir",
     "ProtocolOwnershipError",
     "READ_ONLY",
     "RESET_ONLY",
     "TrackBootstrap",
     "WRITABLE",
+    "WorkshopIngest",
     "bepinex_log_path",
     "bootstrap_timeout",
     "config_dir",
     "compute_tracks_signature",
     "download_workshop_item",
+    "download_workshop_items",
+    "drop_privileges_to_owner",
     "cross_validate_tracks",
+    "finalize_ingest",
     "lobby_config_path",
     "load_lobby_config",
     "load_lobby_config_or_empty",
@@ -89,6 +105,7 @@ __all__ = [
     "master_list_has_tracks",
     "master_tracks_path",
     "parse_workshop_download_result",
+    "plan_privilege_drop",
     "player_log_candidates",
     "player_log_path",
     "playlists_path",
@@ -100,6 +117,9 @@ __all__ = [
     "resolve_log_dir",
     "resolve_plugins_dir",
     "round_robin_shuffle_by_environment",
+    "sweep_satisfied",
     "track_dump_ready",
+    "validate_and_quarantine_batch",
+    "wait_for_fresh_dump",
     "wait_for_result",
 ]

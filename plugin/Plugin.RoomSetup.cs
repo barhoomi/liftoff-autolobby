@@ -38,6 +38,10 @@ namespace LiftoffAutoLobby
         // (mirrors the /mode admin command's supported values) to bound the combinatorial cost.
         private static readonly string[] TrackModeDumpCandidateModes = { "Infinite Race", "Classic Race", "Dropout Race", "Survival" };
         private static bool trackModeDumpDoneThisSession = false;
+        // Set by the SweepRefresh gate in ConfigureAndCreateRoom and consumed by
+        // TryReuseCachedTrackModeDump itself, so exactly one full sweep follows one arming
+        // (workshop-ingest-hardening.md §2.3).
+        private static bool forceFullTrackModeDump = false;
         private static bool isDumpingTrackModes = false;
         private static int dumpEnvIndex2 = 0;
         private static int dumpModeIndex2 = 0;
@@ -211,6 +215,11 @@ namespace LiftoffAutoLobby
         // worse outcome than paying the one-time dump cost.
         private static bool TryReuseCachedTrackModeDump(ContentSettingsPanel contentSettings)
         {
+            // A forced re-sweep (a workshop item just landed) defeats the cache exactly once:
+            // the environment-name set the cache keys on is unchanged by a new track inside an
+            // existing environment, so nothing else here would ever notice.
+            if (forceFullTrackModeDump) { forceFullTrackModeDump = false; return false; }
+
             string dumpFilePath = Path.Combine(pluginPath, "track_mode_availability.json");
             if (!File.Exists(dumpFilePath)) return false;
 
@@ -262,6 +271,17 @@ namespace LiftoffAutoLobby
             ContentSettingsPanel contentSettings = GetPopupContentSettings(popup);
             if (contentSettings != null)
             {
+                // workshop-ingest-hardening.md §2.3. Reached only when a dump is NOT already
+                // running, so arming during a sweep leaves the flag set and produces a second
+                // sweep after this one finishes -- correct, not wasteful: the running sweep may
+                // already have walked past the new track's environment.
+                if (!isDumpingTrackModes && SweepRefresh.ConsumeArmed())
+                {
+                    trackModeDumpDoneThisSession = false;
+                    forceFullTrackModeDump = true;
+                    UnityEngine.Debug.Log("[AutoLobbyPlugin] Forced availability re-sweep: ignoring the cached track/mode dump for this pass.");
+                }
+
                 if (!isDumpingTrackModes && !trackModeDumpDoneThisSession)
                 {
                     if (TryReuseCachedTrackModeDump(contentSettings))
@@ -350,7 +370,16 @@ namespace LiftoffAutoLobby
                             WriteTrackNamesCompanion(dumpedTrackModeMap);
                             isDumpingTrackModes = false;
                             trackModeDumpDoneThisSession = true;
+                            // Load-bearing, not cosmetic (workshop-ingest-hardening.md §2.4):
+                            // ApplyRoomSettingsPopup below measures popupAge from this instant
+                            // and cancels the popup + advances rotation once it passes 45s.
+                            // Without the reset, every sweep longer than 45s would make the very
+                            // next "track not in the dropdown" check fire its timeout branch
+                            // immediately -- skipping the track with no grace period and no
+                            // Custom-tab retry.
+                            popupOpenedTime = DateTime.Now;
                             UnityEngine.Debug.Log("[AutoLobbyPlugin] Track/mode availability dump complete.");
+                            LogJsonEvent("sweep_refresh_complete", ("environments", dumpedTrackModeMap.Count));
                         }
                     }
                     return; // Pause room configuration during dumping

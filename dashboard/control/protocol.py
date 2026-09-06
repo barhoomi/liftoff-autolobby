@@ -71,7 +71,32 @@ WRITABLE = {
                                      "plugin to download in-game; the plugin deletes it the "
                                      "instant it starts processing, so it is a one-shot "
                                      "request like skip_now.txt (workshop-ingame-download.md).",
+    "workshop_unsubscribe_request.txt": "Published-file ids (decimal, one per line, max 16) the "
+                                        "plugin should SteamUGC.UnsubscribeItem. Written after a "
+                                        "rejected item is quarantined, so Steam cannot silently "
+                                        "re-download it and the next availability sweep cannot "
+                                        "list it (workshop-ingest-hardening.md 1.4). One-shot: "
+                                        "the plugin deletes it before acting.",
+    "workshop_download_claim.txt": "Control-plane INTERNAL; the plugin never reads it. The "
+                                   "published-file ids a blocking CLI run is currently driving, "
+                                   "one per line, so the orchestrator's auto-ingest leaves those "
+                                   "results for the CLI instead of racing it for the single "
+                                   "result file (workshop-ingest-hardening.md 9.4). Its mtime is "
+                                   "refreshed on every CLI poll; a stale one is ignored and "
+                                   "deleted, so a killed CLI cannot disable auto-ingest.",
 }
+
+# Names the two workshop features share between the plugin, the CLI and the auto-ingest.
+# Kept as constants so no caller ever spells one of them by hand.
+WORKSHOP_REQUEST_FILE = "workshop_download_request.txt"
+WORKSHOP_RESULT_FILE = "workshop_download_result.txt"
+WORKSHOP_UNSUBSCRIBE_REQUEST_FILE = "workshop_unsubscribe_request.txt"
+WORKSHOP_CLAIM_FILE = "workshop_download_claim.txt"
+WORKSHOP_BUSY_FILE = "workshop_download_busy.txt"
+
+# Matches plugin/WorkshopDownloader.cs's MaxUnsubscribeIdsPerRequest: a request longer
+# than this is junk, not a batch, and the plugin ignores the overflow anyway.
+MAX_UNSUBSCRIBE_IDS = 16
 
 # Plugin-owned runtime state. The plugin writes these; the control plane may ONLY reset
 # them (rotation_state.txt -> "0", shuffle_order.txt -> deleted), and only from the one
@@ -95,6 +120,13 @@ READ_ONLY = {
     "workshop_download_result.txt": "Outcome of an in-game workshop download, written by the "
                                     "plugin as '<id>|<ok|fail>|<reason>'. Consumed (read then "
                                     "deleted) via consume_workshop_download_result().",
+    "workshop_download_busy.txt": "Batch-boundary heartbeat: rewritten by the plugin on EVERY "
+                                  "tick while any download is pending or queued (content: the "
+                                  "outstanding count), deleted when none is. Absent OR stale "
+                                  "means a '/dl <track> <race>' batch is finished and safe to "
+                                  "validate as a set (workshop-ingest-hardening.md 4.1) -- the "
+                                  "refreshed mtime is what distinguishes 'still downloading' "
+                                  "from 'left behind by a process that died'.",
 }
 
 LOCK_FILENAME = ".control.lock"
@@ -188,6 +220,33 @@ class ProtocolDir:
     def exists(self, name):
         return os.path.exists(self.path(name))
 
+    def _dir_owner(self):
+        """``(uid, gid)`` to chown things we create to, or None when there is nothing to do.
+
+        Only ever non-None while running as root against a directory somebody else owns --
+        i.e. exactly the ``docker compose exec`` (defaults to root) case that left
+        root-owned protocol files the plugin, running as botuser, could not write.
+        """
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is None or geteuid() != 0:  # pragma: no cover - non-POSIX fallback
+            return None
+        try:
+            st = os.stat(self.plugins_dir)
+        except OSError:
+            return None
+        if st.st_uid == 0:
+            return None
+        return st.st_uid, st.st_gid
+
+    @staticmethod
+    def _chown_quietly(path, uid, gid):
+        """A failed chown must never turn a successful write into an exception."""
+        try:
+            os.chown(path, uid, gid)
+        except OSError as exc:
+            print("[Protocol] WARNING: could not chown {} to {}:{}: {}".format(
+                path, uid, gid, exc))
+
     @contextmanager
     def lock(self):
         """Exclusive advisory lock shared by every control-plane writer process."""
@@ -196,6 +255,13 @@ class ProtocolDir:
             return
         os.makedirs(self.plugins_dir, exist_ok=True)
         fd = os.open(self.path(LOCK_FILENAME), os.O_CREAT | os.O_RDWR, 0o666)
+        # Not hypothetical, and one layer deeper than the reported bug: the lock file is
+        # created 0o666 *before umask*, so a root-created one lands as 0644 root:root under
+        # the default umask -- after which every later botuser writer fails its
+        # os.open(..., O_RDWR) with EACCES and no control-plane write works at all.
+        owner = self._dir_owner()
+        if owner is not None:
+            self._chown_quietly(self.path(LOCK_FILENAME), owner[0], owner[1])
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
@@ -213,6 +279,11 @@ class ProtocolDir:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
+        # Chown the TEMP file, so the atomic rename publishes an already-correctly-owned
+        # file: there is never a window in which the live file is root-owned.
+        owner = self._dir_owner()
+        if owner is not None:
+            self._chown_quietly(tmp, owner[0], owner[1])
         os.replace(tmp, target)
 
     def _check_writable(self, name):
@@ -322,7 +393,7 @@ class ProtocolDir:
         """Parsed ``workshop_download_result.txt``, or None when absent/half-written."""
         return parse_workshop_download_result(self.read_text("workshop_download_result.txt"))
 
-    def consume_workshop_download_result(self):
+    def consume_workshop_download_result(self, accept=None):
         """Read the result file and delete it, returning the parsed record (or None).
 
         The ONLY sanctioned mutation of ``workshop_download_result.txt`` from the control
@@ -330,17 +401,58 @@ class ProtocolDir:
         reading is what keeps it a one-shot signal: leaving it behind would make the next
         download request read a stale outcome. A file present but not yet parseable is
         left alone -- deleting a half-written line would destroy the real result.
+
+        ``accept(record) -> bool`` makes the consume **conditional and atomic**: a record
+        the predicate rejects is left exactly where it was, and the record returned is
+        provably the one the predicate saw. Both consumers need this and neither can get it
+        by reading first and consuming after:
+
+        - the blocking CLI must not eat a result belonging to a chat ``/dl`` -- the
+          auto-ingest would then never see that download at all;
+        - the auto-ingest must not eat a result the CLI has claimed -- the CLI would then
+          sit out its whole timeout and report a false ``watcher_timeout``.
+
+        The claim is staked with ``os.rename``, atomic within the directory: once the file
+        has been renamed aside, nothing can read or overwrite the bytes about to be
+        returned. If the plugin replaced the file in the microseconds between the peek and
+        the rename with a record the predicate would refuse, it is put back rather than
+        dropped.
         """
         with self.lock():
             record = self.read_workshop_download_result()
             if record is None:
                 return None
+            if accept is not None and not accept(record):
+                return None
+
+            source = self.path(WORKSHOP_RESULT_FILE)
+            staged = "{}.consuming.{}".format(source, os.getpid())
             try:
-                os.remove(self.path("workshop_download_result.txt"))
+                os.rename(source, staged)
             except OSError as e:
-                if e.errno != errno.ENOENT:
-                    raise
-            return record
+                if e.errno == errno.ENOENT:
+                    return None  # taken between the peek and the rename
+                raise
+            try:
+                with open(staged, "r", encoding="utf-8") as f:
+                    raw = f.read()
+            finally:
+                try:
+                    os.remove(staged)
+                except OSError as e:  # pragma: no cover - we just renamed it into place
+                    if e.errno != errno.ENOENT:
+                        raise
+
+            taken = parse_workshop_download_result(raw)
+            if taken is None:  # pragma: no cover - the peek above already parsed it
+                return record
+            if accept is not None and not accept(taken):
+                # The plugin overwrote the file between the peek and the rename with an
+                # outcome this caller may not take. Put it back: losing it would strand a
+                # download that nobody ever ingests.
+                self._atomic_write(WORKSHOP_RESULT_FILE, raw)
+                return None
+            return taken
 
     def clear_shuffle_order(self):
         """Delete the plugin's persisted shuffle deal so it re-deals from scratch. The
@@ -431,6 +543,59 @@ class ProtocolDir:
         if not value:
             raise ValueError("workshop_download_request.txt needs a published file id")
         self.write_text("workshop_download_request.txt", value)
+
+    def request_workshop_unsubscribe(self, ids):
+        """Ask the plugin to ``SteamUGC.UnsubscribeItem`` each of ``ids``.
+
+        Written *after* the item has been quarantined, never before: Steam may delete an
+        unsubscribed item's content directory, which would race the ``shutil.move`` in
+        ``quarantine_item()`` and lose the very files the operator needs to diagnose the
+        rejection (workshop-ingest-hardening.md, decision 9). Unsubscribing at all is what
+        stops Steam quietly re-downloading a rejected item and keeps it out of
+        ``SteamUGC.GetSubscribedItems``, i.e. out of the next availability sweep and so out
+        of the resolver's reach.
+
+        Non-numeric ids are refused here with ``ValueError`` rather than passed through:
+        unlike the download request there is no result file to carry a ``bad_id`` back, so
+        a junk id would just be dropped silently by the plugin.
+        """
+        values = []
+        for published_id in (ids or []):
+            value = str(published_id).strip()
+            if not value.isdigit():
+                raise ValueError(
+                    "workshop_unsubscribe_request.txt takes decimal published file ids, "
+                    "got {!r}".format(published_id))
+            values.append(value)
+        if not values:
+            raise ValueError("workshop_unsubscribe_request.txt needs at least one id")
+        if len(values) > MAX_UNSUBSCRIBE_IDS:
+            raise ValueError("at most {} ids per unsubscribe request, got {}".format(
+                MAX_UNSUBSCRIBE_IDS, len(values)))
+        self.write_text(WORKSHOP_UNSUBSCRIBE_REQUEST_FILE,
+                        "".join("{}\n".format(v) for v in values))
+
+    def claim_workshop_downloads(self, ids):
+        """Mark ``ids`` as driven by a blocking CLI run, so the auto-ingest leaves them.
+
+        Re-calling this refreshes the file's mtime, which is how a legitimately long run
+        (a slow download plus a multi-minute sweep wait) avoids being treated as stale.
+        """
+        self.write_text(WORKSHOP_CLAIM_FILE,
+                        "".join("{}\n".format(str(i).strip()) for i in ids))
+
+    def read_workshop_download_claim(self):
+        """``(ids, mtime)`` of the claim file; ``([], None)`` when there is none."""
+        try:
+            mtime = os.path.getmtime(self.path(WORKSHOP_CLAIM_FILE))
+        except OSError:
+            return [], None
+        return self.read_lines(WORKSHOP_CLAIM_FILE), mtime
+
+    def release_workshop_downloads(self):
+        """Drop the claim (always from a ``finally``: an unreleased claim would make the
+        auto-ingest ignore results until the staleness bound expires)."""
+        return self.delete(WORKSHOP_CLAIM_FILE)
 
     def trigger_skip_now(self):
         """One-shot immediate-rotation request (bot-dashboard.md skip-now fix).
