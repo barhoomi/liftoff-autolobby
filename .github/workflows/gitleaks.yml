@@ -1,0 +1,28 @@
+# Secret scanning: gitleaks over the full git history (every branch fetched by checkout) on
+# each push and pull request. Default gitleaks rules plus this repo's .gitleaks.toml, whose
+# allowlist entries each say why they are there. Uses the gitleaks Docker image pinned by
+# digest (no gitleaks-action licence or token needed); findings print redacted.
+# Same scan locally: docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.21.2 git /repo --redact
+name: gitleaks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan git history for secrets
+        run: >-
+          docker run --rm -v "$PWD:/repo:ro"
+          zricethezav/gitleaks:v8.21.2@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46
+          git /repo --redact --no-banner --verbose

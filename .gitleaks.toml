@@ -1,0 +1,10 @@
+# gitleaks secret-scanning config: gitleaks' default rules, plus allowlist entries only for
+# findings verified as false positives or deliberate fakes (each says why).
+# Scan locally with Docker (history, then working tree):
+#   docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.21.2 git /repo --redact
+#   docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.21.2 dir /repo --redact
+# Added 2026-11-14 after a full-history scan of this repo (zero real secrets found).
+title = "liftoff-autolobby gitleaks config"
+
+[extend]
+useDefault = true
